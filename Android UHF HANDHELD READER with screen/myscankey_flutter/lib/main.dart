@@ -43,6 +43,7 @@ class _BiblioRfidAppState extends State<BiblioRfidApp> {
       themeMode: widget.controller.darkTheme ? ThemeMode.dark : ThemeMode.light,
       theme: ThemeData(
         useMaterial3: true,
+        fontFamily: 'Montserrat',
         colorScheme: ColorScheme.fromSeed(
           seedColor: const Color(0xFF187C6D),
           brightness: Brightness.light,
@@ -65,6 +66,7 @@ class _BiblioRfidAppState extends State<BiblioRfidApp> {
       ),
       darkTheme: ThemeData(
         useMaterial3: true,
+        fontFamily: 'Montserrat',
         colorScheme: ColorScheme.fromSeed(
           seedColor: const Color(0xFF42B39F),
           brightness: Brightness.dark,

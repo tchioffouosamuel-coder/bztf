@@ -6,7 +6,7 @@
     <meta name="theme-color" content="#163a36" />
     <title>Bibliotèque ZTF</title>
     <link rel="stylesheet" href="/vendor/sweetalert2/sweetalert2.min.css" />
-    <link rel="stylesheet" href="/styles.css?v=8" />
+    <link rel="stylesheet" href="/styles.css?v=9" />
   </head>
   <body>
     <div class="desktop-titlebar" aria-hidden="true">
@@ -16,8 +16,13 @@
     <section class="auth-screen" id="auth-screen">
       <div class="auth-panel">
         <div class="auth-brand">
-          <span class="brand-logo auth-logo"><img src="/assets/bibliorfid-logo.jpg" alt="" /></span>
-          <div><strong>Bibliotèque ZTF</strong><small>Catalogue et station RFID</small></div>
+          <span class="brand-logo auth-logo"
+            ><img src="/assets/bibliorfid-logo.jpg" alt=""
+          /></span>
+          <div>
+            <strong>Bibliotèque ZTF</strong
+            ><small>Catalogue et station RFID</small>
+          </div>
         </div>
         <div class="auth-heading">
           <p class="eyebrow" id="auth-eyebrow">Accès sécurisé</p>
@@ -31,26 +36,49 @@
           </label>
           <label class="field">
             <span>Adresse e-mail</span>
-            <input name="email" type="email" maxlength="240" autocomplete="username" required />
+            <input
+              name="email"
+              type="email"
+              maxlength="240"
+              autocomplete="username"
+              required
+            />
           </label>
           <label class="field">
             <span>Mot de passe</span>
-            <input name="password" type="password" minlength="8" autocomplete="current-password" required />
+            <input
+              name="password"
+              type="password"
+              minlength="8"
+              autocomplete="current-password"
+              required
+            />
           </label>
           <p class="auth-error hidden" id="auth-error" role="alert"></p>
-          <button class="button primary auth-submit" id="auth-submit" type="submit">
+          <button
+            class="button primary auth-submit"
+            id="auth-submit"
+            type="submit"
+          >
             <i data-lucide="shield-check"></i><span>Se connecter</span>
           </button>
         </form>
-        <p class="auth-footnote">Session privée sur ce poste · expiration après 12 heures</p>
+        <p class="auth-footnote">
+          Session privée sur ce poste · expiration après 12 heures
+        </p>
       </div>
     </section>
 
     <div class="app-shell hidden" id="app-shell">
       <aside class="sidebar" id="sidebar">
         <div class="brand">
-          <span class="brand-logo"><img src="/assets/bibliorfid-logo.jpg" alt="" /></span>
-          <span><strong>Bibliotèque ZTF</strong><small>Catalogue local</small></span>
+          <span class="brand-logo"
+            ><img src="/assets/bibliorfid-logo.jpg" alt=""
+          /></span>
+          <span
+            ><strong>Bibliotèque ZTF</strong
+            ><small>Catalogue local</small></span
+          >
         </div>
         <nav class="nav-list" aria-label="Navigation principale">
           <button class="nav-item active" data-view="dashboard">
@@ -113,8 +141,16 @@
             </button>
             <div class="user-state" title="Utilisateur connecté">
               <span class="user-avatar" id="user-avatar">U</span>
-              <span class="user-copy"><strong id="user-name">Utilisateur</strong><small id="user-role">Opérateur</small></span>
-              <button class="icon-button compact" id="logout-button" title="Se déconnecter" aria-label="Se déconnecter">
+              <span class="user-copy"
+                ><strong id="user-name">Utilisateur</strong
+                ><small id="user-role">Opérateur</small></span
+              >
+              <button
+                class="icon-button compact"
+                id="logout-button"
+                title="Se déconnecter"
+                aria-label="Se déconnecter"
+              >
                 <i data-lucide="log-out"></i>
               </button>
             </div>

@@ -1,3 +1,11 @@
+@font-face {
+  font-family: "Montserrat";
+  src: url("/assets/fonts/Montserrat-Variable.ttf") format("truetype");
+  font-style: normal;
+  font-weight: 100 900;
+  font-display: swap;
+}
+
 :root {
   color-scheme: light;
   --bg: #f4f7fa;
@@ -16,7 +24,7 @@
   --danger: #bd4148;
   --shadow: 0 10px 28px rgba(20, 48, 68, 0.09);
   --radius: 8px;
-  font-family: Inter, "Segoe UI", Arial, sans-serif;
+  font-family: "Montserrat", sans-serif;
 }
 
 [data-theme="dark"] {
