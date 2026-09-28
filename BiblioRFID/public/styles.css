@@ -1961,6 +1961,39 @@ dialog::backdrop {
   margin-top: 3px;
   color: var(--muted);
 }
+.card-scan-status {
+  margin: 16px 20px 0;
+  padding: 11px 14px;
+  display: grid;
+  grid-template-columns: 22px minmax(0, 1fr);
+  gap: 10px;
+  align-items: center;
+  background: var(--surface-soft);
+  border-left: 3px solid var(--line);
+  border-radius: 5px;
+}
+.card-scan-status strong,
+.card-scan-status span {
+  display: block;
+}
+.card-scan-status span {
+  margin-top: 2px;
+  color: var(--muted);
+  font-size: 12px;
+}
+.card-scan-status.success {
+  background: color-mix(in srgb, var(--success) 10%, var(--surface));
+  border-left-color: var(--success);
+}
+.card-scan-status.warning {
+  background: color-mix(in srgb, var(--amber) 10%, var(--surface));
+  border-left-color: var(--amber);
+}
+.card-scan-status.error {
+  background: color-mix(in srgb, var(--danger) 9%, var(--surface));
+  border-left-color: var(--danger);
+}
+#loan-form .dialog-actions .action-spacer,
 .book-detail-actions .action-spacer {
   flex: 1;
 }

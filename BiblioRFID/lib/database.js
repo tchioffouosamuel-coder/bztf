@@ -8,7 +8,12 @@ import {
 } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
-import { formatAccession, generateEpc } from "./epc.js";
+import {
+  formatAccession,
+  generateCardEpc,
+  generateEpc,
+  isCardEpc,
+} from "./epc.js";
 
 const BOOK_FIELDS = [
   "title",
@@ -186,6 +191,42 @@ export class LibraryDatabase {
       }
     }
     this.db.exec("UPDATE books SET tid = NULL WHERE tid = '';");
+
+    const subscriberColumns = new Set(
+      this.db
+        .prepare("PRAGMA table_info(subscribers)")
+        .all()
+        .map((column) => column.name),
+    );
+    for (const column of ["card_epc", "card_tid", "card_tagged_at"])
+      if (!subscriberColumns.has(column))
+        this.db.exec(`ALTER TABLE subscribers ADD COLUMN ${column} TEXT;`);
+    if (!subscriberColumns.has("sync_state"))
+      this.db.exec(
+        "ALTER TABLE subscribers ADD COLUMN sync_state TEXT NOT NULL DEFAULT 'pending';",
+      );
+    const outboxColumns = new Set(
+      this.db
+        .prepare("PRAGMA table_info(sync_outbox)")
+        .all()
+        .map((column) => column.name),
+    );
+    if (!outboxColumns.has("entity_type"))
+      this.db.exec(
+        "ALTER TABLE sync_outbox ADD COLUMN entity_type TEXT NOT NULL DEFAULT 'book';",
+      );
+    this.db.exec(`
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_subscribers_card_epc ON subscribers(card_epc) WHERE card_epc IS NOT NULL;
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_subscribers_card_tid ON subscribers(card_tid) WHERE card_tid IS NOT NULL;
+    `);
+    const withoutCard = this.db
+      .prepare("SELECT id FROM subscribers WHERE card_epc IS NULL")
+      .all();
+    const assignCard = this.db.prepare(
+      "UPDATE subscribers SET card_epc=? WHERE id=?",
+    );
+    for (const subscriber of withoutCard)
+      assignCard.run(generateCardEpc(), subscriber.id);
   }
 
   listBooks({ search = "", status = "tous", limit = null, offset = 0 } = {}) {
@@ -490,6 +531,98 @@ export class LibraryDatabase {
       .all(term, term, term, term);
   }
 
+  getSubscriber(id) {
+    return (
+      this.db.prepare("SELECT * FROM subscribers WHERE id=?").get(Number(id)) ||
+      null
+    );
+  }
+
+  /**
+   * Crée l'abonné ou met à jour ses coordonnées (clé : numéro d'abonné) et lui
+   * attribue l'EPC de sa carte. N'ouvre pas de transaction : l'appelant peut
+   * l'inclure dans la sienne.
+   */
+  upsertSubscriber(input, timestamp = new Date().toISOString()) {
+    const memberNumber = cleanText(input.member_number, 80).toUpperCase();
+    const name = cleanText(input.name, 240);
+    if (!memberNumber) throw new Error("Le numéro d'abonné est obligatoire.");
+    if (!name) throw new Error("Le nom de l'abonné est obligatoire.");
+    this.db
+      .prepare(
+        `INSERT INTO subscribers (member_number, name, email, phone, active, created_at, updated_at)
+         VALUES (?, ?, ?, ?, 1, ?, ?)
+         ON CONFLICT(member_number) DO UPDATE SET
+           name=excluded.name, email=excluded.email, phone=excluded.phone, active=1, updated_at=excluded.updated_at`,
+      )
+      .run(
+        memberNumber,
+        name,
+        cleanText(input.email, 240),
+        cleanText(input.phone, 80),
+        timestamp,
+        timestamp,
+      );
+    const subscriber = this.db
+      .prepare("SELECT * FROM subscribers WHERE member_number=?")
+      .get(memberNumber);
+    if (!subscriber.card_epc)
+      this.db
+        .prepare("UPDATE subscribers SET card_epc=? WHERE id=?")
+        .run(generateCardEpc(), subscriber.id);
+    const saved = this.getSubscriber(subscriber.id);
+    this.queueSubscriberMutation(saved);
+    return saved;
+  }
+
+  /** Abonné correspondant au tag lu, si c'est une carte encodée. */
+  recognizeCard(epc, tid) {
+    const normalizedEpc = cleanText(epc, 128).toUpperCase();
+    const normalizedTid = cleanText(tid, 128).toUpperCase();
+    if (!isCardEpc(normalizedEpc)) return null;
+    const subscriber = this.db
+      .prepare(
+        "SELECT * FROM subscribers WHERE card_epc=? AND card_tid IS NOT NULL AND active=1",
+      )
+      .get(normalizedEpc);
+    // Un EPC recopié sur un autre tag ne suffit pas : le TID doit correspondre.
+    if (!subscriber || (normalizedTid && subscriber.card_tid !== normalizedTid))
+      return null;
+    return subscriber;
+  }
+
+  markCardTagged(subscriberId, tid) {
+    const subscriber = this.getSubscriber(subscriberId);
+    if (!subscriber) throw new Error("Abonné introuvable.");
+    const normalizedTid = cleanText(tid, 128).toUpperCase();
+    if (!normalizedTid) throw new Error("Le TID de la carte est obligatoire.");
+    const book = this.db
+      .prepare("SELECT accession FROM books WHERE tid=?")
+      .get(normalizedTid);
+    if (book) throw new Error(`Ce tag est déjà lié au livre ${book.accession}.`);
+    const other = this.db
+      .prepare("SELECT name FROM subscribers WHERE card_tid=? AND id<>?")
+      .get(normalizedTid, subscriber.id);
+    if (other) throw new Error(`Ce tag est déjà la carte de ${other.name}.`);
+    const now = new Date().toISOString();
+    this.db
+      .prepare(
+        "UPDATE subscribers SET card_tid=?, card_tagged_at=?, updated_at=? WHERE id=?",
+      )
+      .run(normalizedTid, now, now, subscriber.id);
+    this.queueSubscriberMutation(this.getSubscriber(subscriber.id));
+    this.addActivity(
+      "carte",
+      "succes",
+      null,
+      `Carte encodée pour ${subscriber.name} (${subscriber.member_number})`,
+      subscriber.card_epc,
+      normalizedTid,
+      now,
+    );
+    return this.getSubscriber(subscriber.id);
+  }
+
   activeLoanForBook(bookId) {
     return (
       this.db
@@ -527,24 +660,7 @@ export class LibraryDatabase {
     const timestamp = now.toISOString();
     this.db.exec("BEGIN IMMEDIATE");
     try {
-      this.db
-        .prepare(
-          `INSERT INTO subscribers (member_number, name, email, phone, active, created_at, updated_at)
-           VALUES (?, ?, ?, ?, 1, ?, ?)
-           ON CONFLICT(member_number) DO UPDATE SET
-             name=excluded.name, email=excluded.email, phone=excluded.phone, active=1, updated_at=excluded.updated_at`,
-        )
-        .run(
-          memberNumber,
-          name,
-          cleanText(input.email, 240),
-          cleanText(input.phone, 80),
-          timestamp,
-          timestamp,
-        );
-      const subscriber = this.db
-        .prepare("SELECT * FROM subscribers WHERE member_number=?")
-        .get(memberNumber);
+      const subscriber = this.upsertSubscriber(input, timestamp);
       let subscription = this.db
         .prepare(
           "SELECT * FROM subscriptions WHERE subscriber_id=? AND status='active' AND ends_at>=? ORDER BY ends_at DESC LIMIT 1",
@@ -652,6 +768,13 @@ export class LibraryDatabase {
       .get(normalizedTid, Number(id));
     if (existing)
       throw new Error(`Ce tag est déjà lié au livre ${existing.accession}.`);
+    const card = this.db
+      .prepare("SELECT name, member_number FROM subscribers WHERE card_tid=?")
+      .get(normalizedTid);
+    if (card)
+      throw new Error(
+        `Ce tag est la carte de l'abonné ${card.name} (${card.member_number}).`,
+      );
     const now = new Date().toISOString();
     this.db
       .prepare(
@@ -736,6 +859,44 @@ export class LibraryDatabase {
     this.onMutation?.();
   }
 
+  toSyncSubscriber(subscriber) {
+    return {
+      memberNumber: subscriber.member_number,
+      name: subscriber.name,
+      email: subscriber.email || "",
+      phone: subscriber.phone || "",
+      active: Boolean(subscriber.active),
+      cardEpc: subscriber.card_epc || null,
+      cardTid: subscriber.card_tid || null,
+      cardTaggedAt: subscriber.card_tagged_at || null,
+      createdAt: subscriber.created_at,
+      updatedAt: subscriber.updated_at,
+    };
+  }
+
+  /** L'identifiant d'entité d'un abonné est son numéro d'abonné. */
+  queueSubscriberMutation(subscriber) {
+    if (!subscriber) return;
+    this.db
+      .prepare("UPDATE subscribers SET sync_state='pending' WHERE id=?")
+      .run(subscriber.id);
+    this.db
+      .prepare(
+        `INSERT INTO sync_outbox(mutation_id, operation, entity_id, payload, created_at, entity_type)
+         VALUES (?, 'upsert', ?, ?, ?, 'subscriber')
+         ON CONFLICT(entity_id) DO UPDATE SET mutation_id=excluded.mutation_id,
+           operation=excluded.operation, payload=excluded.payload,
+           created_at=excluded.created_at, entity_type=excluded.entity_type`,
+      )
+      .run(
+        randomUUID(),
+        subscriber.member_number,
+        JSON.stringify(this.toSyncSubscriber(subscriber)),
+        new Date().toISOString(),
+      );
+    this.onMutation?.();
+  }
+
   queueDeleteMutation(book) {
     if (!book?.server_id) return;
     this.db
@@ -753,7 +914,10 @@ export class LibraryDatabase {
     const books = this.db
       .prepare("SELECT * FROM books WHERE sync_state <> 'synced'")
       .all();
-    if (!books.length) return;
+    const subscribers = this.db
+      .prepare("SELECT * FROM subscribers WHERE sync_state <> 'synced'")
+      .all();
+    if (!books.length && !subscribers.length) return;
     const markPending = this.db.prepare(
       "UPDATE books SET sync_state='pending' WHERE id=?",
     );
@@ -776,6 +940,8 @@ export class LibraryDatabase {
           now,
         );
       }
+      for (const subscriber of subscribers)
+        this.queueSubscriberMutation(subscriber);
       this.db.exec("COMMIT");
     } catch (error) {
       this.db.exec("ROLLBACK");
@@ -799,10 +965,13 @@ export class LibraryDatabase {
 
   acknowledgeMutations(mutationIds) {
     const find = this.db.prepare(
-      "SELECT entity_id FROM sync_outbox WHERE mutation_id=?",
+      "SELECT entity_id, entity_type FROM sync_outbox WHERE mutation_id=?",
     );
-    const synced = this.db.prepare(
+    const bookSynced = this.db.prepare(
       "UPDATE books SET sync_state='synced' WHERE server_id=?",
+    );
+    const subscriberSynced = this.db.prepare(
+      "UPDATE subscribers SET sync_state='synced' WHERE member_number=?",
     );
     const remove = this.db.prepare(
       "DELETE FROM sync_outbox WHERE mutation_id=?",
@@ -811,7 +980,9 @@ export class LibraryDatabase {
     try {
       for (const mutationId of mutationIds) {
         const mutation = find.get(mutationId);
-        if (mutation) synced.run(mutation.entity_id);
+        if (mutation?.entity_type === "subscriber")
+          subscriberSynced.run(mutation.entity_id);
+        else if (mutation) bookSynced.run(mutation.entity_id);
         remove.run(mutationId);
       }
       this.db.exec("COMMIT");
@@ -873,6 +1044,10 @@ export class LibraryDatabase {
       for (const change of Array.isArray(changes) ? changes : []) {
         const serverId = String(change?.entityId || "");
         if (!serverId || pending.get(serverId)) continue;
+        if ((change.entityType || "book") === "subscriber") {
+          this.applyRemoteSubscriber(change, serverId);
+          continue;
+        }
         if (change.operation === "delete") {
           removeLoans.run(serverId);
           remove.run(serverId);
@@ -889,6 +1064,60 @@ export class LibraryDatabase {
       this.db.exec("ROLLBACK");
       throw new Error(`Conflit de synchronisation du catalogue : ${error.message}`);
     }
+  }
+
+  applyRemoteSubscriber(change, memberNumber) {
+    const number = cleanText(memberNumber, 80).toUpperCase();
+    if (change.operation === "delete") {
+      // Les emprunts référencent l'abonné : on le désactive sans le supprimer.
+      this.db
+        .prepare(
+          "UPDATE subscribers SET active=0, card_tid=NULL, sync_state='synced' WHERE member_number=?",
+        )
+        .run(number);
+      return;
+    }
+    const remote = change.subscriber;
+    if (!remote) return;
+    const cardEpc = cleanText(remote.cardEpc, 128).toUpperCase() || null;
+    const cardTid = cleanText(remote.cardTid, 128).toUpperCase() || null;
+    // Une carte réencodée ailleurs pour un autre abonné quitte l'ancien.
+    if (cardTid)
+      this.db
+        .prepare(
+          "UPDATE subscribers SET card_tid=NULL, card_tagged_at=NULL WHERE card_tid=? AND member_number<>?",
+        )
+        .run(cardTid, number);
+    if (cardEpc)
+      this.db
+        .prepare(
+          "UPDATE subscribers SET card_epc=NULL WHERE card_epc=? AND member_number<>?",
+        )
+        .run(cardEpc, number);
+    const now = new Date().toISOString();
+    this.db
+      .prepare(
+        `INSERT INTO subscribers (member_number, name, email, phone, active, card_epc,
+           card_tid, card_tagged_at, created_at, updated_at, sync_state)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'synced')
+         ON CONFLICT(member_number) DO UPDATE SET
+           name=excluded.name, email=excluded.email, phone=excluded.phone,
+           active=excluded.active, card_epc=COALESCE(excluded.card_epc, subscribers.card_epc),
+           card_tid=excluded.card_tid, card_tagged_at=excluded.card_tagged_at,
+           updated_at=excluded.updated_at, sync_state='synced'`,
+      )
+      .run(
+        number,
+        cleanText(remote.name || number, 240),
+        cleanText(remote.email, 240),
+        cleanText(remote.phone, 80),
+        remote.active === false ? 0 : 1,
+        cardEpc ?? generateCardEpc(),
+        cardTid,
+        cleanText(remote.cardTaggedAt, 100) || null,
+        cleanText(remote.createdAt, 100) || now,
+        cleanText(remote.updatedAt, 100) || now,
+      );
   }
 
   remoteBookValues(remote, serverId) {

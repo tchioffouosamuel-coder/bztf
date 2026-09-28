@@ -1,3 +1,4 @@
+import 'dart:convert';
 import 'dart:async';
 
 import 'package:excel/excel.dart';
@@ -206,6 +207,67 @@ void main() {
     } finally {
       controller.dispose();
       await LibraryDatabase.instance.close();
+    }
+  });
+
+  test('synchronise les abonnés et leurs cartes', () async {
+    final directory = await getDatabasesPath();
+    await LibraryDatabase.instance.close();
+    await databaseFactory.deleteDatabase(
+      path.join(directory, 'biblio_rfid.db'),
+    );
+    final database = LibraryDatabase.instance;
+    try {
+      final local = await database.saveSubscriber(
+        memberNumber: 'ab-1',
+        name: 'Local',
+      );
+      await database.markCardTagged(local.id, 'E2800000LOCAL');
+      final pending = await database.pendingMutations();
+      final mutation = pending.singleWhere(
+        (row) => row['entity_type'] == 'subscriber',
+      );
+      expect(mutation['entity_id'], 'AB-1');
+      final payload = jsonDecode(mutation['payload']! as String) as Map;
+      expect(payload['cardTid'], 'E2800000LOCAL');
+      expect(payload['cardEpc'], local.cardEpc);
+
+      await database.acknowledgeMutations([mutation['mutation_id']! as String]);
+      expect(await database.pendingMutationCount(), 0);
+
+      // La carte locale est réencodée pour AB-2 sur un autre appareil.
+      final remoteEpc = generateCardEpc();
+      final now = DateTime.now().toUtc().toIso8601String();
+      await database.applyRemoteChanges([
+        {
+          'sequence': 1,
+          'operation': 'upsert',
+          'entityId': 'AB-2',
+          'entityType': 'subscriber',
+          'book': null,
+          'subscriber': {
+            'memberNumber': 'AB-2',
+            'name': 'Distant',
+            'phone': '600',
+            'active': true,
+            'cardEpc': remoteEpc,
+            'cardTid': 'E2800000LOCAL',
+            'cardTaggedAt': now,
+            'createdAt': now,
+            'updatedAt': now,
+          },
+        },
+      ], 1);
+      expect(
+        (await database.recognizeCard(remoteEpc, 'E2800000LOCAL'))?.name,
+        'Distant',
+      );
+      expect(await database.recognizeCard(local.cardEpc!, ''), isNull);
+      expect((await database.getSubscriber(local.id))!.cardTid, isNull);
+      expect(await database.countBooks(), 0);
+      expect(await database.syncCursor(), 1);
+    } finally {
+      await database.close();
     }
   });
 

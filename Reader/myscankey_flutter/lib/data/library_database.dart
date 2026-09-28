@@ -19,7 +19,7 @@ class LibraryDatabase {
     final directory = await getDatabasesPath();
     _database = await openDatabase(
       path.join(directory, 'biblio_rfid.db'),
-      version: 4,
+      version: 5,
       onConfigure: (database) => database.execute('PRAGMA foreign_keys = ON'),
       onCreate: (database, version) async {
         await database.execute('''
@@ -63,6 +63,7 @@ class LibraryDatabase {
         await _createSyncTables(database);
         await _createLendingTables(database);
         await _addSubscriberCards(database);
+        await _addSubscriberSync(database);
       },
       onUpgrade: (database, oldVersion, newVersion) async {
         if (oldVersion < 2) {
@@ -89,6 +90,7 @@ class LibraryDatabase {
         }
         if (oldVersion < 3) await _createLendingTables(database);
         if (oldVersion < 4) await _addSubscriberCards(database);
+        if (oldVersion < 5) await _addSubscriberSync(database);
       },
     );
     return _database!;
@@ -392,6 +394,10 @@ class LibraryDatabase {
         {'card_tid': normalizedTid, 'card_tagged_at': now, 'updated_at': now},
         where: 'id = ?',
         whereArgs: [subscriberId],
+      );
+      await _queueSubscriber(
+        transaction,
+        await _subscriberIn(transaction, subscriberId),
       );
       await _addActivity(
         transaction,
@@ -818,6 +824,13 @@ class LibraryDatabase {
       for (final row in rows) {
         await _queueBook(transaction, Book.fromMap(row));
       }
+      final subscribers = await transaction.query(
+        'subscribers',
+        where: "sync_state <> 'synced'",
+      );
+      for (final row in subscribers) {
+        await _queueSubscriber(transaction, Subscriber.fromMap(row));
+      }
     });
   }
 
@@ -841,16 +854,17 @@ class LibraryDatabase {
       for (final mutationId in mutationIds) {
         final rows = await transaction.query(
           'sync_outbox',
-          columns: ['entity_id'],
+          columns: ['entity_id', 'entity_type'],
           where: 'mutation_id = ?',
           whereArgs: [mutationId],
           limit: 1,
         );
         if (rows.isNotEmpty) {
+          final subscriber = rows.first['entity_type'] == 'subscriber';
           await transaction.update(
-            'books',
+            subscriber ? 'subscribers' : 'books',
             {'sync_state': 'synced'},
-            where: 'server_id = ?',
+            where: subscriber ? 'member_number = ?' : 'server_id = ?',
             whereArgs: [rows.first['entity_id']],
           );
         }
@@ -886,6 +900,10 @@ class LibraryDatabase {
         final change = raw.cast<String, Object?>();
         final serverId = change['entityId']?.toString() ?? '';
         if (serverId.isEmpty) continue;
+        if ((change['entityType'] ?? 'book') == 'subscriber') {
+          await _applyRemoteSubscriber(transaction, serverId, change);
+          continue;
+        }
         if (change['operation'] == 'delete') {
           final pending = await transaction.query(
             'sync_outbox',
@@ -1050,29 +1068,143 @@ class LibraryDatabase {
     await database.execute(
       'CREATE UNIQUE INDEX IF NOT EXISTS idx_subscribers_card_tid ON subscribers(card_tid) WHERE card_tid IS NOT NULL',
     );
-    final rows = await database.query(
-      'subscribers',
-      columns: ['id', 'created_at'],
-    );
+    final rows = await database.query('subscribers', columns: ['id']);
     for (final row in rows) {
       await database.update(
         'subscribers',
-        {
-          'card_epc': _cardEpcFor(
-            row['id'] as int,
-            row['created_at'] as String,
-          ),
-        },
+        {'card_epc': generateCardEpc()},
         where: 'id = ?',
         whereArgs: [row['id']],
       );
     }
   }
 
-  static String _cardEpcFor(int id, String createdAt) => generateCardEpc(
-    DateTime.tryParse(createdAt)?.year ?? DateTime.now().year,
-    id,
+  static Future<void> _addSubscriberSync(DatabaseExecutor database) async {
+    await database.execute(
+      "ALTER TABLE subscribers ADD COLUMN sync_state TEXT NOT NULL DEFAULT 'pending'",
+    );
+    await database.execute(
+      "ALTER TABLE sync_outbox ADD COLUMN entity_type TEXT NOT NULL DEFAULT 'book'",
+    );
+  }
+
+  static Future<Subscriber> _subscriberIn(
+    DatabaseExecutor database,
+    int id,
+  ) async => Subscriber.fromMap(
+    (await database.query(
+      'subscribers',
+      where: 'id = ?',
+      whereArgs: [id],
+    )).first,
   );
+
+  /// L'identifiant d'entité d'un abonné est son numéro d'abonné.
+  static Future<void> _queueSubscriber(
+    DatabaseExecutor database,
+    Subscriber subscriber,
+  ) async {
+    await database.update(
+      'subscribers',
+      {'sync_state': 'pending'},
+      where: 'id = ?',
+      whereArgs: [subscriber.id],
+    );
+    await database.insert('sync_outbox', {
+      'mutation_id': _newId(),
+      'operation': 'upsert',
+      'entity_id': subscriber.memberNumber,
+      'entity_type': 'subscriber',
+      'payload': jsonEncode(subscriber.toSyncJson()),
+      'created_at': DateTime.now().toUtc().toIso8601String(),
+    }, conflictAlgorithm: ConflictAlgorithm.replace);
+  }
+
+  static Future<void> _applyRemoteSubscriber(
+    Transaction transaction,
+    String memberNumber,
+    Map<String, Object?> change,
+  ) async {
+    final number = memberNumber.trim().toUpperCase();
+    final pending = await transaction.query(
+      'sync_outbox',
+      where: 'entity_id = ?',
+      whereArgs: [number],
+      limit: 1,
+    );
+    if (pending.isNotEmpty) return;
+    if (change['operation'] == 'delete') {
+      // Les emprunts référencent l'abonné : on le désactive sans le supprimer.
+      await transaction.update(
+        'subscribers',
+        {'active': 0, 'card_tid': null, 'sync_state': 'synced'},
+        where: 'member_number = ?',
+        whereArgs: [number],
+      );
+      return;
+    }
+    final rawSubscriber = change['subscriber'];
+    if (rawSubscriber is! Map) return;
+    final remote = rawSubscriber.cast<String, Object?>();
+    String? upper(Object? value) {
+      final text = value?.toString().trim().toUpperCase() ?? '';
+      return text.isEmpty ? null : text;
+    }
+
+    final cardEpc = upper(remote['cardEpc']);
+    final cardTid = upper(remote['cardTid']);
+    // Une carte réencodée ailleurs pour un autre abonné quitte l'ancien.
+    if (cardTid != null) {
+      await transaction.update(
+        'subscribers',
+        {'card_tid': null, 'card_tagged_at': null},
+        where: 'card_tid = ? AND member_number <> ?',
+        whereArgs: [cardTid, number],
+      );
+    }
+    if (cardEpc != null) {
+      await transaction.update(
+        'subscribers',
+        {'card_epc': null},
+        where: 'card_epc = ? AND member_number <> ?',
+        whereArgs: [cardEpc, number],
+      );
+    }
+    final now = DateTime.now().toUtc().toIso8601String();
+    final values = <String, Object?>{
+      'name': _clean(remote['name'] ?? number, 240),
+      'email': _clean(remote['email'], 240),
+      'phone': _clean(remote['phone'], 80),
+      'active': remote['active'] == false ? 0 : 1,
+      'card_tid': cardTid,
+      'card_tagged_at': remote['cardTaggedAt'],
+      'updated_at': remote['updatedAt'] ?? now,
+      'sync_state': 'synced',
+      'card_epc': ?cardEpc,
+    };
+    final existing = await transaction.query(
+      'subscribers',
+      columns: ['id'],
+      where: 'member_number = ?',
+      whereArgs: [number],
+      limit: 1,
+    );
+    if (existing.isEmpty) {
+      await transaction.insert('subscribers', {
+        ...values,
+        'member_number': number,
+        'card_epc': cardEpc ?? generateCardEpc(),
+        'created_at': remote['createdAt'] ?? now,
+      });
+    } else {
+      await transaction.update(
+        'subscribers',
+        values,
+        where: 'id = ?',
+        whereArgs: [existing.first['id']],
+      );
+    }
+  }
 
   static Future<Subscriber> _upsertSubscriber(
     DatabaseExecutor database, {
@@ -1114,23 +1246,16 @@ class LibraryDatabase {
       );
     }
     if (cardEpc == null) {
-      final createdAt = existing.isEmpty
-          ? timestamp
-          : existing.first['created_at'] as String;
       await database.update(
         'subscribers',
-        {'card_epc': _cardEpcFor(id, createdAt)},
+        {'card_epc': generateCardEpc()},
         where: 'id = ?',
         whereArgs: [id],
       );
     }
-    return Subscriber.fromMap(
-      (await database.query(
-        'subscribers',
-        where: 'id = ?',
-        whereArgs: [id],
-      )).first,
-    );
+    final saved = await _subscriberIn(database, id);
+    await _queueSubscriber(database, saved);
+    return saved;
   }
 
   static Future<Book> _bookIn(DatabaseExecutor database, int id) async =>

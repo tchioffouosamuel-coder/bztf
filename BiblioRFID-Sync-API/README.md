@@ -23,9 +23,23 @@ de développement par défaut.
 - `POST /api/v1/sync/push`
 - `GET /api/v1/sync?since=0`
 - `GET /api/v1/books`
+- `GET /api/v1/subscribers`
 - `WS /api/v1/events?apiKey=...`
 
 Les routes `/api/v1` attendent l'en-tête `X-Device-Key`.
+
+## Entités synchronisées
+
+Chaque mutation et chaque changement portent un `entityType` :
+
+- `book` (valeur par défaut, compatible avec les anciens clients) : champ `book`,
+  identifiant `serverId`.
+- `subscriber` : champ `subscriber`, identifiant = numéro d'abonné en majuscules.
+  L'abonné transporte sa carte RFID (`cardEpc`, `cardTid`, `cardTaggedAt`). Si un
+  même tag physique (`cardTid`) est encodé pour un autre abonné, l'ancien
+  titulaire perd la carte et un changement est émis pour lui.
+
+Les bases existantes sont migrées au démarrage (colonne `events.entity_type`).
 
 ## Compiler
 

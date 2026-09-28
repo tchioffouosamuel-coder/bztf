@@ -102,9 +102,13 @@ function currentSnapshot({ raw = false } = {}) {
   const source = raw ? presentTags : stableTags;
   const tags = [...source.values()].map(({ tag }) => {
     const normalized = normalizeTag(tag);
+    const book = db.recognizeTag(normalized.epc, normalized.tid);
     return {
       ...normalized,
-      book: db.recognizeTag(normalized.epc, normalized.tid),
+      book,
+      subscriber: book
+        ? null
+        : publicSubscriber(db.recognizeCard(normalized.epc, normalized.tid)),
     };
   });
   const books = [
@@ -117,11 +121,23 @@ function currentSnapshot({ raw = false } = {}) {
     count: tags.length,
     tags,
     book: tags.length === 1 ? tags[0].book : null,
+    subscriber: tags.length === 1 ? tags[0].subscriber : null,
     books,
-    unknownCount: tags.filter((tag) => !tag.book).length,
+    unknownCount: tags.filter((tag) => !tag.book && !tag.subscriber).length,
     presenceSessionId,
     reader: readerStatus,
     mode: "continuous",
+  };
+}
+
+function publicSubscriber(subscriber) {
+  if (!subscriber) return null;
+  return {
+    id: subscriber.id,
+    member_number: subscriber.member_number,
+    name: subscriber.name,
+    email: subscriber.email,
+    phone: subscriber.phone,
   };
 }
 
@@ -135,6 +151,17 @@ function recordPresenceChange(snapshot, signature) {
   for (const tag of snapshot.tags) {
     const key = presenceKey(tag);
     if (!pendingActivityTags.delete(key)) continue;
+    if (tag.subscriber) {
+      db.addActivity(
+        "lecture",
+        "succes",
+        null,
+        `Carte d'abonné reconnue : ${tag.subscriber.name} (${tag.subscriber.member_number})`,
+        tag.epc,
+        tag.tid,
+      );
+      continue;
+    }
     db.addActivity(
       "lecture",
       "succes",
@@ -812,6 +839,12 @@ async function api(request, response, url) {
           error:
             "Le tag ne fournit pas de TID; l'écriture sécurisée est annulée.",
         });
+      const card = db.recognizeCard(target.epc, target.tid);
+      if (card)
+        return json(response, 409, {
+          ok: false,
+          error: `Ce tag est la carte de l'abonné ${card.name}. Utilisez un tag de livre.`,
+        });
       if (connection.type === "simulation") {
         simulatedTag = { ...simulatedTag, epc: book.epc, tid: target.tid };
         result = {
@@ -911,6 +944,86 @@ async function api(request, response, url) {
         error.message,
         book.epc,
         book.tid,
+      );
+      return json(response, 503, { ok: false, error: error.message });
+    }
+  }
+
+  if (request.method === "POST" && pathname === "/api/subscribers/card") {
+    const input = await readBody(request);
+    const connection = normalizeConnection(input);
+    let subscriber;
+    try {
+      subscriber = db.upsertSubscriber(input);
+    } catch (error) {
+      return json(response, 400, { ok: false, error: error.message });
+    }
+    try {
+      await ensureReaderConnection(connection);
+      const snapshot = currentSnapshot({ raw: true });
+      if (snapshot.count === 0)
+        return json(response, 409, {
+          ok: false,
+          error: "Aucun tag détecté. Posez la carte de l'abonné sur le lecteur.",
+        });
+      if (snapshot.count > 1)
+        return json(response, 409, {
+          ok: false,
+          error: "Plusieurs tags détectés. Isolez la carte à encoder.",
+        });
+      const target = snapshot.tags[0];
+      if (!target.tid)
+        return json(response, 409, {
+          ok: false,
+          error:
+            "Le tag ne fournit pas de TID; l'écriture sécurisée est annulée.",
+        });
+      if (target.book)
+        return json(response, 409, {
+          ok: false,
+          error: `Ce tag appartient au livre ${target.book.accession}. Utilisez une carte vierge.`,
+        });
+      if (target.subscriber && target.subscriber.id !== subscriber.id)
+        return json(response, 409, {
+          ok: false,
+          error: `Ce tag est déjà la carte de ${target.subscriber.name}.`,
+        });
+      let result;
+      if (connection.type === "simulation") {
+        simulatedTag = {
+          ...simulatedTag,
+          epc: subscriber.card_epc,
+          tid: target.tid,
+        };
+        result = { ok: true, verified: true, tag: simulatedTag };
+      } else {
+        result = normalizeBridgePayload(
+          await reader.write(subscriber.card_epc, target.tid),
+        );
+      }
+      if (
+        !result.verified ||
+        result.tag?.epc !== subscriber.card_epc ||
+        result.tag?.tid !== target.tid
+      )
+        throw new Error("L'écriture de la carte n'a pas pu être vérifiée.");
+      const updated = db.markCardTagged(subscriber.id, result.tag.tid);
+      const oldKey = presenceKey(target);
+      presentTags.delete(oldKey);
+      stableTags.delete(oldKey);
+      const writtenPresence = { tag: result.tag, lastSeen: Date.now() };
+      presentTags.set(presenceKey(result.tag), writtenPresence);
+      stableTags.set(presenceKey(result.tag), writtenPresence);
+      broadcastSnapshot(true);
+      return json(response, 200, { ...result, subscriber: updated });
+    } catch (error) {
+      db.addActivity(
+        "carte",
+        "echec",
+        null,
+        `Carte de ${subscriber.name} : ${error.message}`,
+        subscriber.card_epc,
+        null,
       );
       return json(response, 503, { ok: false, error: error.message });
     }

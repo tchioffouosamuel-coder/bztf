@@ -3,7 +3,13 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { formatAccession, generateEpc, isValidEpc } from "../lib/epc.js";
+import {
+  formatAccession,
+  generateCardEpc,
+  generateEpc,
+  isCardEpc,
+  isValidEpc,
+} from "../lib/epc.js";
 import { LibraryDatabase } from "../lib/database.js";
 
 test("génère un EPC 96 bits stable et vérifiable", () => {
@@ -142,6 +148,67 @@ test("gère l'abonné, son abonnement et le cycle d'emprunt", () => {
     );
     assert.equal(database.deleteBook(tagged.id), true);
     assert.equal(database.getBook(tagged.id), undefined);
+  } finally {
+    database?.close();
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("distingue l'EPC d'une carte d'abonné de celui d'un livre", () => {
+  const card = generateCardEpc();
+  assert.equal(card.length, 24);
+  assert.equal(card.slice(0, 8), "42434D02");
+  assert.notEqual(generateCardEpc(), card);
+  assert.equal(
+    generateCardEpc(Buffer.from("A1B2C3D4E5F6", "hex")).slice(0, 20),
+    "42434D02A1B2C3D4E5F6",
+  );
+  assert.equal(isCardEpc(card), true);
+  assert.equal(isValidEpc(card), false);
+  assert.equal(isCardEpc(generateEpc(2026, 42)), false);
+  assert.equal(isCardEpc(`${card.slice(0, -1)}0`), false);
+});
+
+test("encode et reconnaît la carte d'un abonné", () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "biblio-rfid-card-"));
+  let database;
+  try {
+    database = new LibraryDatabase(path.join(directory, "test.db"));
+    const subscriber = database.upsertSubscriber({
+      member_number: "ab-7",
+      name: "Carte Test",
+    });
+    assert.equal(subscriber.member_number, "AB-7");
+    assert.equal(isCardEpc(subscriber.card_epc), true);
+    // Une carte jamais écrite n'est pas reconnue.
+    assert.equal(database.recognizeCard(subscriber.card_epc, "E2800000CARD"), null);
+
+    database.markCardTagged(subscriber.id, "e2800000card");
+    assert.equal(
+      database.recognizeCard(subscriber.card_epc, "E2800000CARD")?.id,
+      subscriber.id,
+    );
+    // EPC recopié sur un autre tag : refusé.
+    assert.equal(database.recognizeCard(subscriber.card_epc, "E2800000COPY"), null);
+    assert.equal(database.recognizeTag(subscriber.card_epc, "E2800000CARD"), null);
+
+    // L'EPC reste stable quand l'abonné est mis à jour.
+    const updated = database.upsertSubscriber({
+      member_number: "AB-7",
+      name: "Carte Test 2",
+    });
+    assert.equal(updated.card_epc, subscriber.card_epc);
+
+    const book = database.createBook({ title: "Livre" });
+    assert.throws(
+      () => database.markTagged(book.id, "E2800000CARD"),
+      /carte de l'abonné/,
+    );
+    database.markTagged(book.id, "E2800000BOOK");
+    assert.throws(
+      () => database.markCardTagged(subscriber.id, "E2800000BOOK"),
+      /livre/,
+    );
   } finally {
     database?.close();
     fs.rmSync(directory, { recursive: true, force: true });

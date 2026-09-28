@@ -141,12 +141,18 @@ export class SyncService {
     for (let batch = 0; batch < 100; batch++) {
       const rows = this.database.pendingMutations(500);
       if (!rows.length) return;
-      const mutations = rows.map((row) => ({
-        mutationId: row.mutation_id,
-        operation: row.operation,
-        entityId: row.entity_id,
-        book: row.payload ? JSON.parse(row.payload) : null,
-      }));
+      const mutations = rows.map((row) => {
+        const entityType = row.entity_type || "book";
+        const payload = row.payload ? JSON.parse(row.payload) : null;
+        return {
+          mutationId: row.mutation_id,
+          operation: row.operation,
+          entityId: row.entity_id,
+          entityType,
+          book: entityType === "book" ? payload : null,
+          subscriber: entityType === "subscriber" ? payload : null,
+        };
+      });
       const result = await this.request("/api/v1/sync/push", {
         method: "POST",
         body: JSON.stringify({ deviceId: this.deviceId, mutations }),

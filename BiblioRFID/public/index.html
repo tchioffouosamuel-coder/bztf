@@ -876,6 +876,13 @@
             <i data-lucide="x"></i>
           </button>
         </div>
+        <div class="card-scan-status" id="loan-card-status" aria-live="polite">
+          <i data-lucide="id-card"></i>
+          <div>
+            <strong>Carte d’abonné</strong>
+            <span>Posez la carte sur le lecteur pour identifier l’abonné.</span>
+          </div>
+        </div>
         <div class="form-grid">
           <label class="field"
             ><span>N° d’abonné *</span
@@ -908,6 +915,15 @@
         </div>
         <datalist id="subscriber-options"></datalist>
         <div class="dialog-actions">
+          <button
+            class="button secondary"
+            id="encode-subscriber-card"
+            type="button"
+            title="Écrire la carte de cet abonné sur le tag posé sur le lecteur"
+          >
+            <i data-lucide="id-card"></i><span>Encoder la carte</span>
+          </button>
+          <span class="action-spacer"></span>
           <button class="button secondary" value="cancel" formnovalidate>
             Annuler</button
           ><button class="button primary" type="submit" value="default">
@@ -920,6 +936,6 @@
 
     <div class="toast-region" id="toast-region" aria-live="polite"></div>
     <script src="/vendor/sweetalert2/sweetalert2.all.min.js"></script>
-    <script type="module" src="/app.js?v=22"></script>
+    <script type="module" src="/app.js?v=23"></script>
   </body>
 </html>

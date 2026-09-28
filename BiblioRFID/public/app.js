@@ -17,6 +17,7 @@ import Download from "/vendor/lucide/icons/download.js";
 import FlaskConical from "/vendor/lucide/icons/flask-conical.js";
 import HandHelping from "/vendor/lucide/icons/hand-helping.js";
 import HistoryIcon from "/vendor/lucide/icons/history.js";
+import IdCard from "/vendor/lucide/icons/id-card.js";
 import Inbox from "/vendor/lucide/icons/inbox.js";
 import LayoutDashboard from "/vendor/lucide/icons/layout-dashboard.js";
 import Library from "/vendor/lucide/icons/library.js";
@@ -65,6 +66,7 @@ const lucideIcons = {
   "flask-conical": FlaskConical,
   "hand-helping": HandHelping,
   history: HistoryIcon,
+  "id-card": IdCard,
   inbox: Inbox,
   "layout-dashboard": LayoutDashboard,
   library: Library,
@@ -113,6 +115,9 @@ const state = {
   detailBook: null,
   detailLoan: null,
   subscribers: [],
+  cardScanActive: false,
+  cardScanTimer: null,
+  cardTagKey: null,
   settings: { connection_type: "usb", connection_endpoint: "" },
   readerTiming: {
     beepMode: "controlled",
@@ -823,6 +828,7 @@ async function openLoanDialog() {
   form.elements.due_date.min = localDateValue(tomorrow);
   $("#loan-dialog-title").textContent = state.detailBook.title;
   $("#loan-dialog").showModal();
+  startCardScan();
   setTimeout(() => form.elements.member_number.focus(), 50);
   try {
     state.subscribers = await api("/api/subscribers");
@@ -870,6 +876,135 @@ async function submitLoan(event) {
     await Promise.all([loadBooks(), loadDashboard()]);
   } catch (error) {
     toast(error.message, "error");
+  }
+}
+
+function setCardStatus(title, detail, type = "") {
+  const element = $("#loan-card-status");
+  element.className = `card-scan-status ${type}`;
+  $("strong", element).textContent = title;
+  $("span", element).textContent = detail;
+}
+
+// La lecture continue (flux SSE) est réservée à la station : pendant un
+// emprunt, on interroge le lecteur pour reconnaître la carte de l'abonné.
+function startCardScan() {
+  stopCardScan();
+  state.cardScanActive = true;
+  state.cardTagKey = null;
+  setCardStatus(
+    "Carte d’abonné",
+    "Posez la carte sur le lecteur pour identifier l’abonné.",
+  );
+  const poll = async () => {
+    if (!state.cardScanActive) return;
+    try {
+      const snapshot = await api("/api/reader/scan", {
+        method: "POST",
+        body: JSON.stringify(getConnection()),
+      });
+      if (state.cardScanActive) applyCardSnapshot(snapshot);
+    } catch (error) {
+      if (state.cardScanActive)
+        setCardStatus("Lecteur indisponible", error.message, "error");
+    }
+    if (state.cardScanActive) state.cardScanTimer = setTimeout(poll, 900);
+  };
+  poll();
+}
+
+function stopCardScan() {
+  state.cardScanActive = false;
+  clearTimeout(state.cardScanTimer);
+  state.cardScanTimer = null;
+}
+
+function applyCardSnapshot(snapshot) {
+  const tags = snapshot.tags || [];
+  if (tags.length === 0) {
+    state.cardTagKey = null;
+    setCardStatus(
+      "Carte d’abonné",
+      "Posez la carte sur le lecteur pour identifier l’abonné.",
+    );
+    return;
+  }
+  if (tags.length > 1) {
+    state.cardTagKey = null;
+    setCardStatus(
+      `${tags.length} tags détectés`,
+      "Ne laissez que la carte de l’abonné sur le lecteur.",
+      "warning",
+    );
+    return;
+  }
+  const [tag] = tags;
+  const key = `${tag.tid}:${tag.epc}`;
+  const changed = key !== state.cardTagKey;
+  state.cardTagKey = key;
+  if (tag.subscriber) {
+    const { subscriber } = tag;
+    if (changed) {
+      const form = $("#loan-form");
+      form.elements.member_number.value = subscriber.member_number;
+      form.elements.name.value = subscriber.name;
+      form.elements.phone.value = subscriber.phone || "";
+      form.elements.email.value = subscriber.email || "";
+    }
+    setCardStatus(
+      "Carte reconnue",
+      `${subscriber.name} · ${subscriber.member_number}`,
+      "success",
+    );
+    return;
+  }
+  if (tag.book) {
+    setCardStatus(
+      "Ce tag est un livre",
+      `${tag.book.accession} · ${tag.book.title}. Posez la carte de l’abonné.`,
+      "error",
+    );
+    return;
+  }
+  setCardStatus(
+    "Carte vierge ou inconnue",
+    "Renseignez l’abonné puis cliquez sur « Encoder la carte ».",
+    "warning",
+  );
+}
+
+async function encodeSubscriberCard() {
+  const form = $("#loan-form");
+  if (
+    !form.elements.member_number.reportValidity() ||
+    !form.elements.name.reportValidity()
+  )
+    return;
+  const button = $("#encode-subscriber-card");
+  button.disabled = true;
+  stopCardScan();
+  setCardStatus("Encodage en cours", "Ne retirez pas la carte du lecteur.");
+  try {
+    const { member_number, name, phone, email } = Object.fromEntries(
+      new FormData(form),
+    );
+    const result = await api("/api/subscribers/card", {
+      method: "POST",
+      body: JSON.stringify({
+        member_number,
+        name,
+        phone,
+        email,
+        ...getConnection(),
+      }),
+    });
+    form.elements.member_number.value = result.subscriber.member_number;
+    toast(`Carte encodée pour ${result.subscriber.name}.`);
+  } catch (error) {
+    toast(error.message, "error");
+  } finally {
+    button.disabled = false;
+    if ($("#loan-dialog").open) startCardScan();
   }
 }
 
@@ -1420,6 +1555,27 @@ function resetStationDisplay() {
   icons();
 }
 
+function showSubscriberCard(subscriber) {
+  state.selectedBook = null;
+  $("#multiple-identification").classList.add("hidden");
+  $("#unknown-panel").classList.add("hidden");
+  $("#quick-register-form").classList.add("hidden");
+  const container = $("#selected-book");
+  container.classList.remove("hidden");
+  container.className = "selected-book recognized";
+  container.innerHTML = `<i data-lucide="id-card"></i><div class="selected-book-copy">
+    <span class="selection-label">Carte d’abonné</span><h3>${escapeHtml(subscriber.name)}</h3>
+    <p>${escapeHtml([subscriber.phone, subscriber.email].filter(Boolean).join(" · ") || "Coordonnées non renseignées")}</p>
+    <div class="selected-identifiers"><strong>${escapeHtml(subscriber.member_number)}</strong></div>
+  </div>`;
+  setWriteStatus(
+    "Carte d’abonné reconnue",
+    `${subscriber.member_number} · ${subscriber.name}`,
+    "success",
+  );
+  icons();
+}
+
 function showUnknownTag(tag) {
   state.selectedBook = null;
   $("#multiple-identification").classList.add("hidden");
@@ -1448,14 +1604,21 @@ function showMultipleIdentification(tags, changed) {
   $("#quick-register-form").classList.add("hidden");
   const panel = $("#multiple-identification");
   const recognized = tags.filter((tag) => tag.book).length;
-  const unknown = tags.length - recognized;
+  const cards = tags.filter((tag) => tag.subscriber).length;
+  const unknown = tags.length - recognized - cards;
   panel.classList.remove("hidden");
   $("#multiple-count").textContent = tags.length;
   $("#multiple-title").textContent =
     `${recognized} livre${recognized > 1 ? "s" : ""} reconnu${recognized > 1 ? "s" : ""}${unknown ? ` · ${unknown} inconnu${unknown > 1 ? "s" : ""}` : ""}`;
   $("#multiple-book-list").innerHTML = tags
     .map((tag) =>
-      tag.book
+      tag.subscriber
+        ? `<div class="multiple-book-item">
+        <i data-lucide="id-card"></i>
+        <div><strong>${escapeHtml(tag.subscriber.name)}</strong><small>Carte d’abonné · ${escapeHtml(tag.subscriber.member_number)}</small><code>${escapeHtml(tag.tid || tag.epc)}</code></div>
+        <span class="multiple-signal">Signal<b>${tag.rssi ?? "—"}</b></span>
+      </div>`
+        : tag.book
         ? `<div class="multiple-book-item">
         <i data-lucide="book-check"></i>
         <div><strong>${escapeHtml(tag.book.title)}</strong><small>${escapeHtml(tag.book.author || tag.book.accession)} · ${escapeHtml(tag.book.accession)}</small><code>${escapeHtml(tag.tid || tag.epc)}</code></div>
@@ -1701,6 +1864,15 @@ async function renderVisualTags(notify = true) {
     return;
   }
 
+  if (tag.subscriber) {
+    showSubscriberCard(tag.subscriber);
+    setReaderBanner(
+      "Carte d’abonné détectée",
+      "Une carte d’abonné ne peut pas être encodée comme livre.",
+    );
+    return;
+  }
+
   showUnknownTag(tag);
   setReaderBanner(
     "Nouveau tag détecté",
@@ -1795,6 +1967,8 @@ function bindEvents() {
   $("#detail-borrow-book").addEventListener("click", openLoanDialog);
   $("#detail-return-book").addEventListener("click", returnDetailBook);
   $("#loan-form").addEventListener("submit", submitLoan);
+  $("#loan-dialog").addEventListener("close", stopCardScan);
+  $("#encode-subscriber-card").addEventListener("click", encodeSubscriberCard);
   $("#loan-form").elements.member_number.addEventListener(
     "change",
     fillLoanSubscriber,

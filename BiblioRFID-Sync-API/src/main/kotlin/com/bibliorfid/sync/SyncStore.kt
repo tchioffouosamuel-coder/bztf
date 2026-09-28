@@ -85,8 +85,37 @@ class SyncStore(databaseUrl: String, private val json: Json) : Closeable {
             )
             statement.executeUpdate("CREATE INDEX IF NOT EXISTS idx_books_accession ON books(accession)")
             statement.executeUpdate("CREATE INDEX IF NOT EXISTS idx_books_epc ON books(epc)")
+            statement.executeUpdate(
+                """
+                CREATE TABLE IF NOT EXISTS subscribers (
+                    member_number TEXT PRIMARY KEY,
+                    name TEXT NOT NULL,
+                    email TEXT NOT NULL,
+                    phone TEXT NOT NULL,
+                    active INTEGER NOT NULL,
+                    card_epc TEXT,
+                    card_tid TEXT,
+                    card_tagged_at TEXT,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    revision INTEGER NOT NULL,
+                    deleted INTEGER NOT NULL DEFAULT 0
+                )
+                """.trimIndent(),
+            )
+            statement.executeUpdate("CREATE INDEX IF NOT EXISTS idx_subscribers_card_tid ON subscribers(card_tid)")
+            if ("entity_type" !in columns(statement, "events")) {
+                statement.executeUpdate(
+                    "ALTER TABLE events ADD COLUMN entity_type TEXT NOT NULL DEFAULT '${EntityType.BOOK}'",
+                )
+            }
         }
     }
+
+    private fun columns(statement: Statement, table: String): Set<String> =
+        statement.executeQuery("PRAGMA table_info($table)").use { rows ->
+            buildSet { while (rows.next()) add(rows.getString("name")) }
+        }
 
     @Synchronized
     fun registerDevice(registration: DeviceRegistration): DeviceResponse {
@@ -120,13 +149,20 @@ class SyncStore(databaseUrl: String, private val json: Json) : Closeable {
                     acknowledged += mutation.mutationId
                     return@forEach
                 }
-                when (mutation.operation) {
-                    "upsert" -> upsertBook(
+                when (mutation.entityType to mutation.operation) {
+                    EntityType.BOOK to "upsert" -> upsertBook(
                         requireNotNull(mutation.book) { "Le livre est obligatoire pour un upsert." },
                         request.deviceId,
                     )
-                    "delete" -> deleteBook(mutation.entityId, request.deviceId)
-                    else -> error("Opération inconnue : ${mutation.operation}")
+                    EntityType.BOOK to "delete" -> deleteBook(mutation.entityId, request.deviceId)
+                    EntityType.SUBSCRIBER to "upsert" -> upsertSubscriber(
+                        requireNotNull(mutation.subscriber) { "L'abonné est obligatoire pour un upsert." },
+                        request.deviceId,
+                    )
+                    EntityType.SUBSCRIBER to "delete" -> deleteSubscriber(mutation.entityId, request.deviceId)
+                    else -> throw IllegalArgumentException(
+                        "Opération inconnue : ${mutation.entityType}/${mutation.operation}",
+                    )
                 }
                 connection.prepareStatement(
                     "INSERT INTO mutations(mutation_id, device_id, applied_at) VALUES (?, ?, ?)",
@@ -159,11 +195,16 @@ class SyncStore(databaseUrl: String, private val json: Json) : Closeable {
             statement.executeQuery().use { rows ->
                 while (rows.next()) {
                     val payload = rows.getString("payload")
+                    val entityType = rows.getString("entity_type")
                     changes += Change(
                         sequence = rows.getLong("sequence"),
                         operation = rows.getString("operation"),
                         entityId = rows.getString("entity_id"),
-                        book = payload?.let { json.decodeFromString<SyncBook>(it) },
+                        entityType = entityType,
+                        book = payload?.takeIf { entityType == EntityType.BOOK }
+                            ?.let { json.decodeFromString<SyncBook>(it) },
+                        subscriber = payload?.takeIf { entityType == EntityType.SUBSCRIBER }
+                            ?.let { json.decodeFromString<SyncSubscriber>(it) },
                         deviceId = rows.getString("device_id"),
                         createdAt = rows.getString("created_at"),
                     )
@@ -184,6 +225,17 @@ class SyncStore(databaseUrl: String, private val json: Json) : Closeable {
             }
         }
         return books
+    }
+
+    @Synchronized
+    fun listSubscribers(): List<SyncSubscriber> {
+        val subscribers = mutableListOf<SyncSubscriber>()
+        connection.prepareStatement("SELECT * FROM subscribers WHERE deleted=0 ORDER BY name").use { statement ->
+            statement.executeQuery().use { rows ->
+                while (rows.next()) subscribers += readSubscriber(rows)
+            }
+        }
+        return subscribers
     }
 
     @Synchronized
@@ -260,15 +312,121 @@ class SyncStore(databaseUrl: String, private val json: Json) : Closeable {
         addEvent("delete", serverId, null, deviceId)
     }
 
-    private fun addEvent(operation: String, entityId: String, payload: String?, deviceId: String) {
+    private fun upsertSubscriber(input: SyncSubscriber, deviceId: String) {
+        val memberNumber = input.memberNumber.trim().uppercase()
+        require(memberNumber.isNotBlank() && input.name.isNotBlank()) {
+            "memberNumber et name sont obligatoires."
+        }
+        val cardTid = input.cardTid?.trim()?.uppercase()?.ifBlank { null }
+        val existing = findSubscriber(memberNumber)
+        val canonical = input.copy(
+            memberNumber = memberNumber,
+            cardEpc = input.cardEpc?.trim()?.uppercase()?.ifBlank { null },
+            cardTid = cardTid,
+            createdAt = existing?.createdAt ?: input.createdAt,
+            revision = (existing?.revision ?: 0) + 1,
+        )
+        // Une carte physique n'appartient qu'à un abonné : si elle a été
+        // réencodée pour quelqu'un d'autre, l'ancien titulaire la perd.
+        if (cardTid != null) {
+            previousCardHolders(cardTid, memberNumber).forEach { holder ->
+                writeSubscriber(
+                    holder.copy(
+                        cardTid = null,
+                        cardTaggedAt = null,
+                        updatedAt = Instant.now().toString(),
+                        revision = holder.revision + 1,
+                    ),
+                    deviceId,
+                )
+            }
+        }
+        writeSubscriber(canonical, deviceId)
+    }
+
+    private fun writeSubscriber(subscriber: SyncSubscriber, deviceId: String) {
         connection.prepareStatement(
-            "INSERT INTO events(operation, entity_id, payload, device_id, created_at) VALUES (?, ?, ?, ?, ?)",
+            """
+            INSERT INTO subscribers(
+                member_number, name, email, phone, active, card_epc, card_tid,
+                card_tagged_at, created_at, updated_at, revision, deleted
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)
+            ON CONFLICT(member_number) DO UPDATE SET
+                name=excluded.name, email=excluded.email, phone=excluded.phone,
+                active=excluded.active, card_epc=excluded.card_epc,
+                card_tid=excluded.card_tid, card_tagged_at=excluded.card_tagged_at,
+                updated_at=excluded.updated_at, revision=excluded.revision, deleted=0
+            """.trimIndent(),
+        ).use {
+            it.setString(1, subscriber.memberNumber)
+            it.setString(2, subscriber.name.take(240))
+            it.setString(3, subscriber.email.take(240))
+            it.setString(4, subscriber.phone.take(80))
+            it.setInt(5, if (subscriber.active) 1 else 0)
+            it.setString(6, subscriber.cardEpc)
+            it.setString(7, subscriber.cardTid)
+            it.setString(8, subscriber.cardTaggedAt)
+            it.setString(9, subscriber.createdAt)
+            it.setString(10, subscriber.updatedAt)
+            it.setLong(11, subscriber.revision)
+            it.executeUpdate()
+        }
+        addEvent(
+            "upsert",
+            subscriber.memberNumber,
+            json.encodeToString(subscriber),
+            deviceId,
+            EntityType.SUBSCRIBER,
+        )
+    }
+
+    private fun deleteSubscriber(memberNumber: String, deviceId: String) {
+        val normalized = memberNumber.trim().uppercase()
+        if (normalized.isBlank()) return
+        connection.prepareStatement(
+            "UPDATE subscribers SET deleted=1, revision=revision+1, updated_at=? WHERE member_number=?",
+        ).use {
+            it.setString(1, Instant.now().toString())
+            it.setString(2, normalized)
+            it.executeUpdate()
+        }
+        addEvent("delete", normalized, null, deviceId, EntityType.SUBSCRIBER)
+    }
+
+    private fun findSubscriber(memberNumber: String): SyncSubscriber? = connection.prepareStatement(
+        "SELECT * FROM subscribers WHERE member_number=?",
+    ).use {
+        it.setString(1, memberNumber)
+        it.executeQuery().use { rows -> if (rows.next()) readSubscriber(rows) else null }
+    }
+
+    private fun previousCardHolders(cardTid: String, memberNumber: String): List<SyncSubscriber> =
+        connection.prepareStatement(
+            "SELECT * FROM subscribers WHERE card_tid=? AND member_number<>? AND deleted=0",
+        ).use {
+            it.setString(1, cardTid)
+            it.setString(2, memberNumber)
+            it.executeQuery().use { rows ->
+                buildList { while (rows.next()) add(readSubscriber(rows)) }
+            }
+        }
+
+    private fun addEvent(
+        operation: String,
+        entityId: String,
+        payload: String?,
+        deviceId: String,
+        entityType: String = EntityType.BOOK,
+    ) {
+        connection.prepareStatement(
+            "INSERT INTO events(operation, entity_id, payload, device_id, created_at, entity_type) VALUES (?, ?, ?, ?, ?, ?)",
         ).use {
             it.setString(1, operation)
             it.setString(2, entityId)
             it.setString(3, payload)
             it.setString(4, deviceId)
             it.setString(5, Instant.now().toString())
+            it.setString(6, entityType)
             it.executeUpdate()
         }
     }
@@ -300,6 +458,20 @@ class SyncStore(databaseUrl: String, private val json: Json) : Closeable {
         createdAt = rows.getString("created_at"),
         updatedAt = rows.getString("updated_at"),
         taggedAt = rows.getString("tagged_at"),
+        revision = rows.getLong("revision"),
+    )
+
+    private fun readSubscriber(rows: java.sql.ResultSet) = SyncSubscriber(
+        memberNumber = rows.getString("member_number"),
+        name = rows.getString("name"),
+        email = rows.getString("email"),
+        phone = rows.getString("phone"),
+        active = rows.getInt("active") != 0,
+        cardEpc = rows.getString("card_epc"),
+        cardTid = rows.getString("card_tid"),
+        cardTaggedAt = rows.getString("card_tagged_at"),
+        createdAt = rows.getString("created_at"),
+        updatedAt = rows.getString("updated_at"),
         revision = rows.getLong("revision"),
     )
 

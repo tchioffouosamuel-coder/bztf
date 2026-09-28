@@ -6,6 +6,7 @@ import os from "node:os";
 import path from "node:path";
 import { LibraryDatabase } from "../lib/database.js";
 import { SyncService } from "../lib/sync-service.js";
+import { generateCardEpc } from "../lib/epc.js";
 
 function listen(server) {
   return new Promise((resolve) =>
@@ -103,3 +104,97 @@ test("envoie les mutations locales et applique les livres distants", async () =>
   }
 });
 
+
+test("synchronise les abonnés et leurs cartes RFID", async () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "biblio-sync-sub-"));
+  const database = new LibraryDatabase(path.join(directory, "catalogue.db"));
+  const local = database.upsertSubscriber({ member_number: "ab-1", name: "Local" });
+  database.markCardTagged(local.id, "E2800000LOCAL");
+  const now = new Date().toISOString();
+  const remote = {
+    memberNumber: "AB-2",
+    name: "Distant",
+    email: "",
+    phone: "600",
+    active: true,
+    cardEpc: generateCardEpc(),
+    // La carte de l'abonné local a été réencodée pour AB-2 sur un autre poste.
+    cardTid: "E2800000LOCAL",
+    cardTaggedAt: now,
+    createdAt: now,
+    updatedAt: now,
+    revision: 1,
+  };
+  let pushed;
+  const server = http.createServer(async (request, response) => {
+    const chunks = [];
+    for await (const chunk of request) chunks.push(chunk);
+    const body = chunks.length
+      ? JSON.parse(Buffer.concat(chunks).toString("utf8"))
+      : null;
+    response.setHeader("Content-Type", "application/json");
+    if (request.url === "/api/v1/devices/register")
+      return response.end(JSON.stringify({ registered: true }));
+    if (request.url === "/api/v1/sync/push") {
+      pushed = body.mutations;
+      return response.end(
+        JSON.stringify({
+          acknowledgedMutationIds: body.mutations.map((item) => item.mutationId),
+          cursor: 1,
+        }),
+      );
+    }
+    if (request.url.startsWith("/api/v1/sync?"))
+      return response.end(
+        JSON.stringify({
+          cursor: 2,
+          changes: [
+            {
+              sequence: 2,
+              operation: "upsert",
+              entityId: "AB-2",
+              entityType: "subscriber",
+              book: null,
+              subscriber: remote,
+              deviceId: "mobile-test",
+              createdAt: now,
+            },
+          ],
+          hasMore: false,
+        }),
+      );
+    response.statusCode = 404;
+    response.end(JSON.stringify({ error: "Route inconnue" }));
+  });
+  const service = new SyncService(database);
+  try {
+    const port = await listen(server);
+    service.initialize();
+    const status = await service.configure({
+      serverUrl: `http://127.0.0.1:${port}`,
+      apiKey: "secret-test",
+      deviceName: "Poste de test",
+    });
+    assert.equal(status.connected, true);
+    assert.equal(status.pendingCount, 0);
+
+    const sent = pushed.find((item) => item.entityType === "subscriber");
+    assert.equal(sent.entityId, "AB-1");
+    assert.equal(sent.book, null);
+    assert.equal(sent.subscriber.cardTid, "E2800000LOCAL");
+    assert.equal(sent.subscriber.cardEpc, local.card_epc);
+
+    assert.equal(
+      database.recognizeCard(remote.cardEpc, "E2800000LOCAL")?.member_number,
+      "AB-2",
+    );
+    assert.equal(database.recognizeCard(local.card_epc, "E2800000LOCAL"), null);
+    assert.equal(database.getSubscriber(local.id).card_tid, null);
+    assert.equal(database.listBooks().length, 0);
+  } finally {
+    service.close();
+    await close(server);
+    database.close();
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});

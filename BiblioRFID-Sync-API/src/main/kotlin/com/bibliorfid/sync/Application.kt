@@ -103,6 +103,10 @@ fun Application.module(
                 if (!call.authorized(apiKey)) return@get
                 call.respond(store.listBooks())
             }
+            get("/subscribers") {
+                if (!call.authorized(apiKey)) return@get
+                call.respond(store.listSubscribers())
+            }
             get("/sync") {
                 if (!call.authorized(apiKey)) return@get
                 val since = call.request.queryParameters["since"]?.toLongOrNull() ?: 0

@@ -131,12 +131,16 @@ class SyncService extends ChangeNotifier {
       final rows = await database.pendingMutations();
       if (rows.isEmpty) return;
       final mutations = rows.map((row) {
-        final payload = row['payload']?.toString();
+        final raw = row['payload']?.toString();
+        final payload = raw == null ? null : jsonDecode(raw);
+        final entityType = row['entity_type']?.toString() ?? 'book';
         return {
           'mutationId': row['mutation_id'],
           'operation': row['operation'],
           'entityId': row['entity_id'],
-          'book': payload == null ? null : jsonDecode(payload),
+          'entityType': entityType,
+          'book': entityType == 'book' ? payload : null,
+          'subscriber': entityType == 'subscriber' ? payload : null,
         };
       }).toList();
       final response = await _client

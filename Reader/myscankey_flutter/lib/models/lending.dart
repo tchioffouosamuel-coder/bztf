@@ -40,6 +40,21 @@ class Subscriber {
 
   bool get hasCard => cardTid != null && cardTid!.isNotEmpty;
 
+  /// Charge utile de synchronisation ; l'identifiant d'entité est le numéro
+  /// d'abonné.
+  Map<String, Object?> toSyncJson() => {
+    'memberNumber': memberNumber,
+    'name': name,
+    'email': email,
+    'phone': phone,
+    'active': active,
+    'cardEpc': cardEpc,
+    'cardTid': cardTid,
+    'cardTaggedAt': cardTaggedAt,
+    'createdAt': createdAt,
+    'updatedAt': updatedAt,
+  };
+
   factory Subscriber.fromMap(Map<String, Object?> map) => Subscriber(
     id: map['id'] as int,
     memberNumber: map['member_number'] as String,

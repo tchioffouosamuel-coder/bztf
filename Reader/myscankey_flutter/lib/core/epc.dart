@@ -1,3 +1,4 @@
+import 'dart:math';
 import 'dart:typed_data';
 
 const _prefix = [0x42, 0x43, 0x4D, 0x01];
@@ -21,8 +22,23 @@ int crc16Ccitt(List<int> bytes) {
 String generateEpc(int year, int sequence) =>
     _encodeEpc(_prefix, year, sequence);
 
-String generateCardEpc(int year, int subscriberId) =>
-    _encodeEpc(_cardPrefix, year, subscriberId);
+/// EPC de carte d'abonné : préfixe + 48 bits aléatoires + CRC. L'aléa (et
+/// non un identifiant local) évite les collisions entre appareils synchronisés.
+String generateCardEpc([Random? random]) {
+  final source = random ?? Random.secure();
+  final payload = Uint8List(12);
+  payload.setRange(0, 4, _cardPrefix);
+  for (var index = 4; index < 10; index++) {
+    payload[index] = source.nextInt(256);
+  }
+  ByteData.sublistView(
+    payload,
+  ).setUint16(10, crc16Ccitt(payload.sublist(0, 10)), Endian.big);
+  return payload
+      .map((byte) => byte.toRadixString(16).padLeft(2, '0'))
+      .join()
+      .toUpperCase();
+}
 
 String _encodeEpc(List<int> prefix, int year, int sequence) {
   if (year < 0 || year > 0xFFFF) throw ArgumentError('Année EPC invalide.');

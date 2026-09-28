@@ -23,12 +23,35 @@ data class SyncBook(
     val revision: Long = 0,
 )
 
+/** Abonné synchronisé. Son identifiant d'entité est le numéro d'abonné. */
+@Serializable
+data class SyncSubscriber(
+    val memberNumber: String,
+    val name: String,
+    val email: String = "",
+    val phone: String = "",
+    val active: Boolean = true,
+    val cardEpc: String? = null,
+    val cardTid: String? = null,
+    val cardTaggedAt: String? = null,
+    val createdAt: String,
+    val updatedAt: String,
+    val revision: Long = 0,
+)
+
+object EntityType {
+    const val BOOK = "book"
+    const val SUBSCRIBER = "subscriber"
+}
+
 @Serializable
 data class Mutation(
     val mutationId: String,
     val operation: String,
     val entityId: String,
     val book: SyncBook? = null,
+    val entityType: String = EntityType.BOOK,
+    val subscriber: SyncSubscriber? = null,
 )
 
 @Serializable
@@ -45,7 +68,9 @@ data class Change(
     val sequence: Long,
     val operation: String,
     val entityId: String,
+    val entityType: String = EntityType.BOOK,
     val book: SyncBook? = null,
+    val subscriber: SyncSubscriber? = null,
     val deviceId: String,
     val createdAt: String,
 )
