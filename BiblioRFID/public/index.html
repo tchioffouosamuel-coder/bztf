@@ -1,0 +1,719 @@
+<!doctype html>
+<html lang="fr">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="theme-color" content="#163a36" />
+    <title>Bibliotèque ZTF</title>
+    <link rel="stylesheet" href="/vendor/sweetalert2/sweetalert2.min.css" />
+    <link rel="stylesheet" href="/styles.css?v=8" />
+  </head>
+  <body>
+    <div class="desktop-titlebar" aria-hidden="true">
+      <img src="/assets/bibliorfid-logo.jpg" alt="" />Bibliotèque ZTF
+    </div>
+
+    <section class="auth-screen" id="auth-screen">
+      <div class="auth-panel">
+        <div class="auth-brand">
+          <span class="brand-logo auth-logo"><img src="/assets/bibliorfid-logo.jpg" alt="" /></span>
+          <div><strong>Bibliotèque ZTF</strong><small>Catalogue et station RFID</small></div>
+        </div>
+        <div class="auth-heading">
+          <p class="eyebrow" id="auth-eyebrow">Accès sécurisé</p>
+          <h1 id="auth-title">Connexion</h1>
+          <p id="auth-copy">Identifiez-vous pour accéder à la station RFID.</p>
+        </div>
+        <form class="auth-form" id="auth-form">
+          <label class="field hidden" id="auth-name-field">
+            <span>Nom complet</span>
+            <input name="name" maxlength="120" autocomplete="name" />
+          </label>
+          <label class="field">
+            <span>Adresse e-mail</span>
+            <input name="email" type="email" maxlength="240" autocomplete="username" required />
+          </label>
+          <label class="field">
+            <span>Mot de passe</span>
+            <input name="password" type="password" minlength="8" autocomplete="current-password" required />
+          </label>
+          <p class="auth-error hidden" id="auth-error" role="alert"></p>
+          <button class="button primary auth-submit" id="auth-submit" type="submit">
+            <i data-lucide="shield-check"></i><span>Se connecter</span>
+          </button>
+        </form>
+        <p class="auth-footnote">Session privée sur ce poste · expiration après 12 heures</p>
+      </div>
+    </section>
+
+    <div class="app-shell hidden" id="app-shell">
+      <aside class="sidebar" id="sidebar">
+        <div class="brand">
+          <span class="brand-logo"><img src="/assets/bibliorfid-logo.jpg" alt="" /></span>
+          <span><strong>Bibliotèque ZTF</strong><small>Catalogue local</small></span>
+        </div>
+        <nav class="nav-list" aria-label="Navigation principale">
+          <button class="nav-item active" data-view="dashboard">
+            <i data-lucide="layout-dashboard"></i><span>Tableau de bord</span>
+          </button>
+          <button class="nav-item" data-view="catalogue">
+            <i data-lucide="library"></i><span>Catalogue</span>
+          </button>
+          <button class="nav-item" data-view="station">
+            <i data-lucide="radio-tower"></i><span>Station RFID</span>
+          </button>
+          <button class="nav-item" data-view="history">
+            <i data-lucide="history"></i><span>Historique</span>
+          </button>
+          <button class="nav-item" data-view="settings">
+            <i data-lucide="settings-2"></i><span>Paramètres</span>
+          </button>
+        </nav>
+        <div class="sidebar-footer">
+          <span class="local-dot"></span>
+          <span
+            ><strong>Données locales</strong
+            ><small>SQLite sur ce poste</small></span
+          >
+        </div>
+      </aside>
+
+      <main class="main-content">
+        <header class="topbar">
+          <button
+            class="icon-button mobile-only"
+            id="menu-button"
+            title="Ouvrir le menu"
+            aria-label="Ouvrir le menu"
+          >
+            <i data-lucide="menu"></i>
+          </button>
+          <div>
+            <p class="eyebrow" id="page-eyebrow">Vue d’ensemble</p>
+            <h1 id="page-title">Tableau de bord</h1>
+          </div>
+          <div class="topbar-actions">
+            <div class="reader-state" id="reader-state">
+              <span class="state-dot"></span>
+              <span
+                ><strong>Lecteur hors ligne</strong
+                ><small id="reader-state-detail">Non vérifié</small></span
+              >
+            </div>
+            <button class="button secondary" id="connect-button">
+              <i data-lucide="plug-zap"></i><span>Connecter</span>
+            </button>
+            <button
+              class="icon-button"
+              id="theme-button"
+              title="Changer le thème"
+              aria-label="Changer le thème"
+            >
+              <i data-lucide="moon"></i>
+            </button>
+            <div class="user-state" title="Utilisateur connecté">
+              <span class="user-avatar" id="user-avatar">U</span>
+              <span class="user-copy"><strong id="user-name">Utilisateur</strong><small id="user-role">Opérateur</small></span>
+              <button class="icon-button compact" id="logout-button" title="Se déconnecter" aria-label="Se déconnecter">
+                <i data-lucide="log-out"></i>
+              </button>
+            </div>
+          </div>
+        </header>
+
+        <div class="content-area">
+          <section class="view active" id="view-dashboard">
+            <div class="section-heading">
+              <div>
+                <h2>Activité de la bibliothèque</h2>
+                <p>État du fonds et des opérations RFID.</p>
+              </div>
+              <button class="button primary" data-action="new-book">
+                <i data-lucide="book-plus"></i><span>Nouveau livre</span>
+              </button>
+            </div>
+            <div class="stats-grid">
+              <article class="stat-card">
+                <span class="stat-icon green"
+                  ><i data-lucide="book-copy"></i
+                ></span>
+                <div>
+                  <small>Livres catalogués</small
+                  ><strong id="stat-total">0</strong>
+                </div>
+              </article>
+              <article class="stat-card">
+                <span class="stat-icon cyan"
+                  ><i data-lucide="badge-check"></i
+                ></span>
+                <div>
+                  <small>Tags encodés</small><strong id="stat-tagged">0</strong>
+                </div>
+              </article>
+              <article class="stat-card">
+                <span class="stat-icon amber"
+                  ><i data-lucide="clock-3"></i
+                ></span>
+                <div>
+                  <small>À encoder</small><strong id="stat-pending">0</strong>
+                </div>
+              </article>
+              <article class="stat-card">
+                <span class="stat-icon coral"
+                  ><i data-lucide="calendar-plus"></i
+                ></span>
+                <div>
+                  <small>Ajoutés aujourd’hui</small
+                  ><strong id="stat-today">0</strong>
+                </div>
+              </article>
+            </div>
+            <div class="dashboard-grid">
+              <section class="data-section">
+                <div class="panel-heading">
+                  <div>
+                    <h3>Derniers livres</h3>
+                    <p>Enregistrements récents</p>
+                  </div>
+                  <button class="text-button" data-view-link="catalogue">
+                    Tout voir <i data-lucide="arrow-right"></i>
+                  </button>
+                </div>
+                <div class="book-list" id="recent-books"></div>
+              </section>
+              <section class="data-section">
+                <div class="panel-heading">
+                  <div>
+                    <h3>Journal récent</h3>
+                    <p>Dernières opérations</p>
+                  </div>
+                  <button class="text-button" data-view-link="history">
+                    Tout voir <i data-lucide="arrow-right"></i>
+                  </button>
+                </div>
+                <div class="activity-list" id="recent-activity"></div>
+              </section>
+            </div>
+          </section>
+
+          <section class="view" id="view-catalogue">
+            <div class="section-heading">
+              <div>
+                <h2>Catalogue</h2>
+                <p id="catalogue-count">0 livre</p>
+              </div>
+              <div class="heading-actions">
+                <button class="button secondary" id="import-xlsx" type="button">
+                  <i data-lucide="upload"></i><span>Importer XLSX</span>
+                </button>
+                <input
+                  class="hidden"
+                  id="xlsx-file-input"
+                  type="file"
+                  accept=".xlsx,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                />
+                <a class="button secondary" href="/api/export.csv"
+                  ><i data-lucide="download"></i><span>Exporter</span></a
+                >
+                <button class="button primary" data-action="new-book">
+                  <i data-lucide="book-plus"></i><span>Nouveau livre</span>
+                </button>
+              </div>
+            </div>
+            <div class="table-toolbar">
+              <label class="search-box"
+                ><i data-lucide="search"></i
+                ><input
+                  id="book-search"
+                  type="search"
+                  placeholder="Titre, auteur, ISBN, numéro…"
+                /><kbd>Ctrl K</kbd></label
+              >
+              <div
+                class="segmented"
+                id="status-filter"
+                aria-label="Filtrer par statut"
+              >
+                <button class="active" data-status="tous">Tous</button>
+                <button data-status="a_encoder">À encoder</button>
+                <button data-status="encode">Encodés</button>
+              </div>
+            </div>
+            <div class="table-wrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th>Livre</th>
+                    <th>Numéro</th>
+                    <th>Localisation</th>
+                    <th>Statut RFID</th>
+                    <th class="actions-column">Actions</th>
+                  </tr>
+                </thead>
+                <tbody id="books-table"></tbody>
+              </table>
+              <div class="empty-state hidden" id="books-empty">
+                <i data-lucide="book-open"></i>
+                <h3>Aucun livre trouvé</h3>
+                <p>Modifiez la recherche ou ajoutez un ouvrage.</p>
+              </div>
+              <div class="table-footer hidden" id="books-pagination">
+                <button
+                  class="button secondary"
+                  id="load-more-books"
+                  type="button"
+                >
+                  <i data-lucide="refresh-cw"></i><span>Charger plus</span>
+                </button>
+              </div>
+            </div>
+          </section>
+
+          <section class="view" id="view-station">
+            <div class="section-heading">
+              <div>
+                <h2>Station RFID</h2>
+                <p>Lecture automatique et encodage des livres.</p>
+              </div>
+              <div class="station-heading-actions">
+                <span class="auto-mode-pill active" id="auto-mode-indicator"
+                  ><span></span>Lecture automatique</span
+                >
+                <button class="button secondary" id="auto-read-toggle">
+                  <i data-lucide="pause"></i><span>Suspendre</span>
+                </button>
+              </div>
+            </div>
+            <div class="station-single">
+              <section class="tool-panel station-console">
+                <div class="reader-banner" id="reader-banner">
+                  <span class="reader-animation"
+                    ><i data-lucide="radio"></i
+                  ></span>
+                  <div>
+                    <strong>Mode lecture actif</strong>
+                    <p>Posez un seul livre sur le lecteur.</p>
+                  </div>
+                </div>
+                <div class="selected-book empty" id="selected-book">
+                  <i data-lucide="book-dashed"></i>
+                  <h3>En attente d’un livre</h3>
+                  <p>La détection démarre automatiquement.</p>
+                </div>
+                <div
+                  class="multiple-identification hidden"
+                  id="multiple-identification"
+                >
+                  <div class="multiple-heading">
+                    <div>
+                      <p class="eyebrow">Identification multiple</p>
+                      <h3 id="multiple-title">Livres détectés</h3>
+                    </div>
+                    <span class="multiple-count" id="multiple-count">0</span>
+                  </div>
+                  <div class="multiple-book-list" id="multiple-book-list"></div>
+                  <div class="multiple-notice">
+                    <i data-lucide="shield-check"></i
+                    ><span
+                      >Lecture multiple active. Isolez un seul tag avant un
+                      enregistrement ou une écriture.</span
+                    >
+                  </div>
+                </div>
+                <div class="tag-preview hidden" id="tag-preview">
+                  <div>
+                    <span>EPC détecté</span><code id="scan-epc">—</code>
+                  </div>
+                  <div>
+                    <span>TID matériel</span><code id="scan-tid">—</code>
+                  </div>
+                  <div>
+                    <span>Signal</span><strong id="scan-rssi">—</strong>
+                  </div>
+                </div>
+                <div class="unknown-panel hidden" id="unknown-panel">
+                  <div>
+                    <i data-lucide="circle-alert"></i
+                    ><span
+                      ><strong>Livre inconnu</strong
+                      ><small
+                        >Ce tag n’est lié à aucun livre du catalogue.</small
+                      ></span
+                    >
+                  </div>
+                  <button class="button primary" id="register-tag-button">
+                    <i data-lucide="book-plus"></i
+                    ><span>Enregistrer le livre</span>
+                  </button>
+                </div>
+                <form class="quick-register hidden" id="quick-register-form">
+                  <div class="quick-register-heading">
+                    <div>
+                      <p class="eyebrow">Nouveau tag</p>
+                      <h3>Identifier le livre</h3>
+                    </div>
+                    <button
+                      type="button"
+                      class="icon-button"
+                      id="cancel-registration"
+                      title="Annuler"
+                      aria-label="Annuler"
+                    >
+                      <i data-lucide="x"></i>
+                    </button>
+                  </div>
+                  <label class="field"
+                    ><span>Titre du livre *</span>
+                    <div class="input-with-icon">
+                      <i data-lucide="search"></i
+                      ><input
+                        id="quick-title"
+                        name="title"
+                        required
+                        maxlength="240"
+                        autocomplete="off"
+                        placeholder="Saisir le titre"
+                      /></div
+                  ></label>
+                  <div
+                    class="title-suggestions hidden"
+                    id="title-suggestions"
+                  ></div>
+                  <button
+                    type="button"
+                    class="new-title-button hidden"
+                    id="new-title-button"
+                  >
+                    <i data-lucide="book-plus"></i
+                    ><span>Créer un nouveau livre avec ce titre</span>
+                  </button>
+                  <div class="quick-book-fields hidden" id="quick-book-fields">
+                    <div class="form-grid compact">
+                      <label class="field"
+                        ><span>Auteur</span
+                        ><input name="author" maxlength="240"
+                      /></label>
+                      <label class="field"
+                        ><span>ISBN</span
+                        ><input name="isbn" maxlength="32" inputmode="numeric"
+                      /></label>
+                      <label class="field"
+                        ><span>Éditeur</span
+                        ><input name="publisher" maxlength="240"
+                      /></label>
+                      <label class="field"
+                        ><span>Année de publication</span
+                        ><input
+                          name="publication_year"
+                          maxlength="4"
+                          inputmode="numeric"
+                      /></label>
+                      <label class="field"
+                        ><span>Catégorie</span
+                        ><input name="category" maxlength="120"
+                      /></label>
+                      <label class="field"
+                        ><span>Rayon / cote</span
+                        ><input name="shelf" maxlength="120"
+                      /></label>
+                      <label class="field wide"
+                        ><span>Notes</span
+                        ><textarea
+                          name="notes"
+                          rows="2"
+                          maxlength="2000"
+                        ></textarea>
+                      </label>
+                    </div>
+                    <button class="button primary full-width" type="submit">
+                      <i data-lucide="badge-check"></i
+                      ><span>Créer le livre et écrire le tag</span>
+                    </button>
+                  </div>
+                </form>
+                <div class="write-status" id="write-status">
+                  <span class="status-orbit"><i data-lucide="radio"></i></span>
+                  <div>
+                    <strong>Recherche en cours</strong>
+                    <p>
+                      Le poste surveille automatiquement la zone de lecture.
+                    </p>
+                  </div>
+                </div>
+              </section>
+            </div>
+          </section>
+
+          <section class="view" id="view-history">
+            <div class="section-heading">
+              <div>
+                <h2>Historique</h2>
+                <p>Traçabilité des lectures, écritures et connexions.</p>
+              </div>
+              <button class="button secondary" id="refresh-history">
+                <i data-lucide="refresh-cw"></i><span>Actualiser</span>
+              </button>
+            </div>
+            <div class="table-wrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th>Date</th>
+                    <th>Opération</th>
+                    <th>Résultat</th>
+                    <th>Livre</th>
+                    <th>Détail</th>
+                  </tr>
+                </thead>
+                <tbody id="history-table"></tbody>
+              </table>
+            </div>
+          </section>
+
+          <section class="view" id="view-settings">
+            <div class="section-heading">
+              <div>
+                <h2>Paramètres</h2>
+                <p>Connexion et comportement du lecteur RFID de bureau.</p>
+              </div>
+            </div>
+            <form class="settings-form" id="settings-form">
+              <div class="settings-section">
+                <div class="settings-copy">
+                  <h3>Mode de connexion</h3>
+                  <p>Interface utilisée par le lecteur.</p>
+                </div>
+                <div class="segmented connection-types">
+                  <label
+                    ><input
+                      type="radio"
+                      name="connection_type"
+                      value="usb"
+                      checked
+                    /><span><i data-lucide="usb"></i>USB HID</span></label
+                  >
+                  <label
+                    ><input
+                      type="radio"
+                      name="connection_type"
+                      value="serial"
+                    /><span><i data-lucide="cable"></i>Série</span></label
+                  >
+                  <label
+                    ><input
+                      type="radio"
+                      name="connection_type"
+                      value="tcp"
+                    /><span><i data-lucide="network"></i>TCP</span></label
+                  >
+                  <label
+                    ><input
+                      type="radio"
+                      name="connection_type"
+                      value="simulation"
+                    /><span
+                      ><i data-lucide="flask-conical"></i>Simulation</span
+                    ></label
+                  >
+                </div>
+              </div>
+              <div class="settings-section">
+                <div class="settings-copy">
+                  <h3>Point de connexion</h3>
+                  <p id="endpoint-help">
+                    Détection automatique du premier lecteur USB.
+                  </p>
+                </div>
+                <div class="endpoint-control">
+                  <select id="endpoint-select" aria-label="Lecteur détecté">
+                    <option value="">Détection automatique</option></select
+                  ><input
+                    id="endpoint-input"
+                    class="hidden"
+                    type="text"
+                    placeholder="COM3:115200"
+                  /><button
+                    class="icon-button"
+                    type="button"
+                    id="refresh-devices"
+                    title="Rechercher les lecteurs"
+                    aria-label="Rechercher les lecteurs"
+                  >
+                    <i data-lucide="refresh-cw"></i>
+                  </button>
+                </div>
+              </div>
+              <div class="settings-actions">
+                <button
+                  class="button secondary"
+                  type="button"
+                  id="test-connection"
+                >
+                  <i data-lucide="activity"></i><span>Tester</span></button
+                ><button class="button primary" type="submit">
+                  <i data-lucide="save"></i><span>Enregistrer</span>
+                </button>
+              </div>
+            </form>
+            <form class="settings-form timing-settings" id="reader-timing-form">
+              <div class="settings-section">
+                <div class="settings-copy">
+                  <h3>Signal sonore</h3>
+                  <p>
+                    Choisissez la sonnerie du firmware ou une impulsion
+                    marche/arrêt pilotée par le pont.
+                  </p>
+                </div>
+                <div class="buzzer-settings">
+                  <div
+                    class="segmented buzzer-modes"
+                    role="radiogroup"
+                    aria-label="Mode du buzzer"
+                  >
+                    <label
+                      ><input
+                        type="radio"
+                        name="beepMode"
+                        value="native"
+                      /><span
+                        ><i data-lucide="radio"></i>Buzzer natif</span
+                      ></label
+                    >
+                    <label
+                      ><input
+                        type="radio"
+                        name="beepMode"
+                        value="controlled"
+                        checked
+                      /><span
+                        ><i data-lucide="activity"></i>Impulsion contrôlée</span
+                      ></label
+                    >
+                  </div>
+                  <div class="timing-controls">
+                    <label class="field"
+                      ><span>Maintien de la commande (ms)</span
+                      ><input
+                        id="beep-duration-ms"
+                        name="beepDurationMs"
+                        type="number"
+                        min="20"
+                        max="1000"
+                        step="5"
+                        required
+                    /></label>
+                    <label class="field"
+                      ><span>Réarmement après retrait (ms)</span
+                      ><input
+                        id="beep-rearm-ms"
+                        name="rearmDelayMs"
+                        type="number"
+                        min="1"
+                        max="3600000"
+                        step="1"
+                        required
+                    /></label>
+                  </div>
+                </div>
+              </div>
+              <div class="settings-actions compile-actions">
+                <p id="bridge-compile-status" aria-live="polite">
+                  Configuration du pont en cours de lecture.
+                </p>
+                <div class="settings-action-buttons">
+                  <button
+                    class="button secondary"
+                    type="button"
+                    id="test-buzzer"
+                  >
+                    <i data-lucide="radio"></i
+                    ><span>Tester le bip</span></button
+                  ><button
+                    class="button primary"
+                    type="submit"
+                    id="compile-bridge"
+                  >
+                    <i data-lucide="settings-2"></i
+                    ><span>Recompiler et appliquer</span>
+                  </button>
+                </div>
+              </div>
+            </form>
+            <div class="protocol-note">
+              <i data-lucide="shield-check"></i>
+              <div>
+                <strong>Écriture protégée par TID</strong>
+                <p>
+                  Le tag est ciblé par son identifiant matériel et relu après
+                  chaque écriture.
+                </p>
+              </div>
+            </div>
+          </section>
+        </div>
+      </main>
+    </div>
+
+    <dialog id="book-dialog">
+      <form method="dialog" class="dialog-shell" id="book-form">
+        <div class="dialog-heading">
+          <div>
+            <p class="eyebrow">Catalogue</p>
+            <h2 id="book-dialog-title">Nouveau livre</h2>
+          </div>
+          <button
+            class="icon-button"
+            value="cancel"
+            formnovalidate
+            title="Fermer"
+            aria-label="Fermer"
+          >
+            <i data-lucide="x"></i>
+          </button>
+        </div>
+        <input type="hidden" name="id" />
+        <div class="form-grid">
+          <label class="field wide"
+            ><span>Titre *</span
+            ><input name="title" required maxlength="240" autocomplete="off"
+          /></label>
+          <label class="field"
+            ><span>Auteur</span><input name="author" maxlength="240"
+          /></label>
+          <label class="field"
+            ><span>ISBN</span
+            ><input name="isbn" maxlength="32" inputmode="numeric"
+          /></label>
+          <label class="field"
+            ><span>Éditeur</span><input name="publisher" maxlength="240"
+          /></label>
+          <label class="field"
+            ><span>Année de publication</span
+            ><input name="publication_year" maxlength="4" inputmode="numeric"
+          /></label>
+          <label class="field"
+            ><span>Catégorie</span><input name="category" maxlength="120"
+          /></label>
+          <label class="field"
+            ><span>Rayon / cote</span><input name="shelf" maxlength="120"
+          /></label>
+          <label class="field wide"
+            ><span>Notes</span
+            ><textarea name="notes" rows="3" maxlength="2000"></textarea>
+          </label>
+        </div>
+        <div class="dialog-actions">
+          <button class="button secondary" value="cancel" formnovalidate>
+            Annuler</button
+          ><button class="button primary" type="submit" value="default">
+            <i data-lucide="save"></i><span>Enregistrer</span>
+          </button>
+        </div>
+      </form>
+    </dialog>
+
+    <div class="toast-region" id="toast-region" aria-live="polite"></div>
+    <script src="/vendor/sweetalert2/sweetalert2.all.min.js"></script>
+    <script type="module" src="/app.js?v=21"></script>
+  </body>
+</html>

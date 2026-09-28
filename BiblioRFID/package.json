@@ -1,0 +1,70 @@
+{
+  "name": "biblio-rfid",
+  "version": "1.1.3",
+  "private": true,
+  "description": "Bibliotèque ZTF - catalogue local et station d'encodage RFID UHF",
+  "author": "BCM",
+  "type": "module",
+  "main": "desktop/main.cjs",
+  "scripts": {
+    "build:bridge": "powershell -NoProfile -ExecutionPolicy Bypass -File bridge/build.ps1",
+    "start": "node --no-warnings=ExperimentalWarning server.js",
+    "test": "node --test tests/*.test.js",
+    "test:ui": "node tests/ui-smoke.mjs",
+    "test:desktop": "node tests/desktop-smoke.mjs",
+    "desktop": "electron .",
+    "build:desktop": "electron-builder --win portable"
+  },
+  "dependencies": {
+    "exceljs": "^4.4.0",
+    "lucide": "^0.544.0",
+    "sweetalert2": "^11.26.25"
+  },
+  "overrides": {
+    "uuid": "11.1.1"
+  },
+  "devDependencies": {
+    "electron": "^38.1.2",
+    "electron-builder": "^26.0.12",
+    "playwright-core": "^1.63.0"
+  },
+  "build": {
+    "appId": "com.bibliorfid.desktop",
+    "productName": "Bibliotèque ZTF",
+    "asar": true,
+    "directories": {
+      "output": "dist-desktop"
+    },
+    "files": [
+      "desktop/**/*",
+      "server.js",
+      "public/**/*",
+      "lib/**/*",
+      "bridge/**/*",
+      "package.json"
+    ],
+    "extraResources": [
+      {
+        "from": "data",
+        "to": "seed-data",
+        "filter": [
+          "library.db",
+          "library.db-wal",
+          "library.db-shm"
+        ]
+      }
+    ],
+    "win": {
+      "icon": "build/icon.ico",
+      "target": [
+        {
+          "target": "portable",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "artifactName": "Biblioteque-ZTF-Windows-${version}.${ext}"
+    }
+  }
+}

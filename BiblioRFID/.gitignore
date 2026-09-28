@@ -1,0 +1,9 @@
+data/*.db
+data/*.db-*
+bridge/bin/
+node_modules/
+*.log
+artifacts/
+dist-desktop/
+win-unpacked/
+launcher/bin/

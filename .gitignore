@@ -1,0 +1,10 @@
+# Keep only the mobile app, desktop app, and API projects.
+/*
+!/.gitignore
+!/BiblioRFID/
+!/BiblioRFID-Sync-API/
+!/Android UHF HANDHELD READER with screen/
+
+# Inside the mobile collection, keep only the Flutter app.
+/Android UHF HANDHELD READER with screen/*
+!/Android UHF HANDHELD READER with screen/myscankey_flutter/
