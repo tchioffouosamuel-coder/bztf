@@ -3,8 +3,8 @@
 !/.gitignore
 !/BiblioRFID/
 !/BiblioRFID-Sync-API/
-!/Android UHF HANDHELD READER with screen/
+!/Reader/
 
-# Inside the mobile collection, keep only the Flutter app.
-/Android UHF HANDHELD READER with screen/*
-!/Android UHF HANDHELD READER with screen/myscankey_flutter/
+# Inside the reader collection, keep only the Flutter mobile app.
+/Reader/*
+!/Reader/myscankey_flutter/
