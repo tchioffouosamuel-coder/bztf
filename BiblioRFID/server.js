@@ -6,12 +6,14 @@ import { execFile, spawnSync } from "node:child_process";
 import { promisify } from "node:util";
 import { LibraryDatabase } from "./lib/database.js";
 import { ReaderService } from "./lib/reader-service.js";
+import { SyncService } from "./lib/sync-service.js";
 import {
   DEFAULT_READER_TIMING,
   bridgeSettingsSource,
   isTagRearmReady,
   isTagVisuallyReleased,
   normalizeReaderTiming,
+  storedRearmDelayMs,
 } from "./lib/reader-timing.js";
 import { parseCatalogWorkbook } from "./lib/xlsx-import.js";
 
@@ -31,6 +33,8 @@ const dataRoot = process.env.BIBLIORFID_DATA_DIR
   ? path.resolve(process.env.BIBLIORFID_DATA_DIR)
   : path.join(root, "data");
 const db = new LibraryDatabase(path.join(dataRoot, "library.db"));
+const syncService = new SyncService(db);
+syncService.initialize();
 const marker = "__RFID_JSON__";
 const EMPTY_EPC = "000000000000000000000000";
 let simulatedTag = {
@@ -43,27 +47,24 @@ const reader = new ReaderService(bridgeExe, marker);
 const presentTags = new Map();
 const stableTags = new Map();
 const announcedTags = new Map();
+const pendingActivityTags = new Set();
 let presenceSessionId = 0;
 const eventClients = new Set();
 const presenceTimeoutMs = 450;
 const visualReleaseDelayMs = 200;
+const configuredRearmDelayMs = storedRearmDelayMs(
+  db.getSetting("beep_rearm_ms", ""),
+  db.getSetting("beep_rearm_seconds", ""),
+);
 let readerTiming = normalizeReaderTiming({
   beepMode: db.getSetting("beep_mode", DEFAULT_READER_TIMING.beepMode),
   beepDurationMs: Number(
     db.getSetting("beep_duration_ms", DEFAULT_READER_TIMING.beepDurationMs),
   ),
-  rearmDelayMs: Number(
-    db.getSetting(
-      "beep_rearm_ms",
-      Number(
-        db.getSetting(
-          "beep_rearm_seconds",
-          DEFAULT_READER_TIMING.rearmDelayMs / 1000,
-        ),
-      ) * 1000,
-    ),
-  ),
+  rearmDelayMs: configuredRearmDelayMs,
 });
+if (db.getSetting("beep_rearm_ms", "") !== String(configuredRearmDelayMs))
+  db.setSettings({ beep_rearm_ms: String(configuredRearmDelayMs) });
 let beepRearmTimeoutMs = readerTiming.rearmDelayMs;
 let readerStatus = { connected: false, status: "Déconnecté" };
 let activeConnectionKey = "";
@@ -129,10 +130,11 @@ function sendEvent(response, event, payload) {
 }
 
 function recordPresenceChange(snapshot, signature) {
-  if (signature === lastPresenceSignature) return;
   lastPresenceSignature = signature;
   if (!snapshot.tags.length) return;
   for (const tag of snapshot.tags) {
+    const key = presenceKey(tag);
+    if (!pendingActivityTags.delete(key)) continue;
     db.addActivity(
       "lecture",
       "succes",
@@ -188,7 +190,10 @@ function handleReaderTag(rawTag) {
   presentTags.set(key, { tag, lastSeen: now });
   stableTags.set(key, { tag, lastSeen: now });
   announcedTags.set(key, now);
-  if (!alreadyAnnounced) scheduleBeep();
+  if (!alreadyAnnounced) {
+    pendingActivityTags.add(key);
+    scheduleBeep();
+  }
   scheduleBroadcast();
 }
 
@@ -196,6 +201,7 @@ function clearPresence() {
   presentTags.clear();
   stableTags.clear();
   announcedTags.clear();
+  pendingActivityTags.clear();
   clearTimeout(beepTimer);
   beepTimer = null;
   clearTimeout(broadcastTimer);
@@ -327,10 +333,10 @@ function compileBridge() {
       "-ExecutionPolicy",
       "Bypass",
       "-File",
-      path.join(root, "bridge", "build.ps1"),
+      path.join(bridgeRoot, "build.ps1"),
     ],
     {
-      cwd: root,
+      cwd: bridgeRoot,
       encoding: "utf8",
     },
   );
@@ -622,8 +628,37 @@ async function api(request, response, url) {
   }
   if (request.method === "POST" && pathname === "/api/books")
     return json(response, 201, db.createBook(await readBody(request)));
+  if (request.method === "GET" && pathname === "/api/subscribers")
+    return json(
+      response,
+      200,
+      db.listSubscribers(url.searchParams.get("search") || ""),
+    );
+  if (request.method === "DELETE" && pathname === "/api/books") {
+    const input = await readBody(request);
+    if (!Array.isArray(input.ids) || !input.ids.length)
+      return json(response, 400, { error: "Sélectionnez au moins un livre." });
+    return json(response, 200, { ok: true, ...db.deleteBooks(input.ids) });
+  }
 
   const bookMatch = pathname.match(/^\/api\/books\/(\d+)$/);
+  const bookDetailsMatch = pathname.match(/^\/api\/books\/(\d+)\/details$/);
+  if (bookDetailsMatch && request.method === "GET") {
+    const details = db.getBookDetails(bookDetailsMatch[1]);
+    return details
+      ? json(response, 200, details)
+      : json(response, 404, { error: "Livre introuvable." });
+  }
+  const borrowMatch = pathname.match(/^\/api\/books\/(\d+)\/borrow$/);
+  if (borrowMatch && request.method === "POST")
+    return json(
+      response,
+      201,
+      db.borrowBook(borrowMatch[1], await readBody(request)),
+    );
+  const returnMatch = pathname.match(/^\/api\/books\/(\d+)\/return$/);
+  if (returnMatch && request.method === "POST")
+    return json(response, 200, db.returnBook(returnMatch[1]));
   if (bookMatch && request.method === "GET") {
     const book = db.getBook(bookMatch[1]);
     return book
@@ -668,6 +703,20 @@ async function api(request, response, url) {
       connection_endpoint: connection.endpoint,
     });
     return json(response, 200, db.settings());
+  }
+  if (request.method === "GET" && pathname === "/api/sync/status")
+    return json(response, 200, syncService.status());
+  if (request.method === "PUT" && pathname === "/api/sync/settings") {
+    try {
+      const status = await syncService.configure(await readBody(request));
+      return json(response, 200, status);
+    } catch (error) {
+      return json(response, 400, { error: error.message });
+    }
+  }
+  if (request.method === "POST" && pathname === "/api/sync/run") {
+    const status = await syncService.syncNow();
+    return json(response, 200, status);
   }
 
   if (request.method === "GET" && pathname === "/api/devices") {
@@ -983,6 +1032,7 @@ async function shutdown() {
   clearTimeout(beepTimer);
   for (const client of eventClients) client.end();
   eventClients.clear();
+  syncService.close();
   try {
     await reader.shutdown();
   } catch {}

@@ -15,6 +15,7 @@ import CircleCheck from "/vendor/lucide/icons/circle-check.js";
 import Clock3 from "/vendor/lucide/icons/clock-3.js";
 import Download from "/vendor/lucide/icons/download.js";
 import FlaskConical from "/vendor/lucide/icons/flask-conical.js";
+import HandHelping from "/vendor/lucide/icons/hand-helping.js";
 import HistoryIcon from "/vendor/lucide/icons/history.js";
 import Inbox from "/vendor/lucide/icons/inbox.js";
 import LayoutDashboard from "/vendor/lucide/icons/layout-dashboard.js";
@@ -39,8 +40,10 @@ import ShieldCheck from "/vendor/lucide/icons/shield-check.js";
 import Sun from "/vendor/lucide/icons/sun.js";
 import Trash2 from "/vendor/lucide/icons/trash-2.js";
 import TriangleAlert from "/vendor/lucide/icons/triangle-alert.js";
+import Undo2 from "/vendor/lucide/icons/undo-2.js";
 import Upload from "/vendor/lucide/icons/upload.js";
 import Usb from "/vendor/lucide/icons/usb.js";
+import UserRound from "/vendor/lucide/icons/user-round.js";
 import X from "/vendor/lucide/icons/x.js";
 
 const lucideIcons = {
@@ -60,6 +63,7 @@ const lucideIcons = {
   "clock-3": Clock3,
   download: Download,
   "flask-conical": FlaskConical,
+  "hand-helping": HandHelping,
   history: HistoryIcon,
   inbox: Inbox,
   "layout-dashboard": LayoutDashboard,
@@ -84,14 +88,17 @@ const lucideIcons = {
   sun: Sun,
   "trash-2": Trash2,
   "triangle-alert": TriangleAlert,
+  "undo-2": Undo2,
   upload: Upload,
   usb: Usb,
+  "user-round": UserRound,
   x: X,
 };
 
 const $ = (selector, root = document) => root.querySelector(selector);
 const $$ = (selector, root = document) => [...root.querySelectorAll(selector)];
-const VISUAL_RELEASE_DELAY_MS = 100;
+const VISUAL_RELEASE_DELAY_MS =
+  Number(globalThis.BIBLIORFID_VISUAL_RELEASE_DELAY_MS) || 800;
 const BOOK_PAGE_SIZE = 200;
 
 const state = {
@@ -101,13 +108,18 @@ const state = {
   bookTotal: 0,
   bookStatus: "tous",
   bookSearch: "",
+  selectedBookIds: new Set(),
   selectedBook: null,
+  detailBook: null,
+  detailLoan: null,
+  subscribers: [],
   settings: { connection_type: "usb", connection_endpoint: "" },
   readerTiming: {
     beepMode: "controlled",
     beepDurationMs: 75,
     rearmDelayMs: 30000,
   },
+  sync: null,
   connected: false,
   activeView: "",
   autoReadEnabled: true,
@@ -326,6 +338,7 @@ function setView(name) {
   if (name === "catalogue") loadBooks();
   if (name === "station") startAutoReading();
   if (name === "history") loadHistory();
+  if (name === "settings") loadSyncStatus(false);
 }
 
 function emptyBlock(text) {
@@ -370,7 +383,8 @@ async function loadDashboard() {
 function bookTableRows(books) {
   return books
     .map(
-      (book) => `<tr>
+      (book) => `<tr data-id="${book.id}" class="${state.selectedBookIds.has(book.id) ? "selected" : ""}">
+    <td class="select-column"><input class="selection-checkbox book-select" type="checkbox" data-id="${book.id}" aria-label="Sélectionner ${escapeHtml(book.title)}" ${state.selectedBookIds.has(book.id) ? "checked" : ""}></td>
     <td><div class="table-book"><span class="book-glyph"><i data-lucide="book-open"></i></span><div><strong>${escapeHtml(book.title)}</strong><small>${escapeHtml(book.author || "Auteur non renseigné")}</small></div></div></td>
     <td><div class="mono">${escapeHtml(book.accession)}</div><div class="cell-subtle">${escapeHtml(book.isbn || "Sans ISBN")}</div></td>
     <td>${escapeHtml(book.shelf || "—")}<div class="cell-subtle">${escapeHtml(book.category || "Non classé")}</div></td>
@@ -386,6 +400,28 @@ function bookTableRows(books) {
     .join("");
 }
 
+function renderBookSelection() {
+  const visibleIds = state.books.map((book) => book.id);
+  const selectedVisible = visibleIds.filter((id) =>
+    state.selectedBookIds.has(id),
+  ).length;
+  const selectedCount = state.selectedBookIds.size;
+  const selectAll = $("#select-all-books");
+  selectAll.checked =
+    visibleIds.length > 0 && selectedVisible === visibleIds.length;
+  selectAll.indeterminate =
+    selectedVisible > 0 && selectedVisible < visibleIds.length;
+  selectAll.disabled = visibleIds.length === 0;
+  $("#book-selection-bar").classList.toggle("hidden", selectedCount === 0);
+  $("#book-selection-count").textContent = `${selectedCount} livre${selectedCount > 1 ? "s" : ""} sélectionné${selectedCount > 1 ? "s" : ""}`;
+  $("#delete-selected-books").disabled = selectedCount === 0;
+  $$(".book-select", $("#books-table")).forEach((checkbox) => {
+    const selected = state.selectedBookIds.has(Number(checkbox.dataset.id));
+    checkbox.checked = selected;
+    checkbox.closest("tr").classList.toggle("selected", selected);
+  });
+}
+
 async function loadBooks({ append = false } = {}) {
   try {
     const offset = append ? state.books.length : 0;
@@ -398,6 +434,12 @@ async function loadBooks({ append = false } = {}) {
     });
     const result = await api(`/api/books?${params}`);
     state.books = append ? [...state.books, ...result.books] : result.books;
+    if (!append) {
+      const visibleIds = new Set(state.books.map((book) => book.id));
+      state.selectedBookIds = new Set(
+        [...state.selectedBookIds].filter((id) => visibleIds.has(id)),
+      );
+    }
     state.bookTotal = result.total;
     const loadedText =
       state.books.length < state.bookTotal
@@ -414,6 +456,7 @@ async function loadBooks({ append = false } = {}) {
       "hidden",
       state.books.length >= state.bookTotal,
     );
+    renderBookSelection();
     icons();
   } catch (error) {
     toast(error.message, "error");
@@ -556,7 +599,12 @@ async function saveBook(event) {
 
 async function handleTableAction(event) {
   const button = event.target.closest("button[data-action]");
-  if (!button) return;
+  if (!button) {
+    const row = event.target.closest("tr[data-id]");
+    if (row && !event.target.closest(".select-column"))
+      openBookDetails(Number(row.dataset.id));
+    return;
+  }
   const book = state.books.find(
     (item) => item.id === Number(button.dataset.id),
   );
@@ -608,6 +656,298 @@ async function handleTableAction(event) {
     } catch (error) {
       toast(error.message, "error");
     }
+  }
+}
+
+const DETAIL_FIELDS = [
+  { name: "title", label: "Titre", maxlength: 240, wide: true },
+  { name: "author", label: "Auteur", maxlength: 240 },
+  { name: "isbn", label: "ISBN", maxlength: 32 },
+  { name: "publisher", label: "Éditeur", maxlength: 240 },
+  { name: "publication_year", label: "Année de publication", maxlength: 4 },
+  { name: "category", label: "Catégorie", maxlength: 120 },
+  { name: "shelf", label: "Rayon / cote", maxlength: 120 },
+  {
+    name: "notes",
+    label: "Notes",
+    maxlength: 2000,
+    wide: true,
+    multiline: true,
+  },
+];
+
+async function openBookDetails(id) {
+  try {
+    const details = await api(`/api/books/${id}/details`);
+    state.detailBook = details.book;
+    state.detailLoan = details.activeLoan;
+    renderBookDetails();
+    const dialog = $("#book-detail-dialog");
+    if (!dialog.open) dialog.showModal();
+  } catch (error) {
+    toast(error.message, "error");
+  }
+}
+
+function renderBookDetails() {
+  const book = state.detailBook;
+  const loan = state.detailLoan;
+  $("#book-detail-title").textContent = book.title;
+  $("#book-detail-summary").innerHTML = `<span class="book-glyph"><i data-lucide="book-open"></i></span>
+    <div><strong>${escapeHtml(book.author || "Auteur non renseigné")}</strong><span class="mono">${escapeHtml(book.accession)}</span></div>
+    <span class="status-badge ${book.status}">${statusLabel(book.status)}</span>`;
+  const editable = DETAIL_FIELDS.map((field) => {
+    const value = escapeHtml(book[field.name] || "");
+    const control = field.multiline
+      ? `<textarea name="${field.name}" rows="3" maxlength="${field.maxlength}" placeholder="Non renseigné" readonly>${value}</textarea>`
+      : `<input name="${field.name}" maxlength="${field.maxlength}" value="${value}" placeholder="Non renseigné" autocomplete="off" readonly />`;
+    return `<label class="book-detail-field${field.wide ? " wide" : ""}" data-field="${field.name}" title="Double-cliquez pour modifier"><span>${field.label}</span>${control}</label>`;
+  });
+  const readOnly = [
+    ["EPC", book.epc],
+    ["TID", book.tid || "—"],
+    ["Ajouté le", formatDate(book.created_at)],
+    ["Encodé le", formatDate(book.tagged_at)],
+  ].map(
+    ([label, value]) =>
+      `<div class="book-detail-field"><span>${label}</span><code>${escapeHtml(value)}</code></div>`,
+  );
+  $("#book-detail-fields").innerHTML = [
+    `<p class="book-detail-hint">Double-cliquez sur une information pour la modifier.</p>`,
+    ...editable,
+    ...readOnly,
+  ].join("");
+
+  const loanSummary = $("#book-loan-summary");
+  loanSummary.classList.toggle("hidden", !loan);
+  if (loan) {
+    const overdue = new Date(loan.due_at) < new Date();
+    const contact = [loan.subscriber_phone, loan.subscriber_email]
+      .filter(Boolean)
+      .map(escapeHtml)
+      .join(" · ");
+    loanSummary.innerHTML = `<i data-lucide="user-round"></i><div>
+      <strong>Emprunté par ${escapeHtml(loan.subscriber_name)} (${escapeHtml(loan.member_number)})</strong>
+      <span>Depuis le ${formatDate(loan.borrowed_at, false)} · ${overdue ? "en retard, attendu" : "retour prévu"} le ${formatDate(loan.due_at, false)}${contact ? ` · ${contact}` : ""}</span>
+    </div>`;
+  }
+  $("#detail-borrow-book").classList.toggle("hidden", Boolean(loan));
+  $("#detail-return-book").classList.toggle("hidden", !loan);
+  $("#save-book-details").classList.add("hidden");
+  icons();
+}
+
+function editBookDetailField(event) {
+  const field = event.target.closest(".book-detail-field[data-field]");
+  if (!field) return;
+  const control = $("input, textarea", field);
+  control.readOnly = false;
+  field.classList.add("editing");
+  field.removeAttribute("title");
+  $("#save-book-details").classList.remove("hidden");
+  control.focus();
+}
+
+async function saveBookDetails(event) {
+  if (event.submitter?.value === "cancel") return;
+  event.preventDefault();
+  const book = state.detailBook;
+  const fields = $("#book-detail-fields");
+  if (!book || !$(".book-detail-field.editing", fields)) return;
+  const input = Object.fromEntries(
+    DETAIL_FIELDS.map(({ name }) => [name, $(`[name="${name}"]`, fields).value]),
+  );
+  if (!input.title.trim()) {
+    toast("Le titre est obligatoire.", "error");
+    return;
+  }
+  const button = $("#save-book-details");
+  button.disabled = true;
+  try {
+    state.detailBook = await api(`/api/books/${book.id}`, {
+      method: "PUT",
+      body: JSON.stringify(input),
+    });
+    renderBookDetails();
+    toast("Livre mis à jour.");
+    await Promise.all([loadBooks(), loadDashboard()]);
+  } catch (error) {
+    toast(error.message, "error");
+  } finally {
+    button.disabled = false;
+  }
+}
+
+// SweetAlert s'affiche sous une <dialog> modale : on la masque le temps de
+// la confirmation, puis on la rouvre (avec ses modifications) si besoin.
+async function confirmOverDialog(dialog, options) {
+  dialog.close();
+  const confirmed = await confirmAction(options);
+  if (!confirmed) dialog.showModal();
+  return confirmed;
+}
+
+async function deleteDetailBook() {
+  const book = state.detailBook;
+  const dialog = $("#book-detail-dialog");
+  const confirmed = await confirmOverDialog(dialog, {
+    title: "Supprimer ce livre ?",
+    text: `« ${book.title} » sera retiré du catalogue.`,
+    confirmButtonText: "Supprimer",
+    confirmButtonClass: "button danger",
+  });
+  if (!confirmed) return;
+  try {
+    await api(`/api/books/${book.id}`, { method: "DELETE" });
+    state.selectedBookIds.delete(book.id);
+    toast("Livre supprimé.");
+    await Promise.all([loadBooks(), loadDashboard()]);
+  } catch (error) {
+    toast(error.message, "error");
+    dialog.showModal();
+  }
+}
+
+function localDateValue(date) {
+  return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
+}
+
+async function openLoanDialog() {
+  const form = $("#loan-form");
+  form.reset();
+  const dueDate = new Date();
+  dueDate.setDate(dueDate.getDate() + 14);
+  const tomorrow = new Date();
+  tomorrow.setDate(tomorrow.getDate() + 1);
+  form.elements.due_date.value = localDateValue(dueDate);
+  form.elements.due_date.min = localDateValue(tomorrow);
+  $("#loan-dialog-title").textContent = state.detailBook.title;
+  $("#loan-dialog").showModal();
+  setTimeout(() => form.elements.member_number.focus(), 50);
+  try {
+    state.subscribers = await api("/api/subscribers");
+    $("#subscriber-options").innerHTML = state.subscribers
+      .map(
+        (subscriber) =>
+          `<option value="${escapeHtml(subscriber.member_number)}">${escapeHtml(subscriber.name)}</option>`,
+      )
+      .join("");
+  } catch (error) {
+    toast(error.message, "error");
+  }
+}
+
+function fillLoanSubscriber(event) {
+  const number = event.target.value.trim().toUpperCase();
+  const subscriber = state.subscribers.find(
+    (item) => item.member_number.toUpperCase() === number,
+  );
+  if (!subscriber) return;
+  const form = $("#loan-form");
+  form.elements.name.value = subscriber.name;
+  form.elements.phone.value = subscriber.phone || "";
+  form.elements.email.value = subscriber.email || "";
+}
+
+async function submitLoan(event) {
+  if (event.submitter?.value === "cancel") return;
+  event.preventDefault();
+  const book = state.detailBook;
+  const input = Object.fromEntries(new FormData(event.currentTarget));
+  // Retour attendu en fin de journée, heure locale.
+  input.due_at = new Date(`${input.due_date}T23:59:00`).toISOString();
+  delete input.due_date;
+  try {
+    const result = await api(`/api/books/${book.id}/borrow`, {
+      method: "POST",
+      body: JSON.stringify(input),
+    });
+    $("#loan-dialog").close();
+    state.detailBook = result.book;
+    state.detailLoan = result.activeLoan;
+    renderBookDetails();
+    toast(`Emprunt enregistré pour ${result.activeLoan.subscriber_name}.`);
+    await Promise.all([loadBooks(), loadDashboard()]);
+  } catch (error) {
+    toast(error.message, "error");
+  }
+}
+
+async function returnDetailBook() {
+  const book = state.detailBook;
+  const loan = state.detailLoan;
+  const dialog = $("#book-detail-dialog");
+  const confirmed = await confirmOverDialog(dialog, {
+    title: "Enregistrer le retour ?",
+    text: `« ${book.title} » rendu par ${loan.subscriber_name}.`,
+    confirmButtonText: "Retour",
+  });
+  if (!confirmed) return;
+  try {
+    const result = await api(`/api/books/${book.id}/return`, {
+      method: "POST",
+      body: "{}",
+    });
+    state.detailBook = result.book;
+    state.detailLoan = result.activeLoan;
+    renderBookDetails();
+    toast("Retour enregistré.");
+    await Promise.all([loadBooks(), loadDashboard()]);
+  } catch (error) {
+    toast(error.message, "error");
+  } finally {
+    dialog.showModal();
+  }
+}
+
+function handleBookSelection(event) {
+  const checkbox = event.target.closest(".book-select");
+  if (!checkbox) return;
+  const id = Number(checkbox.dataset.id);
+  if (checkbox.checked) state.selectedBookIds.add(id);
+  else state.selectedBookIds.delete(id);
+  renderBookSelection();
+}
+
+function toggleAllVisibleBooks(event) {
+  for (const book of state.books) {
+    if (event.currentTarget.checked) state.selectedBookIds.add(book.id);
+    else state.selectedBookIds.delete(book.id);
+  }
+  renderBookSelection();
+}
+
+async function deleteSelectedBooks() {
+  const ids = [...state.selectedBookIds];
+  if (!ids.length) return;
+  const count = ids.length;
+  if (
+    !(await confirmAction({
+      title: `Supprimer ${count} livre${count > 1 ? "s" : ""} ?`,
+      text: `Les ${count} livres sélectionnés seront retirés du catalogue.`,
+      confirmButtonText: "Supprimer",
+      confirmButtonClass: "button danger",
+    }))
+  )
+    return;
+
+  const button = $("#delete-selected-books");
+  button.disabled = true;
+  try {
+    const result = await api("/api/books", {
+      method: "DELETE",
+      body: JSON.stringify({ ids }),
+    });
+    state.selectedBookIds.clear();
+    toast(
+      `${result.deleted} livre${result.deleted > 1 ? "s" : ""} supprimé${result.deleted > 1 ? "s" : ""}.`,
+    );
+    await Promise.all([loadBooks(), loadDashboard(), loadStationBooks()]);
+  } catch (error) {
+    toast(error.message, "error");
+    renderBookSelection();
+  } finally {
+    button.disabled = state.selectedBookIds.size === 0;
   }
 }
 
@@ -719,9 +1059,10 @@ function updateConnectionFields() {
 
 async function loadSettings() {
   try {
-    const [settings, readerTiming] = await Promise.all([
+    const [settings, readerTiming, sync] = await Promise.all([
       api("/api/settings"),
       api("/api/reader/timing"),
+      api("/api/sync/status"),
     ]);
     state.settings = {
       connection_type: "usb",
@@ -729,6 +1070,7 @@ async function loadSettings() {
       ...settings,
     };
     state.readerTiming = readerTiming;
+    renderSyncStatus(sync, true);
     const radio =
       $(
         `input[name=connection_type][value="${state.settings.connection_type}"]`,
@@ -740,7 +1082,7 @@ async function loadSettings() {
       $("input[name=beepMode][value=controlled]");
     buzzerMode.checked = true;
     $("#beep-duration-ms").value = readerTiming.beepDurationMs;
-    $("#beep-rearm-ms").value = readerTiming.rearmDelayMs;
+    $("#beep-rearm-seconds").value = readerTiming.rearmDelayMs / 1000;
     updateBuzzerModeFields();
     $("#bridge-compile-status").textContent = timingStatus(
       readerTiming,
@@ -755,12 +1097,100 @@ async function loadSettings() {
   }
 }
 
+function renderSyncStatus(sync, updateFields = false) {
+  state.sync = sync;
+  const status = $("#sync-status");
+  status.className = "sync-status";
+  if (sync.syncing) status.classList.add("syncing");
+  else if (sync.error) status.classList.add("error");
+  else if (sync.connected) status.classList.add("connected");
+
+  if (updateFields) {
+    $("#sync-server-url").value = sync.serverUrl || "";
+    $("#sync-device-name").value = sync.deviceName || "";
+    $("#sync-api-key").value = "";
+  }
+  $("#sync-api-key").placeholder = sync.apiKeyConfigured
+    ? "Clé déjà enregistrée"
+    : "Clé API Render";
+
+  let title = "Non configurée";
+  let detail = "Aucun serveur distant configuré.";
+  if (sync.syncing) {
+    title = "Synchronisation en cours";
+    detail = `${sync.pendingCount} modification(s) en attente.`;
+  } else if (sync.error) {
+    title = "Connexion impossible";
+    detail = sync.error;
+  } else if (sync.connected) {
+    title = "Synchronisation active";
+    detail = `${sync.pendingCount} en attente · dernière synchronisation ${formatDate(sync.lastSyncAt)}.`;
+  } else if (sync.configured) {
+    title = "Serveur configuré";
+    detail = `${sync.pendingCount} modification(s) en attente d’envoi.`;
+  }
+  $("#sync-status-title").textContent = title;
+  $("#sync-status-detail").textContent = detail;
+  $("#sync-now").disabled = !sync.configured || sync.syncing;
+}
+
+async function loadSyncStatus(showError = true) {
+  try {
+    renderSyncStatus(await api("/api/sync/status"));
+  } catch (error) {
+    if (showError) toast(error.message, "error");
+  }
+}
+
+async function saveSyncSettings(event) {
+  event.preventDefault();
+  const button = $("#save-sync");
+  button.disabled = true;
+  try {
+    const result = await api("/api/sync/settings", {
+      method: "PUT",
+      body: JSON.stringify({
+        serverUrl: $("#sync-server-url").value,
+        apiKey: $("#sync-api-key").value,
+        deviceName: $("#sync-device-name").value,
+      }),
+    });
+    $("#sync-api-key").value = "";
+    renderSyncStatus(result, true);
+    if (result.error)
+      toast(`Paramètres enregistrés. ${result.error}`, "error");
+    else toast("Serveur distant connecté et catalogue synchronisé.");
+  } catch (error) {
+    toast(error.message, "error");
+  } finally {
+    button.disabled = false;
+  }
+}
+
+async function runSyncNow() {
+  const button = $("#sync-now");
+  button.disabled = true;
+  renderSyncStatus({ ...state.sync, syncing: true });
+  try {
+    const result = await api("/api/sync/run", {
+      method: "POST",
+      body: "{}",
+    });
+    renderSyncStatus(result);
+    if (result.error) toast(result.error, "error");
+    else toast("Catalogue synchronisé.");
+  } catch (error) {
+    toast(error.message, "error");
+    await loadSyncStatus(false);
+  }
+}
+
 function timingStatus(timing, prefix) {
   const mode =
     timing.beepMode === "native"
       ? "buzzer natif"
       : `impulsion ${timing.beepDurationMs} ms`;
-  return `${prefix} : ${mode} · réarmement ${timing.rearmDelayMs} ms.`;
+  return `${prefix} : ${mode} · réarmement ${timing.rearmDelayMs / 1000} s.`;
 }
 
 function updateBuzzerModeFields() {
@@ -775,7 +1205,7 @@ async function saveReaderTiming(event) {
   const timing = {
     beepMode: $("input[name=beepMode]:checked")?.value || "controlled",
     beepDurationMs: Number($("#beep-duration-ms").value),
-    rearmDelayMs: Number($("#beep-rearm-ms").value),
+    rearmDelayMs: Number($("#beep-rearm-seconds").value) * 1000,
   };
   button.disabled = true;
   status.textContent = "Compilation du pont et reconnexion du lecteur…";
@@ -1298,6 +1728,18 @@ async function handleScanResult(result) {
   );
   let shouldRender = incoming.size === 0 && state.visualTags.size === 0;
 
+  if (incoming.size > 0 && state.visualTags.size > 0) {
+    const sameReading = [...incoming.keys()].some((key) =>
+      state.visualTags.has(key),
+    );
+    if (!sameReading) {
+      for (const timer of state.visualTagTimers.values()) clearTimeout(timer);
+      state.visualTagTimers.clear();
+      state.visualTags.clear();
+      shouldRender = true;
+    }
+  }
+
   for (const [key, tag] of incoming) {
     const timer = state.visualTagTimers.get(key);
     if (timer) clearTimeout(timer);
@@ -1340,6 +1782,26 @@ function bindEvents() {
   $("#connect-button").addEventListener("click", () => probeConnection());
   $("#book-form").addEventListener("submit", saveBook);
   $("#books-table").addEventListener("click", handleTableAction);
+  $("#book-detail-fields").addEventListener("dblclick", editBookDetailField);
+  $("#book-detail-fields").addEventListener("keydown", (event) => {
+    // Entrée enregistre au lieu de déclencher le bouton de fermeture.
+    if (event.key === "Enter" && event.target.matches("input")) {
+      event.preventDefault();
+      $("#book-detail-form").requestSubmit($("#save-book-details"));
+    }
+  });
+  $("#book-detail-form").addEventListener("submit", saveBookDetails);
+  $("#detail-delete-book").addEventListener("click", deleteDetailBook);
+  $("#detail-borrow-book").addEventListener("click", openLoanDialog);
+  $("#detail-return-book").addEventListener("click", returnDetailBook);
+  $("#loan-form").addEventListener("submit", submitLoan);
+  $("#loan-form").elements.member_number.addEventListener(
+    "change",
+    fillLoanSubscriber,
+  );
+  $("#books-table").addEventListener("change", handleBookSelection);
+  $("#select-all-books").addEventListener("change", toggleAllVisibleBooks);
+  $("#delete-selected-books").addEventListener("click", deleteSelectedBooks);
   $("#import-xlsx").addEventListener("click", () =>
     $("#xlsx-file-input").click(),
   );
@@ -1377,6 +1839,8 @@ function bindEvents() {
   $("#refresh-devices").addEventListener("click", () => refreshDevices(true));
   $("#test-connection").addEventListener("click", () => probeConnection());
   $("#settings-form").addEventListener("submit", saveSettings);
+  $("#sync-settings-form").addEventListener("submit", saveSyncSettings);
+  $("#sync-now").addEventListener("click", runSyncNow);
   $("#reader-timing-form").addEventListener("submit", saveReaderTiming);
   $("#test-buzzer").addEventListener("click", testBuzzer);
   $$("input[name=beepMode]").forEach((input) =>
@@ -1385,7 +1849,7 @@ function bindEvents() {
       $("#bridge-compile-status").textContent = "Modifications non appliquées.";
     }),
   );
-  [$("#beep-duration-ms"), $("#beep-rearm-ms")].forEach((input) =>
+  [$("#beep-duration-ms"), $("#beep-rearm-seconds")].forEach((input) =>
     input.addEventListener("input", () => {
       $("#bridge-compile-status").textContent = "Modifications non appliquées.";
     }),

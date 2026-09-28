@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { bridgeSettingsSource, isTagRearmReady, isTagVisuallyReleased, normalizeReaderTiming } from "../lib/reader-timing.js";
+import { bridgeSettingsSource, isTagRearmReady, isTagVisuallyReleased, normalizeReaderTiming, storedRearmDelayMs } from "../lib/reader-timing.js";
 
 test("valide les délais configurables du lecteur", () => {
   assert.deepEqual(normalizeReaderTiming({ beepMode: "native", beepDurationMs: 75, rearmDelayMs: 30000 }), {
@@ -9,8 +9,15 @@ test("valide les délais configurables du lecteur", () => {
     rearmDelayMs: 30000
   });
   assert.throws(() => normalizeReaderTiming({ beepDurationMs: 10, rearmDelayMs: 30000 }), /20 et 1000/);
-  assert.throws(() => normalizeReaderTiming({ beepDurationMs: 75, rearmDelayMs: 0 }), /1 et 3600000/);
+  assert.throws(() => normalizeReaderTiming({ beepDurationMs: 75, rearmDelayMs: 999 }), /1 et 3600 secondes/);
   assert.equal(normalizeReaderTiming({ beepDurationMs: 75, rearmDelaySeconds: 30 }).rearmDelayMs, 30000);
+});
+
+test("migre les anciens délais courts saisis en secondes", () => {
+  assert.equal(storedRearmDelayMs("10", "1"), 10000);
+  assert.equal(storedRearmDelayMs("30000", "1"), 30000);
+  assert.equal(storedRearmDelayMs("", "15"), 15000);
+  assert.equal(storedRearmDelayMs("invalide", ""), 30000);
 });
 
 test("génère les constantes C# compilées dans le pont", () => {

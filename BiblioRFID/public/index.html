@@ -275,10 +275,24 @@
                 <button data-status="encode">Encodés</button>
               </div>
             </div>
+            <div class="table-selection-bar hidden" id="book-selection-bar">
+              <strong id="book-selection-count">0 livre sélectionné</strong>
+              <button class="button danger" id="delete-selected-books" type="button">
+                <i data-lucide="trash-2"></i><span>Supprimer la sélection</span>
+              </button>
+            </div>
             <div class="table-wrap">
               <table>
                 <thead>
                   <tr>
+                    <th class="select-column">
+                      <input
+                        id="select-all-books"
+                        class="selection-checkbox"
+                        type="checkbox"
+                        aria-label="Sélectionner tous les livres affichés"
+                      />
+                    </th>
                     <th>Livre</th>
                     <th>Numéro</th>
                     <th>Localisation</th>
@@ -513,6 +527,65 @@
                 <p>Connexion et comportement du lecteur RFID de bureau.</p>
               </div>
             </div>
+            <form class="settings-form sync-settings" id="sync-settings-form">
+              <div class="settings-section">
+                <div class="settings-copy">
+                  <h3>Synchronisation distante</h3>
+                  <p>Catalogue partagé avec les terminaux mobiles.</p>
+                </div>
+                <div class="sync-fields">
+                  <label class="field wide"
+                    ><span>Adresse du serveur</span
+                    ><input
+                      id="sync-server-url"
+                      name="serverUrl"
+                      type="url"
+                      inputmode="url"
+                      autocomplete="url"
+                      placeholder="https://bztf.onrender.com"
+                  /></label>
+                  <label class="field"
+                    ><span>Clé d’appareil</span
+                    ><input
+                      id="sync-api-key"
+                      name="apiKey"
+                      type="password"
+                      autocomplete="new-password"
+                      placeholder="Clé API Render"
+                  /></label>
+                  <label class="field"
+                    ><span>Nom de ce poste</span
+                    ><input
+                      id="sync-device-name"
+                      name="deviceName"
+                      type="text"
+                      maxlength="120"
+                      placeholder="Poste principal"
+                  /></label>
+                </div>
+              </div>
+              <div class="settings-actions sync-actions">
+                <div class="sync-status" id="sync-status" aria-live="polite">
+                  <span class="sync-status-dot"></span>
+                  <div>
+                    <strong id="sync-status-title">Non configurée</strong>
+                    <p id="sync-status-detail">Aucun serveur distant configuré.</p>
+                  </div>
+                </div>
+                <div class="settings-action-buttons">
+                  <button
+                    class="button secondary"
+                    type="button"
+                    id="sync-now"
+                  >
+                    <i data-lucide="refresh-cw"></i
+                    ><span>Synchroniser maintenant</span></button
+                  ><button class="button primary" type="submit" id="save-sync">
+                    <i data-lucide="save"></i><span>Enregistrer</span>
+                  </button>
+                </div>
+              </div>
+            </form>
             <form class="settings-form" id="settings-form">
               <div class="settings-section">
                 <div class="settings-copy">
@@ -639,13 +712,13 @@
                         required
                     /></label>
                     <label class="field"
-                      ><span>Réarmement après retrait (ms)</span
+                      ><span>Réarmement après retrait (s)</span
                       ><input
-                        id="beep-rearm-ms"
-                        name="rearmDelayMs"
+                        id="beep-rearm-seconds"
+                        name="rearmDelaySeconds"
                         type="number"
                         min="1"
-                        max="3600000"
+                        max="3600"
                         step="1"
                         required
                     /></label>
@@ -748,8 +821,105 @@
       </form>
     </dialog>
 
+    <dialog id="book-detail-dialog">
+      <form method="dialog" class="dialog-shell book-detail-shell" id="book-detail-form">
+        <div class="dialog-heading">
+          <div>
+            <p class="eyebrow">Fiche du livre</p>
+            <h2 id="book-detail-title">Livre</h2>
+          </div>
+          <button
+            class="icon-button"
+            value="cancel"
+            formnovalidate
+            title="Fermer"
+            aria-label="Fermer"
+          >
+            <i data-lucide="x"></i>
+          </button>
+        </div>
+        <div class="book-detail-summary" id="book-detail-summary"></div>
+        <div class="book-loan-summary hidden" id="book-loan-summary"></div>
+        <div class="book-detail-fields" id="book-detail-fields"></div>
+        <div class="dialog-actions book-detail-actions">
+          <button class="button danger" id="detail-delete-book" type="button">
+            <i data-lucide="trash-2"></i><span>Supprimer</span>
+          </button>
+          <span class="action-spacer"></span>
+          <button class="button secondary hidden" id="detail-return-book" type="button">
+            <i data-lucide="undo-2"></i><span>Retourner</span>
+          </button>
+          <button class="button secondary" id="detail-borrow-book" type="button">
+            <i data-lucide="hand-helping"></i><span>Emprunter</span>
+          </button>
+          <button class="button primary hidden" id="save-book-details" type="submit">
+            <i data-lucide="save"></i><span>Enregistrer</span>
+          </button>
+        </div>
+      </form>
+    </dialog>
+
+    <dialog id="loan-dialog">
+      <form method="dialog" class="dialog-shell" id="loan-form">
+        <div class="dialog-heading">
+          <div>
+            <p class="eyebrow">Emprunt</p>
+            <h2 id="loan-dialog-title">Emprunter</h2>
+          </div>
+          <button
+            class="icon-button"
+            value="cancel"
+            formnovalidate
+            title="Fermer"
+            aria-label="Fermer"
+          >
+            <i data-lucide="x"></i>
+          </button>
+        </div>
+        <div class="form-grid">
+          <label class="field"
+            ><span>N° d’abonné *</span
+            ><input
+              name="member_number"
+              required
+              maxlength="80"
+              autocomplete="off"
+              list="subscriber-options"
+          /></label>
+          <label class="field"
+            ><span>Nom de l’abonné *</span
+            ><input name="name" required maxlength="240" autocomplete="off"
+          /></label>
+          <label class="field"
+            ><span>Téléphone</span
+            ><input name="phone" maxlength="80" inputmode="tel"
+          /></label>
+          <label class="field"
+            ><span>E-mail</span><input name="email" type="email" maxlength="240"
+          /></label>
+          <label class="field"
+            ><span>Retour prévu le *</span
+            ><input name="due_date" type="date" required
+          /></label>
+          <label class="field wide"
+            ><span>Notes</span
+            ><textarea name="notes" rows="2" maxlength="1000"></textarea>
+          </label>
+        </div>
+        <datalist id="subscriber-options"></datalist>
+        <div class="dialog-actions">
+          <button class="button secondary" value="cancel" formnovalidate>
+            Annuler</button
+          ><button class="button primary" type="submit" value="default">
+            <i data-lucide="hand-helping"></i
+            ><span>Enregistrer l’emprunt</span>
+          </button>
+        </div>
+      </form>
+    </dialog>
+
     <div class="toast-region" id="toast-region" aria-live="polite"></div>
     <script src="/vendor/sweetalert2/sweetalert2.all.min.js"></script>
-    <script type="module" src="/app.js?v=21"></script>
+    <script type="module" src="/app.js?v=22"></script>
   </body>
 </html>

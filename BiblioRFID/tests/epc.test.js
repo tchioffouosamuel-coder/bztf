@@ -76,3 +76,74 @@ test("catalogue, modifie et associe un tag à un livre", () => {
     fs.rmSync(directory, { recursive: true, force: true });
   }
 });
+
+test("supprime plusieurs livres dans une seule opération", () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "biblio-rfid-bulk-"));
+  let database;
+  try {
+    database = new LibraryDatabase(path.join(directory, "test.db"));
+    const first = database.createBook({ title: "Premier livre" });
+    const second = database.createBook({ title: "Deuxième livre" });
+    const preserved = database.createBook({ title: "Livre conservé" });
+
+    const result = database.deleteBooks([first.id, second.id, second.id, 999999]);
+
+    assert.deepEqual(result, { deleted: 2, missing: 1 });
+    assert.equal(database.getBook(first.id), undefined);
+    assert.equal(database.getBook(second.id), undefined);
+    assert.equal(database.getBook(preserved.id).title, "Livre conservé");
+    assert.equal(
+      database.activity().filter((item) =>
+        item.message.startsWith("Livre supprimé"),
+      ).length,
+      2,
+    );
+  } finally {
+    database?.close();
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("gère l'abonné, son abonnement et le cycle d'emprunt", () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "biblio-rfid-loan-"));
+  let database;
+  try {
+    database = new LibraryDatabase(path.join(directory, "test.db"));
+    const created = database.createBook({ title: "Livre empruntable" });
+    const tagged = database.markTagged(created.id, "E28068940000500A12AB0042");
+    const dueAt = new Date(Date.now() + 14 * 24 * 60 * 60 * 1000).toISOString();
+    const result = database.borrowBook(tagged.id, {
+      member_number: "AB-0001",
+      name: "Abonné Test",
+      email: "abonne@example.test",
+      phone: "+237600000000",
+      due_at: dueAt,
+    });
+
+    assert.equal(result.book.status, "indisponible");
+    assert.equal(result.activeLoan.subscriber_name, "Abonné Test");
+    assert.equal(database.listSubscribers("AB-0001")[0].active_loans, 1);
+    assert.throws(
+      () => database.borrowBook(tagged.id, {
+        member_number: "AB-0002",
+        name: "Autre Abonné",
+        due_at: dueAt,
+      }),
+      /déjà un emprunt actif/,
+    );
+    assert.throws(() => database.deleteBook(tagged.id), /retour/);
+
+    const returned = database.returnBook(tagged.id);
+    assert.equal(returned.book.status, "encode");
+    assert.equal(returned.activeLoan, null);
+    assert.equal(
+      database.activity().some((item) => item.type === "retour"),
+      true,
+    );
+    assert.equal(database.deleteBook(tagged.id), true);
+    assert.equal(database.getBook(tagged.id), undefined);
+  } finally {
+    database?.close();
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});

@@ -31,6 +31,25 @@ npm run build:desktop
 
 L’exécutable portable est produit dans `dist-desktop`.
 
+## Synchronisation distante
+
+La version desktop partage désormais son catalogue avec l’application mobile par
+l’API Kotlin. Dans **Paramètres > Synchronisation distante**, renseignez :
+
+- l’adresse `https://bztf.onrender.com` ;
+- la même clé que la variable `BIBLIORFID_API_KEY` configurée sur Render ;
+- un nom permettant d’identifier le poste.
+
+Le bouton **Enregistrer** teste la connexion et lance la première synchronisation.
+Les créations, modifications, encodages et suppressions sont ensuite envoyés en
+arrière-plan. Une file SQLite locale conserve les opérations pendant les coupures
+Internet, avec reprise automatique toutes les 60 secondes et notification en temps
+réel par WebSocket lorsqu’un autre appareil modifie le catalogue.
+
+Dans l’application Windows empaquetée, la recompilation du pont utilise la copie
+native extraite dans le profil `%APPDATA%\biblio-rfid\native`. Le contenu de
+`app.asar` reste ainsi en lecture seule.
+
 ## Premier essai
 
 1. Ouvrir **Paramètres**, choisir **Simulation**, puis enregistrer.
@@ -63,7 +82,7 @@ Le script `start.ps1` installe les icônes locales si nécessaire, compile `brid
 
 ## Configuration du buzzer
 
-La page **Paramètres** permet de choisir entre le **Buzzer natif** du firmware et une **Impulsion contrôlée** par commandes marche/arrêt. Elle permet aussi de modifier le maintien de l'impulsion et le délai de réarmement en millisecondes. Le bouton **Recompiler et appliquer** valide les valeurs, génère `bridge/BridgeSettings.cs`, recompile le pont puis reconnecte automatiquement le lecteur.
+La page **Paramètres** permet de choisir entre le **Buzzer natif** du firmware et une **Impulsion contrôlée** par commandes marche/arrêt. Elle permet aussi de modifier le maintien de l'impulsion en millisecondes et le délai de réarmement en secondes. Le bouton **Recompiler et appliquer** valide les valeurs, génère `bridge/BridgeSettings.cs`, recompile le pont puis reconnecte automatiquement le lecteur.
 
 La commande de compilation équivalente, à exécuter depuis le dossier `BiblioRFID`, est :
 

@@ -5,5 +5,6 @@ node_modules/
 *.log
 artifacts/
 dist-desktop/
+dist-desktop-*/
 win-unpacked/
 launcher/bin/

@@ -11,7 +11,7 @@ const packageInfo = JSON.parse(
 );
 const executable = path.join(
   root,
-  "dist-desktop",
+  process.env.BIBLIORFID_DESKTOP_DIR || "dist-desktop",
   "win-unpacked",
   "Bibliotèque ZTF.exe",
 );
@@ -73,6 +73,26 @@ try {
     bridgeProbe.status,
     200,
     `Le pont RFID empaqueté doit démarrer: ${bridgeProbe.body.error || "erreur inconnue"}`,
+  );
+  const bridgeCompile = await window.evaluate(async () => {
+    const timing = await (await fetch("/api/reader/timing")).json();
+    if (timing.rearmDelayMs !== 10000)
+      throw new Error(`Migration anti-rebond incorrecte : ${timing.rearmDelayMs} ms.`);
+    const response = await fetch("/api/reader/timing", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        beepMode: timing.beepMode,
+        beepDurationMs: timing.beepDurationMs,
+        rearmDelayMs: timing.rearmDelayMs,
+      }),
+    });
+    return { status: response.status, body: await response.json() };
+  });
+  assert.equal(
+    bridgeCompile.status,
+    200,
+    `Le pont RFID extrait doit être recompilable: ${bridgeCompile.body.error || "erreur inconnue"}`,
   );
   console.log("Fenêtre native et authentification desktop validées.");
 } finally {

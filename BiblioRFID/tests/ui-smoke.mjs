@@ -47,10 +47,48 @@ try {
   assert.equal(await desktop.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth), true, "Pas de débordement horizontal desktop.");
   await desktop.screenshot({ path: path.join(output, "dashboard-desktop.png"), fullPage: true });
 
+  let catalogueBooks = [
+    { id: 901, accession: "BCM-2026-000901", title: "LIVRE À SUPPRIMER 1", author: "AUTEUR 1", isbn: "", shelf: "A-01", category: "Test", status: "a_encoder" },
+    { id: 902, accession: "BCM-2026-000902", title: "LIVRE À SUPPRIMER 2", author: "AUTEUR 2", isbn: "", shelf: "A-02", category: "Test", status: "encode" },
+  ];
+  let deletedBookIds = [];
+  await desktop.route("**/api/books?*", (route) => {
+    const url = new URL(route.request().url());
+    const payload = url.searchParams.get("paged") === "1"
+      ? { books: catalogueBooks, total: catalogueBooks.length }
+      : catalogueBooks;
+    return route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify(payload),
+    });
+  });
+  await desktop.route("**/api/books", async (route) => {
+    if (route.request().method() !== "DELETE") return route.continue();
+    deletedBookIds = route.request().postDataJSON().ids;
+    catalogueBooks = catalogueBooks.filter(
+      (book) => !deletedBookIds.includes(book.id),
+    );
+    return route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ ok: true, deleted: deletedBookIds.length, missing: 0 }),
+    });
+  });
   await desktop.click('[data-view="catalogue"]');
   await desktop.waitForSelector("#view-catalogue.active");
   assert.equal(await desktop.locator("#view-catalogue table").isVisible(), true);
   assert.equal(await desktop.locator("#import-xlsx").isVisible(), true);
+  await desktop.locator(".book-select").nth(0).check();
+  await desktop.locator(".book-select").nth(1).check();
+  assert.match(await desktop.locator("#book-selection-count").innerText(), /2 livres sélectionnés/);
+  assert.equal(await desktop.locator("#books-table tr.selected").count(), 2);
+  await desktop.screenshot({ path: path.join(output, "catalogue-bulk-selection.png"), fullPage: true });
+  await desktop.click("#delete-selected-books");
+  await desktop.click(".swal2-confirm");
+  await desktop.waitForSelector('.toast:has-text("2 livres supprimés")');
+  assert.deepEqual(deletedBookIds.sort(), [901, 902]);
+  assert.equal(await desktop.locator(".book-select").count(), 0);
   await desktop.route("**/api/import/xlsx", (route) => route.fulfill({
     status: 200,
     contentType: "application/json",
@@ -66,10 +104,10 @@ try {
   await desktop.click('[data-view="settings"]');
   await desktop.waitForSelector("#view-settings.active");
   const configuredBeep = Number(await desktop.locator("#beep-duration-ms").inputValue());
-  const configuredRearm = Number(await desktop.locator("#beep-rearm-ms").inputValue());
+  const configuredRearm = Number(await desktop.locator("#beep-rearm-seconds").inputValue());
   assert.ok(configuredBeep >= 20 && configuredBeep <= 1000);
-  assert.ok(configuredRearm >= 1 && configuredRearm <= 3600000);
-  assert.equal(await desktop.locator("#beep-rearm-ms").getAttribute("step"), "1");
+  assert.ok(configuredRearm >= 1 && configuredRearm <= 3600);
+  assert.equal(await desktop.locator("#beep-rearm-seconds").getAttribute("step"), "1");
   assert.equal(await desktop.locator('input[name="beepMode"]:checked').inputValue(), "controlled");
   await desktop.locator('label:has(input[name="beepMode"][value="native"])').click();
   assert.equal(await desktop.locator("#beep-duration-ms").isDisabled(), true);
@@ -207,6 +245,7 @@ try {
   const bounce = await browser.newPage({ viewport: { width: 1280, height: 900 } });
   bounce.on("pageerror", (error) => errors.push(error.message));
   await bounce.addInitScript(() => {
+    window.BIBLIORFID_VISUAL_RELEASE_DELAY_MS = 100;
     class FakeEventSource {
       static CLOSED = 2;
       static instances = [];
@@ -237,6 +276,20 @@ try {
   await bounce.evaluate(() => window.emitRfidSnapshot({ ok: true, count: 0, tags: [], book: null, reader: { connected: true } }));
   await bounce.waitForTimeout(180);
   assert.equal(await bounce.locator("#selected-book").evaluate((element) => element.classList.contains("empty")), true, "Un retrait confirmé doit libérer l'affichage.");
+
+  const replacementTag = {
+    epc: "300833B2DDD9014000000090",
+    tid: "E28000000000000000000090",
+    rssi: 82,
+  };
+  await bounce.evaluate((tag) => window.emitRfidSnapshot({ ok: true, count: 1, tags: [tag], book: null, presenceSessionId: 2, reader: { connected: true } }), bouncingTag);
+  await bounce.waitForSelector("#unknown-panel:not(.hidden)");
+  await bounce.evaluate(() => window.emitRfidSnapshot({ ok: true, count: 0, tags: [], book: null, presenceSessionId: 2, reader: { connected: true } }));
+  await bounce.waitForTimeout(40);
+  await bounce.evaluate((tag) => window.emitRfidSnapshot({ ok: true, count: 1, tags: [tag], book: null, presenceSessionId: 3, reader: { connected: true } }), replacementTag);
+  await bounce.waitForTimeout(40);
+  assert.equal(await bounce.locator("#scan-tid").innerText(), replacementTag.tid, "Un nouveau tag doit remplacer immédiatement l'ancien affichage.");
+  assert.equal(await bounce.locator("#multiple-identification").isVisible(), false, "Un remplacement séquentiel ne doit pas être présenté comme une lecture multiple.");
 
   const stableMultipleTags = [
     { epc: "42434D0107EA000000018223", tid: "E28000000000000000000001", rssi: 91, book: { id: 1, accession: "BCM-2026-000001", title: "INNER HEALING", author: "ZACHARIAS TANE FOMUM" } },

@@ -4,6 +4,25 @@ export const DEFAULT_READER_TIMING = Object.freeze({
   rearmDelayMs: 30000
 });
 
+const MIN_REARM_DELAY_MS = 1000;
+const MAX_REARM_DELAY_MS = 3600000;
+
+export function storedRearmDelayMs(
+  storedMilliseconds,
+  legacySeconds,
+  fallback = DEFAULT_READER_TIMING.rearmDelayMs,
+) {
+  const stored = Number(storedMilliseconds);
+  if (Number.isInteger(stored) && stored >= MIN_REARM_DELAY_MS && stored <= MAX_REARM_DELAY_MS)
+    return stored;
+  if (Number.isInteger(stored) && stored >= 1 && stored < MIN_REARM_DELAY_MS)
+    return stored * 1000;
+  const legacy = Number(legacySeconds);
+  if (Number.isInteger(legacy) && legacy >= 1 && legacy <= 3600)
+    return legacy * 1000;
+  return fallback;
+}
+
 export function isTagVisuallyReleased({ lastSeen, now, presenceTimeoutMs, visualReleaseDelayMs }) {
   return now - lastSeen >= presenceTimeoutMs + visualReleaseDelayMs;
 }
@@ -21,8 +40,8 @@ export function normalizeReaderTiming(input = {}, fallback = DEFAULT_READER_TIMI
   if (!Number.isInteger(beepDurationMs) || beepDurationMs < 20 || beepDurationMs > 1000) {
     throw new Error("La durée du bip doit être un entier compris entre 20 et 1000 ms.");
   }
-  if (!Number.isInteger(rearmDelayMs) || rearmDelayMs < 1 || rearmDelayMs > 3600000) {
-    throw new Error("Le délai de réarmement doit être un entier compris entre 1 et 3600000 ms.");
+  if (!Number.isInteger(rearmDelayMs) || rearmDelayMs < MIN_REARM_DELAY_MS || rearmDelayMs > MAX_REARM_DELAY_MS) {
+    throw new Error("Le délai de réarmement doit être compris entre 1 et 3600 secondes.");
   }
   return { beepMode, beepDurationMs, rearmDelayMs };
 }
