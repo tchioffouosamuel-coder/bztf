@@ -100,6 +100,7 @@ class KioskController extends ChangeNotifier {
   int unknownTags = 0;
   String? notice;
   bool processing = false;
+  bool _encoding = false;
   KioskReceipt? receipt;
   int receiptSecondsLeft = 0;
 
@@ -283,6 +284,84 @@ class KioskController extends ChangeNotifier {
 
   Future<void> reconnect() => _ensureReading();
 
+  /// Encode la carte de [target] avec le lecteur du poste : un seul tag posé,
+  /// ni livre ni carte d'un autre abonné, écriture vérifiée par relecture.
+  Future<Subscriber> encodeCard(Subscriber target) async {
+    final cardEpc = target.cardEpc;
+    if (cardEpc == null || !isCardEpc(cardEpc)) {
+      throw StateError('Cet abonné n’a pas d’identifiant de carte.');
+    }
+    if (_encoding) throw StateError('Un encodage est déjà en cours.');
+    if (transport != 'simulation' && endpoint.isEmpty) {
+      throw StateError('Configurez d’abord le lecteur RFID de bureau.');
+    }
+    _encoding = true;
+    _reconnectTimer?.cancel();
+    notifyListeners();
+    try {
+      if (!reader.connected) await _connect();
+      final tags = (await reader.capture(
+        power: power,
+      )).where((tag) => tag.epc != ReaderService.emptyEpc || tag.tid.isNotEmpty);
+      if (tags.isEmpty) {
+        throw StateError('Aucun tag détecté. Posez la carte sur le lecteur.');
+      }
+      if (tags.length > 1) {
+        throw StateError('Plusieurs tags détectés. Ne laissez que la carte.');
+      }
+      final tag = tags.single;
+      if (tag.tid.isEmpty) {
+        throw StateError(
+          'Le tag ne fournit pas de TID; l’écriture sécurisée est annulée.',
+        );
+      }
+      final book = await library.database.bookForTag(tag.epc, tag.tid);
+      if (book != null) {
+        throw StateError(
+          'Ce tag est le livre ${book.accession}. Utilisez une carte vierge.',
+        );
+      }
+      final owner = await library.database.cardForTag(tag.epc, tag.tid);
+      if (owner != null && owner.id != target.id) {
+        throw StateError('Ce tag est déjà la carte de ${owner.name}.');
+      }
+      // Encodé sur un autre appareil et pas encore synchronisé ici.
+      if (isValidEpc(tag.epc)) {
+        throw StateError(
+          'Ce tag est un livre encodé sur un autre appareil. '
+          'Utilisez une carte vierge.',
+        );
+      }
+      if (owner == null && isCardEpc(tag.epc) && tag.epc != cardEpc) {
+        throw StateError(
+          'Ce tag est la carte d’un autre abonné, pas encore synchronisée '
+          'sur ce poste.',
+        );
+      }
+      final result = await reader.writeEpc(cardEpc, tag.tid);
+      if (result['verified'] != true || result['epc'] != cardEpc) {
+        throw StateError('L’écriture de la carte n’a pas été vérifiée.');
+      }
+      final updated = await library.database.markCardTagged(target.id, tag.tid);
+      await library.database.addActivity(
+        'carte',
+        'succes',
+        'Carte encodée pour ${updated.name} (${updated.memberNumber})',
+      );
+      // La carte encore posée ne doit pas ouvrir une session d'emprunt.
+      _lingering[cardEpc] = DateTime.now();
+      return updated;
+    } finally {
+      _encoding = false;
+      if (active) {
+        await _ensureReading();
+      } else if (reader.reading) {
+        await reader.stopInventory();
+      }
+      notifyListeners();
+    }
+  }
+
   void startBorrow() => _beginSession(KioskStage.borrow);
 
   void startReturn() => _beginSession(KioskStage.giveBack);
@@ -348,7 +427,9 @@ class KioskController extends ChangeNotifier {
   }
 
   Future<void> _onTag(ReaderTag tag) async {
-    if (!active || processing || stage == KioskStage.receipt) return;
+    if (!active || processing || _encoding || stage == KioskStage.receipt) {
+      return;
+    }
     final epc = tag.epc.trim().toUpperCase();
     if (epc.isEmpty || epc == ReaderService.emptyEpc) return;
     final now = DateTime.now();

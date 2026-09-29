@@ -13,6 +13,8 @@ import com.gg.reader.api.protocol.gx.MsgAppGetReaderInfo
 import com.gg.reader.api.protocol.gx.MsgBaseInventoryEpc
 import com.gg.reader.api.protocol.gx.MsgBaseSetPower
 import com.gg.reader.api.protocol.gx.MsgBaseStop
+import com.gg.reader.api.protocol.gx.MsgBaseWriteEpc
+import com.gg.reader.api.protocol.gx.ParamEpcFilter
 import com.gg.reader.api.protocol.gx.ParamEpcReadTid
 import io.flutter.plugin.common.BinaryMessenger
 import io.flutter.plugin.common.EventChannel
@@ -38,6 +40,9 @@ class DeskReaderBridge(
 	@Volatile private var client: GClient? = null
 	@Volatile private var eventSink: EventChannel.EventSink? = null
 
+	/** Relecture de contrôle en cours : TID → EPC lus, non transmis à Flutter. */
+	@Volatile private var verification: ConcurrentHashMap<String, String>? = null
+
 	init {
 		MethodChannel(messenger, METHOD_CHANNEL).setMethodCallHandler(::handle)
 		EventChannel(messenger, EVENT_CHANNEL).setStreamHandler(object : EventChannel.StreamHandler {
@@ -60,6 +65,7 @@ class DeskReaderBridge(
 			}
 			"startInventory" -> startInventory(call.argument<Int>("power"), result)
 			"stopInventory" -> stopInventory(result)
+			"writeEpc" -> writeEpc(call.argument<String>("epc") ?: "", call.argument<String>("tid") ?: "", result)
 			"keepScreenOn" -> {
 				keepScreenOn(call.argument<Boolean>("enabled") == true)
 				result.success(null)
@@ -173,11 +179,100 @@ class DeskReaderBridge(
 		}
 	}
 
+	/**
+	 * Écriture sûre, comme la démo du SDK (WriteFragment) : lecture arrêtée,
+	 * PC + EPC écrits dans la zone EPC à partir du mot 1 en filtrant le TID,
+	 * puis relecture filtrée sur ce TID. La lecture continue reste arrêtée.
+	 */
+	private fun writeEpc(epcInput: String, tidInput: String, result: MethodChannel.Result) {
+		val epc = epcInput.trim().uppercase(Locale.ROOT)
+		val tid = tidInput.trim().uppercase(Locale.ROOT)
+		if (epc.isEmpty() || epc.length % 4 != 0 || !epc.all { it in HEX }) {
+			result.error("INVALID_EPC", "L'EPC doit être hexadécimal et contenir un nombre entier de mots de 16 bits.", null)
+			return
+		}
+		if (tid.isEmpty() || !tid.all { it in HEX }) {
+			result.error("INVALID_TID", "Le TID du tag est obligatoire pour une écriture sécurisée.", null)
+			return
+		}
+		val current = client
+		if (current == null) {
+			result.error("READER_OFFLINE", "Connectez le lecteur de bureau avant l'écriture.", null)
+			return
+		}
+		executor.execute {
+			try {
+				current.sendSynMsg(MsgBaseStop())
+				val write = MsgBaseWriteEpc()
+				write.antennaEnable = EnumG.AntennaNo_1
+				write.area = EnumG.WriteArea_Epc
+				write.start = 1
+				write.hexWriteData = "%04X".format((epc.length / 4) shl 11) + epc
+				write.filter = tidFilter(tid)
+				current.sendSynMsg(write)
+				if (!write.succeeded()) {
+					postError(result, "WRITE_FAILED", "Le lecteur de bureau a refusé l'écriture${write.detail()}.")
+					return@execute
+				}
+				Thread.sleep(VERIFY_SETTLE_MS)
+				val seen = ConcurrentHashMap<String, String>()
+				verification = seen
+				try {
+					val inventory = MsgBaseInventoryEpc()
+					inventory.antennaEnable = EnumG.AntennaNo_1
+					inventory.inventoryMode = EnumG.InventoryMode_Inventory
+					inventory.filter = tidFilter(tid)
+					inventory.readTid = ParamEpcReadTid().apply {
+						mode = EnumG.ParamTidMode_Auto
+						len = TID_WORDS
+					}
+					current.sendSynMsg(inventory)
+					if (inventory.succeeded()) {
+						val deadline = SystemClock.elapsedRealtime() + VERIFY_TIMEOUT_MS
+						while (SystemClock.elapsedRealtime() < deadline && seen.values.none { it == epc }) {
+							Thread.sleep(50)
+						}
+					}
+					current.sendSynMsg(MsgBaseStop())
+				} finally {
+					verification = null
+				}
+				val readBack = seen.entries.firstOrNull { (seenTid, seenEpc) -> seenEpc == epc && sameChip(seenTid, tid) }
+				if (readBack == null) {
+					postError(result, "WRITE_UNVERIFIED", "Écriture envoyée, mais la relecture de contrôle ne correspond pas.")
+					return@execute
+				}
+				tagEventAt.clear()
+				mainHandler.post { result.success(mapOf("verified" to true, "epc" to epc, "tid" to readBack.key)) }
+			} catch (error: Throwable) {
+				Log.e(TAG, "Desk reader write failed", error)
+				postError(result, "WRITE_FAILED", error.message ?: "Écriture impossible.")
+			}
+		}
+	}
+
+	private fun tidFilter(tid: String) = ParamEpcFilter().apply {
+		area = EnumG.ParamFilterArea_TID
+		bitStart = 0
+		bitLength = tid.length * 4
+		hexData = tid
+	}
+
+	/** Deux lectures d'une même puce peuvent renvoyer des TID de longueurs différentes. */
+	private fun sameChip(read: String, expected: String): Boolean {
+		val common = minOf(read.length, expected.length)
+		return read == expected || (common >= 16 && read.take(common) == expected.take(common))
+	}
+
 	/** Appelé par le fil de réception du SDK : aucun traitement bloquant ici. */
 	private fun onTag(info: LogBaseEpcInfo?) = runCatching {
 		if (info == null || info.result != 0) return@runCatching
 		val epc = info.epc.orEmpty().filter { it.isLetterOrDigit() }.uppercase(Locale.ROOT)
 		if (epc.isEmpty()) return@runCatching
+		verification?.let { seen ->
+			seen[info.tid.orEmpty().filter { it.isLetterOrDigit() }.uppercase(Locale.ROOT)] = epc
+			return@runCatching
+		}
 		val now = SystemClock.elapsedRealtime()
 		val last = tagEventAt[epc]
 		if (last != null && now - last < TAG_EVENT_DEBOUNCE_MS) return@runCatching
@@ -230,5 +325,8 @@ class DeskReaderBridge(
 		const val MAX_POWER = 33
 		const val TID_WORDS = 6
 		const val TAG_EVENT_DEBOUNCE_MS = 300L
+		const val VERIFY_SETTLE_MS = 180L
+		const val VERIFY_TIMEOUT_MS = 1800L
+		const val HEX = "0123456789ABCDEF"
 	}
 }

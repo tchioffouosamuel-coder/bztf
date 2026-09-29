@@ -16,6 +16,7 @@ import {
   storedRearmDelayMs,
 } from "./lib/reader-timing.js";
 import { parseCatalogWorkbook } from "./lib/xlsx-import.js";
+import { isCardEpc, isValidEpc } from "./lib/epc.js";
 
 const execFileAsync = promisify(execFile);
 const root = path.dirname(fileURLToPath(import.meta.url));
@@ -98,17 +99,29 @@ function presenceKey(tag) {
   return tag.tid || tag.epc;
 }
 
+/**
+ * Nature d'un tag d'après son EPC, même inconnu de ce poste (encodé sur un
+ * autre appareil, pas encore synchronisé) : livre, carte d'abonné ou vierge.
+ */
+function tagKind(epc, book, subscriber) {
+  if (book) return "book";
+  if (subscriber || isCardEpc(epc)) return "card";
+  return isValidEpc(epc) ? "book" : "blank";
+}
+
 function currentSnapshot({ raw = false } = {}) {
   const source = raw ? presentTags : stableTags;
   const tags = [...source.values()].map(({ tag }) => {
     const normalized = normalizeTag(tag);
     const book = db.recognizeTag(normalized.epc, normalized.tid);
+    const subscriber = book
+      ? null
+      : publicSubscriber(db.recognizeCard(normalized.epc, normalized.tid));
     return {
       ...normalized,
       book,
-      subscriber: book
-        ? null
-        : publicSubscriber(db.recognizeCard(normalized.epc, normalized.tid)),
+      subscriber,
+      kind: tagKind(normalized.epc, book, subscriber),
     };
   });
   const books = [
@@ -661,6 +674,24 @@ async function api(request, response, url) {
       200,
       db.listSubscribers(url.searchParams.get("search") || ""),
     );
+  if (request.method === "GET" && pathname === "/api/loans")
+    return json(
+      response,
+      200,
+      db.listLoans({
+        filter: url.searchParams.get("filter") || "active",
+        search: url.searchParams.get("search") || "",
+      }),
+    );
+  if (request.method === "GET" && pathname === "/api/subscriptions")
+    return json(
+      response,
+      200,
+      db.listSubscriptions({
+        filter: url.searchParams.get("filter") || "tous",
+        search: url.searchParams.get("search") || "",
+      }),
+    );
   // Abonnés et abonnements : les erreurs de validation renvoient 400.
   const lending = async (status, action) => {
     try {
@@ -1042,6 +1073,18 @@ async function api(request, response, url) {
         return json(response, 409, {
           ok: false,
           error: `Ce tag est déjà la carte de ${target.subscriber.name}.`,
+        });
+      if (target.kind === "book")
+        return json(response, 409, {
+          ok: false,
+          error:
+            "Ce tag est un livre encodé sur un autre poste. Utilisez une carte vierge.",
+        });
+      if (!target.subscriber && target.kind === "card" && target.epc !== subscriber.card_epc)
+        return json(response, 409, {
+          ok: false,
+          error:
+            "Ce tag est la carte d'un autre abonné, pas encore synchronisée sur ce poste.",
         });
       let result;
       if (connection.type === "simulation") {

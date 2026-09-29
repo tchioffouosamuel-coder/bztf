@@ -125,6 +125,12 @@ const state = {
   subscriberFilter: "tous",
   subscriberSearch: "",
   detailSubscriber: null,
+  loanRows: [],
+  loanFilter: "active",
+  loanSearch: "",
+  subscriptionRows: [],
+  subscriptionFilter: "tous",
+  subscriptionSearch: "",
   cardScanActive: false,
   cardScanTimer: null,
   cardTagKey: null,
@@ -154,6 +160,8 @@ const viewMeta = {
   dashboard: ["Vue d’ensemble", "Tableau de bord"],
   catalogue: ["Gestion du fonds", "Catalogue"],
   subscribers: ["Lecteurs inscrits", "Abonnés"],
+  subscriptions: ["Lecteurs inscrits", "Abonnements"],
+  loans: ["Circulation", "Emprunts"],
   station: ["Opérations RFID", "Station RFID"],
   history: ["Traçabilité", "Historique"],
   settings: ["Configuration", "Paramètres"],
@@ -353,6 +361,8 @@ function setView(name) {
   if (name === "dashboard") loadDashboard();
   if (name === "catalogue") loadBooks();
   if (name === "subscribers") loadSubscribers();
+  if (name === "subscriptions") loadSubscriptionRegister();
+  if (name === "loans") loadLoans();
   if (name === "station") startAutoReading();
   if (name === "history") loadHistory();
   if (name === "settings") loadSyncStatus(false);
@@ -900,6 +910,7 @@ function renderSubscribers() {
     <td>${Number(subscriber.active_loans) || 0} en cours${overdue ? `<div class="cell-subtle danger-text">${overdue} en retard</div>` : ""}</td>
     <td>${subscriber.card_tid ? `<span class="status-badge encode">Encodée</span>` : `<span class="cell-subtle">Non encodée</span>`}</td>
     <td><div class="table-actions">
+      <button class="icon-button" data-subscriber-action="card" data-id="${subscriber.id}" title="Encoder la carte" aria-label="Encoder la carte"><i data-lucide="id-card"></i></button>
       <button class="icon-button" data-subscriber-action="edit" data-id="${subscriber.id}" title="Modifier" aria-label="Modifier"><i data-lucide="pencil"></i></button>
       <button class="icon-button danger" data-subscriber-action="delete" data-id="${subscriber.id}" title="Supprimer" aria-label="Supprimer"><i data-lucide="trash-2"></i></button>
     </div></td>
@@ -1047,8 +1058,171 @@ async function handleSubscriberTable(event) {
   if (!id) return;
   const subscriber = state.subscriberRows.find((row) => row.id === id);
   if (button?.dataset.subscriberAction === "edit") openSubscriberDialog(subscriber);
+  else if (button?.dataset.subscriberAction === "card") encodeCardFor(subscriber);
   else if (button?.dataset.subscriberAction === "delete") deleteSubscriber(subscriber);
   else openSubscriberDetails(id);
+}
+
+/**
+ * Encode la carte RFID d'un abonné existant : le serveur exige un seul tag,
+ * refuse un livre ou la carte d'un autre abonné, puis vérifie l'écriture.
+ */
+async function encodeCardFor(subscriber, dialog = null) {
+  const replacing = Boolean(subscriber.card_tid);
+  const options = {
+    title: replacing ? "Réencoder la carte ?" : "Encoder la carte ?",
+    text: `Posez ${replacing ? "la nouvelle carte" : "une carte vierge"} de ${subscriber.name}, seule, sur le lecteur, puis confirmez.${replacing ? " L’ancienne carte ne sera plus reconnue." : ""}`,
+    confirmButtonText: "Encoder",
+  };
+  const confirmed = dialog
+    ? await confirmOverDialog(dialog, options)
+    : await confirmAction(options);
+  if (!confirmed) return;
+  try {
+    const result = await api("/api/subscribers/card", {
+      method: "POST",
+      body: JSON.stringify({
+        member_number: subscriber.member_number,
+        name: subscriber.name,
+        phone: subscriber.phone,
+        email: subscriber.email,
+        ...getConnection(),
+      }),
+    });
+    toast(`Carte encodée pour ${result.subscriber.name}.`);
+    await loadSubscribers();
+  } catch (error) {
+    toast(error.message, "error");
+  }
+  if (dialog) await openSubscriberDetails(subscriber.id);
+}
+
+function loanStatusBadge(loan) {
+  if (loan.returned_at)
+    return new Date(loan.returned_at) > new Date(loan.due_at)
+      ? { css: "a_encoder", label: "Rendu en retard" }
+      : { css: "encode", label: "Rendu" };
+  return new Date(loan.due_at) < new Date()
+    ? { css: "indisponible", label: "En retard" }
+    : { css: "encode", label: "En cours" };
+}
+
+async function loadLoans() {
+  try {
+    state.loanRows = await api(
+      `/api/loans?filter=${encodeURIComponent(state.loanFilter)}&search=${encodeURIComponent(state.loanSearch)}`,
+    );
+    renderLoans();
+  } catch (error) {
+    toast(error.message, "error");
+  }
+}
+
+function renderLoans() {
+  const rows = state.loanRows;
+  $("#loans-count").textContent =
+    `${rows.length} emprunt${rows.length > 1 ? "s" : ""}`;
+  $("#loans-empty").classList.toggle("hidden", rows.length > 0);
+  $("#loan-register").innerHTML = rows
+    .map((loan) => {
+      const badge = loanStatusBadge(loan);
+      return `<tr data-loan-id="${loan.id}">
+    <td><div class="table-book"><span class="book-glyph"><i data-lucide="book-open"></i></span><div><strong>${escapeHtml(loan.book_title || "Livre supprimé")}</strong><small class="mono">${escapeHtml(loan.book_accession || "")}</small></div></div></td>
+    <td>${escapeHtml(loan.subscriber_name)}<div class="cell-subtle mono">${escapeHtml(loan.member_number)}</div></td>
+    <td>${formatDate(loan.borrowed_at, false)}</td>
+    <td>${formatDate(loan.due_at, false)}</td>
+    <td><span class="status-badge ${badge.css}">${badge.label}</span>${loan.returned_at ? `<div class="cell-subtle">le ${formatDate(loan.returned_at, false)}</div>` : ""}</td>
+    <td><div class="table-actions">
+      ${loan.returned_at ? "" : `<button class="icon-button" data-loan-action="return" data-id="${loan.id}" title="Enregistrer le retour" aria-label="Enregistrer le retour"><i data-lucide="undo-2"></i></button>`}
+      <button class="icon-button" data-loan-action="subscriber" data-id="${loan.id}" title="Fiche abonné" aria-label="Fiche abonné"><i data-lucide="user-round"></i></button>
+    </div></td>
+  </tr>`;
+    })
+    .join("");
+  icons();
+}
+
+async function handleLoanRegister(event) {
+  const button = event.target.closest("button[data-loan-action]");
+  if (!button) return;
+  const loan = state.loanRows.find((row) => row.id === Number(button.dataset.id));
+  if (!loan) return;
+  if (button.dataset.loanAction === "subscriber") {
+    openSubscriberDetails(loan.subscriber_id);
+    return;
+  }
+  const confirmed = await confirmAction({
+    title: "Enregistrer le retour ?",
+    text: `« ${loan.book_title} » rendu par ${loan.subscriber_name}.`,
+    confirmButtonText: "Retour",
+  });
+  if (!confirmed) return;
+  try {
+    await api(`/api/books/${loan.book_id}/return`, { method: "POST", body: "{}" });
+    toast("Retour enregistré.");
+    await Promise.all([loadLoans(), loadDashboard()]);
+  } catch (error) {
+    toast(error.message, "error");
+  }
+}
+
+async function loadSubscriptionRegister() {
+  try {
+    state.subscriptionRows = await api(
+      `/api/subscriptions?filter=${encodeURIComponent(state.subscriptionFilter)}&search=${encodeURIComponent(state.subscriptionSearch)}`,
+    );
+    renderSubscriptionRegister();
+  } catch (error) {
+    toast(error.message, "error");
+  }
+}
+
+function renderSubscriptionRegister() {
+  const rows = state.subscriptionRows;
+  $("#subscriptions-count").textContent =
+    `${rows.length} abonnement${rows.length > 1 ? "s" : ""}`;
+  $("#subscriptions-empty").classList.toggle("hidden", rows.length > 0);
+  $("#subscription-register").innerHTML = rows
+    .map((subscription) => {
+      const status = subscriptionStatusLabel(subscription);
+      return `<tr data-subscriber-id="${subscription.subscriber_id}">
+    <td><div class="table-book"><span class="book-glyph"><i data-lucide="user-round"></i></span><div><strong>${escapeHtml(subscription.subscriber_name)}</strong><small class="mono">${escapeHtml(subscription.member_number)}</small></div></div></td>
+    <td>${formatDate(subscription.starts_at, false)}</td>
+    <td>${formatDate(subscription.ends_at, false)}</td>
+    <td><span class="status-badge ${status.css}">${status.label}</span>${subscription.subscriber_active ? "" : `<div class="cell-subtle danger-text">Compte désactivé</div>`}</td>
+    <td>${Number(subscription.loan_count) || 0}</td>
+    <td><div class="table-actions">
+      <button class="icon-button" data-subscriber-id="${subscription.subscriber_id}" title="Fiche abonné" aria-label="Fiche abonné"><i data-lucide="pencil"></i></button>
+    </div></td>
+  </tr>`;
+    })
+    .join("");
+  icons();
+}
+
+function handleSubscriptionRegister(event) {
+  const id = Number(
+    event.target.closest("[data-subscriber-id]")?.dataset.subscriberId,
+  );
+  if (id) openSubscriberDetails(id);
+}
+
+/** Recherche et filtres d'un registre : saisie temporisée, boutons exclusifs. */
+function bindRegisterControls(searchSelector, filterSelector, stateKey, load) {
+  $(searchSelector).addEventListener("input", (event) => {
+    state[`${stateKey}Search`] = event.target.value;
+    clearTimeout(event.target.timer);
+    event.target.timer = setTimeout(load, 180);
+  });
+  $$(`${filterSelector} button`).forEach((button) =>
+    button.addEventListener("click", () => {
+      state[`${stateKey}Filter`] = button.dataset.filter;
+      $$(`${filterSelector} button`).forEach((item) =>
+        item.classList.toggle("active", item === button),
+      );
+      load();
+    }),
+  );
 }
 
 function openSubscriptionDialog(subscription = null) {
@@ -1268,11 +1442,21 @@ function applyCardSnapshot(snapshot) {
     );
     return;
   }
-  if (tag.book) {
+  if (tag.book || tag.kind === "book") {
     setCardStatus(
       "Ce tag est un livre",
-      `${tag.book.accession} · ${tag.book.title}. Posez la carte de l’abonné.`,
+      tag.book
+        ? `${tag.book.accession} · ${tag.book.title}. Posez la carte de l’abonné.`
+        : "Livre encodé sur un autre poste. Posez la carte de l’abonné.",
       "error",
+    );
+    return;
+  }
+  if (tag.kind === "card") {
+    setCardStatus(
+      "Carte non reconnue",
+      "Carte encodée sur un autre poste : synchronisez ce poste.",
+      "warning",
     );
     return;
   }
@@ -1886,6 +2070,33 @@ function showSubscriberCard(subscriber) {
   icons();
 }
 
+/** Tag au format carte ou livre, mais inconnu de ce poste : jamais réécrit. */
+function showForeignTag(tag) {
+  const card = tag.kind === "card";
+  state.selectedBook = null;
+  $("#multiple-identification").classList.add("hidden");
+  $("#unknown-panel").classList.add("hidden");
+  $("#quick-register-form").classList.add("hidden");
+  const container = $("#selected-book");
+  container.classList.remove("hidden");
+  container.className = "selected-book";
+  container.innerHTML = `<i data-lucide="${card ? "id-card" : "book-dashed"}"></i><div class="selected-book-copy">
+    <span class="selection-label">${card ? "Carte d’abonné" : "Livre"} non reconnu</span><h3>${card ? "Carte d’un autre poste" : "Livre d’un autre poste"}</h3>
+    <p>Ce tag a été encodé ailleurs. Synchronisez ce poste pour l’identifier ; il ne sera pas réécrit.</p>
+    <div class="selected-identifiers"><strong>EPC</strong><code>${escapeHtml(tag.epc || "—")}</code></div>
+  </div>`;
+  setWriteStatus(
+    card ? "Carte non reconnue" : "Livre non reconnu",
+    "Synchronisation nécessaire",
+    "warning",
+  );
+  setReaderBanner(
+    card ? "Carte d’abonné détectée" : "Livre détecté",
+    "Tag encodé sur un autre poste, absent du catalogue local.",
+  );
+  icons();
+}
+
 function showUnknownTag(tag) {
   state.selectedBook = null;
   $("#multiple-identification").classList.add("hidden");
@@ -2183,6 +2394,11 @@ async function renderVisualTags(notify = true) {
     return;
   }
 
+  if (tag.kind === "card" || tag.kind === "book") {
+    showForeignTag(tag);
+    return;
+  }
+
   showUnknownTag(tag);
   setReaderBanner(
     "Nouveau tag détecté",
@@ -2337,6 +2553,26 @@ function bindEvents() {
   $("#new-subscription").addEventListener("click", () => openSubscriptionDialog());
   $("#subscription-form").addEventListener("submit", saveSubscription);
   $("#subscriptions-table").addEventListener("click", handleSubscriptionTable);
+  $("#detail-encode-card").addEventListener("click", () =>
+    encodeCardFor(
+      state.detailSubscriber.subscriber,
+      $("#subscriber-detail-dialog"),
+    ),
+  );
+  // Une fiche ouverte depuis un registre peut l'avoir modifié.
+  $("#subscriber-detail-dialog").addEventListener("close", () => {
+    if (state.activeView === "loans") loadLoans();
+    if (state.activeView === "subscriptions") loadSubscriptionRegister();
+  });
+  $("#loan-register").addEventListener("click", handleLoanRegister);
+  $("#subscription-register").addEventListener("click", handleSubscriptionRegister);
+  bindRegisterControls("#loan-search", "#loan-filter", "loan", loadLoans);
+  bindRegisterControls(
+    "#subscription-search",
+    "#subscription-filter",
+    "subscription",
+    loadSubscriptionRegister,
+  );
   $("#detail-edit-subscriber").addEventListener("click", () =>
     openSubscriberDialog(state.detailSubscriber.subscriber),
   );

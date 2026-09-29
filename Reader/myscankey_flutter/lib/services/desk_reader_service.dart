@@ -116,6 +116,54 @@ class DeskReaderService {
     }
   }
 
+  /// Tags distincts (par EPC) remontés pendant [duration], lecture continue
+  /// démarrée si besoin.
+  Future<List<ReaderTag>> capture({
+    Duration duration = const Duration(milliseconds: 1500),
+    int? power,
+  }) async {
+    final seen = <String, ReaderTag>{};
+    final subscription = tags.listen(
+      (tag) {
+        final known = seen[tag.epc];
+        // Garde la remontée qui fournit un TID.
+        if (known == null || known.tid.isEmpty) seen[tag.epc] = tag;
+      },
+      onError: (_) {},
+    );
+    try {
+      if (!reading) await startInventory(power: power);
+      await Future<void>.delayed(duration);
+    } finally {
+      await subscription.cancel();
+    }
+    return seen.values.toList();
+  }
+
+  /// Écrit [epc] sur le tag identifié par [tid], relecture de contrôle
+  /// comprise. La lecture continue est arrêtée à l'issue.
+  Future<Map<Object?, Object?>> writeEpc(String epc, String tid) async {
+    if (!connected) {
+      throw StateError('Connectez le lecteur de bureau avant l’écriture.');
+    }
+    _simulationTimer?.cancel();
+    _reading = false;
+    if (_transport == 'simulation') {
+      final current = _simulatedTags.values.where((tag) => tag.tid == tid);
+      if (current.isEmpty) throw StateError('Le tag a été retiré du lecteur.');
+      final written = ReaderTag(epc: epc, tid: tid, rssi: current.first.rssi);
+      _simulatedTags
+        ..remove(current.first.epc)
+        ..[epc] = written;
+      return {'verified': true, 'epc': epc, 'tid': tid};
+    }
+    return await _methods.invokeMapMethod<Object?, Object?>('writeEpc', {
+          'epc': epc,
+          'tid': tid,
+        }) ??
+        const {};
+  }
+
   Future<void> disconnect() async {
     if (!_connected) return;
     await stopInventory();

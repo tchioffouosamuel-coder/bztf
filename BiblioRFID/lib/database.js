@@ -45,6 +45,17 @@ function changePriority(change) {
   );
 }
 
+/**
+ * node:sqlite refuse un paramètre nommé absent de la requête : seuls ceux
+ * qu'elle référence (`@nom`) sont transmis.
+ */
+function allNamed(db, sql, params) {
+  const used = Object.fromEntries(
+    Object.entries(params).filter(([key]) => sql.includes(`@${key}`)),
+  );
+  return db.prepare(sql).all(used);
+}
+
 export class LibraryDatabase {
   constructor(filePath) {
     fs.mkdirSync(path.dirname(filePath), { recursive: true });
@@ -603,6 +614,60 @@ export class LibraryDatabase {
       )
       .all(subscriber.id);
     return { subscriber, subscriptions, loans };
+  }
+
+  /** Registre des emprunts : en cours, en retard, rendus ou tous. */
+  listLoans({ filter = "active", search = "" } = {}) {
+    const term = `%${cleanText(search, 120)}%`;
+    const now = new Date().toISOString();
+    const condition =
+      {
+        active: "l.returned_at IS NULL",
+        overdue: "l.returned_at IS NULL AND l.due_at < @now",
+        returned: "l.returned_at IS NOT NULL",
+      }[filter] || "1=1";
+    return allNamed(
+      this.db,
+      `SELECT l.*, b.title AS book_title, b.accession AS book_accession,
+          s.name AS subscriber_name, s.member_number
+         FROM loans l
+         LEFT JOIN books b ON b.id=l.book_id
+         JOIN subscribers s ON s.id=l.subscriber_id
+         WHERE ${condition}
+           AND (b.title LIKE @term OR b.accession LIKE @term OR s.name LIKE @term OR s.member_number LIKE @term)
+         ORDER BY CASE WHEN l.returned_at IS NULL THEN l.due_at END ASC,
+           l.returned_at DESC, l.id DESC
+         LIMIT 500`,
+      { now, term },
+    );
+  }
+
+  /** Registre des abonnements avec leur abonné. */
+  listSubscriptions({ filter = "tous", search = "" } = {}) {
+    const term = `%${cleanText(search, 120)}%`;
+    const now = new Date();
+    const soon = new Date(now.getTime() + 30 * 24 * 3600 * 1000);
+    const running =
+      "sub.status='active' AND sub.starts_at <= @now AND sub.ends_at >= @now";
+    const condition =
+      {
+        actifs: running,
+        bientot: `${running} AND sub.ends_at <= @soon`,
+        expires:
+          "sub.status<>'suspended' AND (sub.status='expired' OR sub.ends_at < @now)",
+        suspendus: "sub.status='suspended'",
+      }[filter] || "1=1";
+    return allNamed(
+      this.db,
+      `SELECT sub.*, s.name AS subscriber_name, s.member_number, s.active AS subscriber_active,
+          (SELECT COUNT(*) FROM loans WHERE subscription_id=sub.id) AS loan_count
+         FROM subscriptions sub JOIN subscribers s ON s.id=sub.subscriber_id
+         WHERE ${condition}
+           AND (s.name LIKE @term OR s.member_number LIKE @term)
+         ORDER BY sub.ends_at DESC, sub.id DESC
+         LIMIT 500`,
+      { now: now.toISOString(), soon: soon.toISOString(), term },
+    );
   }
 
   createSubscriber(input) {

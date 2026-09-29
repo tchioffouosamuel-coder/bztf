@@ -9,6 +9,7 @@ import 'package:path/path.dart' as path;
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:sqflite_common_ffi/sqflite_ffi.dart';
 
+import 'package:myscankey_flutter/core/epc.dart';
 import 'package:myscankey_flutter/data/library_database.dart';
 import 'package:myscankey_flutter/models/book.dart';
 import 'package:myscankey_flutter/models/lending.dart';
@@ -402,6 +403,85 @@ void main() {
     }
   });
 
+  test('encode une carte d’abonné avec le lecteur du poste', () async {
+    final database = LibraryDatabase.instance;
+    final member = await database.saveSubscriber(
+      memberNumber: 'ab-9',
+      name: 'Nouvel abonné',
+    );
+    final other = await _subscriberWithCard(database, 'ab-8', 'A008');
+    final book = await _taggedBook(database, 'Livre', 'B009');
+    const blank = ReaderTag(
+      epc: '300833B2DDD9014000000000',
+      tid: 'E2801170200000000000C0DE',
+      rssi: 55,
+    );
+    final desk = _FakeDeskReader();
+    final controller = LibraryController(
+      database: database,
+      reader: _SilentReader(),
+      deskReader: desk,
+    );
+    final kiosk = controller.kiosk..transport = 'simulation';
+    try {
+      expect(member.hasCard, isFalse);
+
+      desk.placed = [];
+      await expectLater(
+        kiosk.encodeCard(member),
+        throwsA(predicate((e) => '$e'.contains('Aucun tag'))),
+      );
+
+      desk.placed = [blank, _bookTag(book)];
+      await expectLater(
+        kiosk.encodeCard(member),
+        throwsA(predicate((e) => '$e'.contains('Plusieurs tags'))),
+      );
+
+      // Un livre ou la carte d'un autre abonné n'est jamais réécrit.
+      desk.placed = [_bookTag(book)];
+      await expectLater(
+        kiosk.encodeCard(member),
+        throwsA(predicate((e) => '$e'.contains('livre'))),
+      );
+      desk.placed = [_cardTag(other)];
+      await expectLater(
+        kiosk.encodeCard(member),
+        throwsA(predicate((e) => '$e'.contains(other.name))),
+      );
+      // Livre ou carte encodés sur un autre appareil, inconnus ici.
+      desk.placed = [
+        ReaderTag(epc: generateEpc(2026, 999), tid: blank.tid, rssi: 50),
+      ];
+      await expectLater(
+        kiosk.encodeCard(member),
+        throwsA(predicate((e) => '$e'.contains('autre appareil'))),
+      );
+      desk.placed = [
+        ReaderTag(epc: generateCardEpc(), tid: blank.tid, rssi: 50),
+      ];
+      await expectLater(
+        kiosk.encodeCard(member),
+        throwsA(predicate((e) => '$e'.contains('autre abonné'))),
+      );
+      expect(desk.written, isEmpty);
+
+      desk.placed = [blank];
+      final encoded = await kiosk.encodeCard(member);
+      expect(encoded.hasCard, isTrue);
+      expect(encoded.cardTid, blank.tid);
+      expect(desk.written.single, (member.cardEpc, blank.tid));
+      expect(
+        (await database.cardForTag(member.cardEpc!, blank.tid))?.id,
+        member.id,
+      );
+      // Hors poste actif, la lecture n'est pas laissée en marche.
+      expect(desk.reading, isFalse);
+    } finally {
+      controller.dispose();
+    }
+  });
+
   test('le type d’appareil est mémorisé', () async {
     final controller = LibraryController(
       database: LibraryDatabase.instance,
@@ -587,6 +667,10 @@ class _FakeDeskReader extends DeskReaderService {
   @override
   Stream<ReaderTag> get tags => _events.stream;
 
+  /// Tags posés sur le lecteur, remontés au démarrage de la lecture.
+  List<ReaderTag> placed = [];
+  final List<(String, String)> written = [];
+
   void emit(ReaderTag tag) => _events.add(tag);
 
   @override
@@ -599,7 +683,18 @@ class _FakeDeskReader extends DeskReaderService {
   }
 
   @override
-  Future<void> startInventory({int? power}) async => _reading = true;
+  Future<void> startInventory({int? power}) async {
+    _reading = true;
+    final tags = List.of(placed);
+    Timer(const Duration(milliseconds: 20), () => tags.forEach(emit));
+  }
+
+  @override
+  Future<Map<Object?, Object?>> writeEpc(String epc, String tid) async {
+    _reading = false;
+    written.add((epc, tid));
+    return {'verified': true, 'epc': epc, 'tid': tid};
+  }
 
   @override
   Future<void> stopInventory() async => _reading = false;

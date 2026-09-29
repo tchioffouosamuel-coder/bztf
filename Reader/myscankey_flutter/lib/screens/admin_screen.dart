@@ -9,6 +9,7 @@ import '../services/desk_reader_service.dart';
 import '../services/kiosk_controller.dart';
 import '../services/library_controller.dart';
 import '../widgets/accounts_card.dart';
+import '../widgets/sync_settings_card.dart';
 import 'kiosk_screen.dart';
 
 /// Terminal admin : historique des emprunts, abonnés et réglages du poste.
@@ -520,6 +521,13 @@ class _SubscribersTabState extends State<_SubscribersTab> {
     await _load();
   }
 
+  Future<void> _create() async {
+    final created = await _SubscriberForm.show(context, widget.controller);
+    if (created == null || !mounted) return;
+    await _load();
+    if (mounted) await _open(created);
+  }
+
   @override
   Widget build(BuildContext context) {
     final colors = Theme.of(context).colorScheme;
@@ -537,6 +545,12 @@ class _SubscribersTabState extends State<_SubscribersTab> {
               hintText: 'Nom, numéro, téléphone…',
             ),
             onSubmitted: (_) => _load(),
+          ),
+          const SizedBox(height: 10),
+          FilledButton.icon(
+            onPressed: _create,
+            icon: const Icon(Icons.person_add_alt_1_outlined),
+            label: const Text('Nouvel abonné'),
           ),
           const SizedBox(height: 10),
           if (_loading && _subscribers.isEmpty)
@@ -610,11 +624,21 @@ class _SubscriberDetails extends StatefulWidget {
 }
 
 class _SubscriberDetailsState extends State<_SubscriberDetails> {
+  late Subscriber _subscriber = widget.subscriber;
   BorrowerStatus? _status;
   List<Loan> _loans = const [];
   bool _busy = false;
+  String? _cardStatus;
+  bool _cardError = false;
 
   KioskController get _kiosk => widget.controller.kiosk;
+
+  /// Sur le poste, la carte s'encode avec le lecteur de bureau ; ailleurs,
+  /// avec le lecteur RFID intégré du terminal mobile.
+  bool get _useDeskReader =>
+      widget.controller.deviceRole == 'kiosk' ||
+      _kiosk.simulation ||
+      _kiosk.endpoint.isNotEmpty;
 
   @override
   void initState() {
@@ -624,6 +648,7 @@ class _SubscriberDetailsState extends State<_SubscriberDetails> {
 
   Future<void> _load() async {
     final database = widget.controller.database;
+    final subscriber = await database.getSubscriber(widget.subscriber.id);
     final status = await database.borrowerStatus(
       widget.subscriber.id,
       maxLoans: _kiosk.maxLoans,
@@ -634,10 +659,56 @@ class _SubscriberDetailsState extends State<_SubscriberDetails> {
     );
     if (mounted) {
       setState(() {
+        if (subscriber != null) _subscriber = subscriber;
         _status = status;
         _loans = loans;
       });
     }
+  }
+
+  Future<void> _encodeCard() async {
+    setState(() {
+      _busy = true;
+      _cardError = false;
+      _cardStatus = _subscriber.hasCard
+          ? 'Posez la nouvelle carte, seule, sur le lecteur…'
+          : 'Posez une carte vierge, seule, sur le lecteur…';
+    });
+    try {
+      final updated = _useDeskReader
+          ? await _kiosk.encodeCard(_subscriber)
+          : await widget.controller.encodeSubscriberCard(
+              memberNumber: _subscriber.memberNumber,
+              name: _subscriber.name,
+              email: _subscriber.email,
+              phone: _subscriber.phone,
+            );
+      await _load();
+      if (mounted) {
+        setState(() => _cardStatus = 'Carte encodée pour ${updated.name}.');
+      }
+    } catch (error) {
+      if (mounted) {
+        setState(() {
+          _cardError = true;
+          _cardStatus = error.toString().replaceFirst(
+            RegExp(r'^(Bad state|Invalid argument\(s\)):?\s*'),
+            '',
+          );
+        });
+      }
+    } finally {
+      if (mounted) setState(() => _busy = false);
+    }
+  }
+
+  Future<void> _edit() async {
+    final updated = await _SubscriberForm.show(
+      context,
+      widget.controller,
+      subscriber: _subscriber,
+    );
+    if (updated != null) await _load();
   }
 
   Future<void> _run(Future<void> Function() action, String done) async {
@@ -676,7 +747,7 @@ class _SubscriberDetailsState extends State<_SubscriberDetails> {
     final confirmed = await confirmAction(
       context,
       title: 'Suspendre l’abonnement ?',
-      message: '${widget.subscriber.name} ne pourra plus emprunter au poste.',
+      message: '${_subscriber.name} ne pourra plus emprunter au poste.',
       confirmLabel: 'Suspendre',
       destructive: true,
     );
@@ -699,15 +770,59 @@ class _SubscriberDetailsState extends State<_SubscriberDetails> {
           mainAxisSize: MainAxisSize.min,
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
-            Text(
-              widget.subscriber.name,
-              style: Theme.of(
-                context,
-              ).textTheme.titleLarge?.copyWith(fontWeight: FontWeight.w800),
+            Row(
+              children: [
+                Expanded(
+                  child: Text(
+                    _subscriber.name,
+                    style: Theme.of(context).textTheme.titleLarge?.copyWith(
+                      fontWeight: FontWeight.w800,
+                    ),
+                  ),
+                ),
+                IconButton(
+                  tooltip: 'Modifier',
+                  onPressed: _busy ? null : _edit,
+                  icon: const Icon(Icons.edit_outlined),
+                ),
+              ],
             ),
             Text(
-              '${widget.subscriber.memberNumber} · '
-              '${widget.subscriber.hasCard ? 'carte encodée' : 'carte non encodée'}',
+              [
+                _subscriber.memberNumber,
+                if (_subscriber.phone.isNotEmpty) _subscriber.phone,
+                if (_subscriber.email.isNotEmpty) _subscriber.email,
+              ].join(' · '),
+            ),
+            const SizedBox(height: 10),
+            Card(
+              margin: EdgeInsets.zero,
+              child: ListTile(
+                leading: Icon(
+                  _subscriber.hasCard
+                      ? Icons.badge_outlined
+                      : Icons.credit_card_off_outlined,
+                  color: _subscriber.hasCard ? colors.primary : colors.error,
+                ),
+                title: Text(
+                  _subscriber.hasCard
+                      ? 'Carte encodée'
+                      : 'Carte d’abonné non encodée',
+                  style: const TextStyle(fontWeight: FontWeight.w700),
+                ),
+                subtitle: Text(
+                  _cardStatus ??
+                      (_subscriber.hasCard
+                          ? 'Encodée le ${_date(_subscriber.cardTaggedAt)}. '
+                                'Réencodez pour remplacer une carte perdue.'
+                          : 'Posez une carte vierge sur le lecteur puis encodez-la.'),
+                  style: _cardError ? TextStyle(color: colors.error) : null,
+                ),
+                trailing: FilledButton.tonal(
+                  onPressed: _busy ? null : _encodeCard,
+                  child: Text(_subscriber.hasCard ? 'Réencoder' : 'Encoder'),
+                ),
+              ),
             ),
             const SizedBox(height: 14),
             if (status == null)
@@ -772,6 +887,152 @@ class _SubscriberDetailsState extends State<_SubscriberDetails> {
       ),
     );
   }
+}
+
+/// Création ou modification d'un abonné. Le numéro identifie l'abonné entre
+/// les appareils synchronisés : il n'est plus modifiable ensuite.
+class _SubscriberForm extends StatefulWidget {
+  const _SubscriberForm({required this.controller, this.subscriber});
+
+  final LibraryController controller;
+  final Subscriber? subscriber;
+
+  static Future<Subscriber?> show(
+    BuildContext context,
+    LibraryController controller, {
+    Subscriber? subscriber,
+  }) => showDialog<Subscriber>(
+    context: context,
+    builder: (_) =>
+        _SubscriberForm(controller: controller, subscriber: subscriber),
+  );
+
+  @override
+  State<_SubscriberForm> createState() => _SubscriberFormState();
+}
+
+class _SubscriberFormState extends State<_SubscriberForm> {
+  final _formKey = GlobalKey<FormState>();
+  late final _memberNumber = TextEditingController(
+    text: widget.subscriber?.memberNumber,
+  );
+  late final _name = TextEditingController(text: widget.subscriber?.name);
+  late final _phone = TextEditingController(text: widget.subscriber?.phone);
+  late final _email = TextEditingController(text: widget.subscriber?.email);
+  bool _saving = false;
+  String? _error;
+
+  @override
+  void dispose() {
+    for (final field in [_memberNumber, _name, _phone, _email]) {
+      field.dispose();
+    }
+    super.dispose();
+  }
+
+  Future<void> _save() async {
+    if (!_formKey.currentState!.validate()) return;
+    final editing = widget.subscriber != null;
+    final number = _memberNumber.text.trim().toUpperCase();
+    setState(() {
+      _saving = true;
+      _error = null;
+    });
+    try {
+      final database = widget.controller.database;
+      if (!editing &&
+          (await database.listSubscribers(
+            search: number,
+          )).any((subscriber) => subscriber.memberNumber == number)) {
+        throw StateError('Le numéro $number est déjà attribué.');
+      }
+      final saved = await database.saveSubscriber(
+        memberNumber: number,
+        name: _name.text,
+        email: _email.text,
+        phone: _phone.text,
+      );
+      if (mounted) Navigator.pop(context, saved);
+    } catch (error) {
+      if (mounted) {
+        setState(
+          () => _error = error.toString().replaceFirst(
+            RegExp(r'^(Bad state|Invalid argument\(s\)):?\s*'),
+            '',
+          ),
+        );
+      }
+    } finally {
+      if (mounted) setState(() => _saving = false);
+    }
+  }
+
+  String? _required(String? value, String message) =>
+      value == null || value.trim().isEmpty ? message : null;
+
+  @override
+  Widget build(BuildContext context) => AlertDialog(
+    title: Text(
+      widget.subscriber == null ? 'Nouvel abonné' : 'Modifier l’abonné',
+    ),
+    content: SizedBox(
+      width: 420,
+      child: Form(
+        key: _formKey,
+        child: SingleChildScrollView(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              TextFormField(
+                controller: _memberNumber,
+                enabled: widget.subscriber == null,
+                textCapitalization: TextCapitalization.characters,
+                decoration: const InputDecoration(
+                  labelText: 'Numéro d’abonné *',
+                ),
+                validator: (value) =>
+                    _required(value, 'Le numéro est obligatoire.'),
+              ),
+              TextFormField(
+                controller: _name,
+                textCapitalization: TextCapitalization.words,
+                decoration: const InputDecoration(labelText: 'Nom complet *'),
+                validator: (value) =>
+                    _required(value, 'Le nom est obligatoire.'),
+              ),
+              TextFormField(
+                controller: _phone,
+                keyboardType: TextInputType.phone,
+                decoration: const InputDecoration(labelText: 'Téléphone'),
+              ),
+              TextFormField(
+                controller: _email,
+                keyboardType: TextInputType.emailAddress,
+                decoration: const InputDecoration(labelText: 'E-mail'),
+              ),
+              if (_error != null) ...[
+                const SizedBox(height: 10),
+                Text(
+                  _error!,
+                  style: TextStyle(color: Theme.of(context).colorScheme.error),
+                ),
+              ],
+            ],
+          ),
+        ),
+      ),
+    ),
+    actions: [
+      TextButton(
+        onPressed: _saving ? null : () => Navigator.pop(context),
+        child: const Text('Annuler'),
+      ),
+      FilledButton(
+        onPressed: _saving ? null : _save,
+        child: const Text('Enregistrer'),
+      ),
+    ],
+  );
 }
 
 class _KioskSettingsTab extends StatefulWidget {
@@ -980,6 +1241,8 @@ class _KioskSettingsTabState extends State<_KioskSettingsTab> {
         children: [
           _heading('Compte'),
           AccountsCard(controller: widget.controller),
+          _heading('Synchronisation avec l’API'),
+          SyncSettingsCard(controller: widget.controller),
           _heading('Type d’appareil'),
           Card(
             child: ListTile(
@@ -1071,7 +1334,7 @@ class _KioskSettingsTabState extends State<_KioskSettingsTab> {
                             : 'Port série (débit ${DeskReaderService.defaultBaudRate} par défaut)',
                         hintText: _transport == 'tcp'
                             ? '192.168.1.168:8160'
-                            : '/dev/ttyS1:115200',
+                            : '/dev/ttyS5:115200',
                       ),
                     ),
                   ],

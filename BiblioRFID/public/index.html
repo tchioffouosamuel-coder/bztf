@@ -90,6 +90,12 @@
           <button class="nav-item" data-view="subscribers">
             <i data-lucide="users"></i><span>Abonnés</span>
           </button>
+          <button class="nav-item" data-view="subscriptions">
+            <i data-lucide="calendar-plus"></i><span>Abonnements</span>
+          </button>
+          <button class="nav-item" data-view="loans">
+            <i data-lucide="hand-helping"></i><span>Emprunts</span>
+          </button>
           <button class="nav-item" data-view="station">
             <i data-lucide="radio-tower"></i><span>Station RFID</span>
           </button>
@@ -368,6 +374,105 @@
                 <i data-lucide="users"></i>
                 <h3>Aucun abonné trouvé</h3>
                 <p>Modifiez la recherche ou inscrivez un abonné.</p>
+              </div>
+            </div>
+          </section>
+
+          <section class="view" id="view-subscriptions">
+            <div class="section-heading">
+              <div>
+                <h2>Abonnements</h2>
+                <p id="subscriptions-count">0 abonnement</p>
+              </div>
+              <div class="heading-actions">
+                <button class="button secondary" type="button" data-view-link="subscribers">
+                  <i data-lucide="users"></i><span>Abonnés</span>
+                </button>
+              </div>
+            </div>
+            <div class="table-toolbar">
+              <label class="search-box"
+                ><i data-lucide="search"></i
+                ><input
+                  id="subscription-search"
+                  type="search"
+                  placeholder="Nom ou numéro d’abonné…"
+              /></label>
+              <div class="segmented" id="subscription-filter" aria-label="Filtrer les abonnements">
+                <button class="active" data-filter="tous">Tous</button>
+                <button data-filter="actifs">Actifs</button>
+                <button data-filter="bientot">Expirent sous 30 jours</button>
+                <button data-filter="expires">Expirés</button>
+                <button data-filter="suspendus">Suspendus</button>
+              </div>
+            </div>
+            <div class="table-wrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th>Abonné</th>
+                    <th>Début</th>
+                    <th>Fin</th>
+                    <th>Statut</th>
+                    <th>Emprunts</th>
+                    <th class="actions-column">Actions</th>
+                  </tr>
+                </thead>
+                <tbody id="subscription-register"></tbody>
+              </table>
+              <div class="empty-state hidden" id="subscriptions-empty">
+                <i data-lucide="calendar-plus"></i>
+                <h3>Aucun abonnement trouvé</h3>
+                <p>Un abonnement se crée depuis la fiche de l’abonné.</p>
+              </div>
+            </div>
+          </section>
+
+          <section class="view" id="view-loans">
+            <div class="section-heading">
+              <div>
+                <h2>Emprunts</h2>
+                <p id="loans-count">0 emprunt</p>
+              </div>
+              <div class="heading-actions">
+                <button class="button secondary" type="button" data-view-link="catalogue">
+                  <i data-lucide="library"></i><span>Prêter depuis le catalogue</span>
+                </button>
+              </div>
+            </div>
+            <div class="table-toolbar">
+              <label class="search-box"
+                ><i data-lucide="search"></i
+                ><input
+                  id="loan-search"
+                  type="search"
+                  placeholder="Titre, cote, abonné, numéro…"
+              /></label>
+              <div class="segmented" id="loan-filter" aria-label="Filtrer les emprunts">
+                <button class="active" data-filter="active">En cours</button>
+                <button data-filter="overdue">En retard</button>
+                <button data-filter="returned">Rendus</button>
+                <button data-filter="all">Tous</button>
+              </div>
+            </div>
+            <div class="table-wrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th>Livre</th>
+                    <th>Abonné</th>
+                    <th>Emprunté le</th>
+                    <th>Retour prévu</th>
+                    <th>Statut</th>
+                    <th class="actions-column">Actions</th>
+                  </tr>
+                </thead>
+                <tbody id="loan-register"></tbody>
+              </table>
+              <div class="empty-state hidden" id="loans-empty">
+                <i data-lucide="hand-helping"></i>
+                <h3>Aucun emprunt trouvé</h3>
+                <p>Modifiez le filtre ou la recherche.</p>
               </div>
             </div>
           </section>
@@ -1097,6 +1202,9 @@
             <i data-lucide="trash-2"></i><span>Supprimer</span>
           </button>
           <span class="action-spacer"></span>
+          <button class="button secondary" id="detail-encode-card" type="button">
+            <i data-lucide="id-card"></i><span>Encoder la carte</span>
+          </button>
           <button class="button primary" id="detail-edit-subscriber" type="button">
             <i data-lucide="user-pen"></i><span>Modifier</span>
           </button>

@@ -137,3 +137,69 @@ test("CRUD des abonnements et règles de suppression", () => {
     cleanup();
   }
 });
+
+test("registres des emprunts et des abonnements", () => {
+  const { database, cleanup } = freshDatabase();
+  try {
+    const day = 86400000;
+    const awa = database.createSubscriber({ member_number: "AB-30", name: "Awa" });
+    const paul = database.createSubscriber({ member_number: "AB-31", name: "Paul" });
+    database.createSubscription(awa.id, {
+      starts_at: new Date(Date.now() - 300 * day).toISOString(),
+      ends_at: new Date(Date.now() + 10 * day).toISOString(),
+    });
+    database.createSubscription(paul.id, {
+      starts_at: new Date(Date.now() - 400 * day).toISOString(),
+      ends_at: new Date(Date.now() - day).toISOString(),
+    });
+
+    const current = database.createBook({ title: "En cours" });
+    const late = database.createBook({ title: "En retard" });
+    const back = database.createBook({ title: "Rendu" });
+    database.borrowBook(current.id, {
+      member_number: "AB-30",
+      name: "Awa",
+      due_at: new Date(Date.now() + 7 * day).toISOString(),
+    });
+    database.borrowBook(late.id, {
+      member_number: "AB-30",
+      name: "Awa",
+      due_at: new Date(Date.now() + 7 * day).toISOString(),
+    });
+    database.db
+      .prepare("UPDATE loans SET due_at=? WHERE book_id=?")
+      .run(new Date(Date.now() - day).toISOString(), late.id);
+    database.borrowBook(back.id, {
+      member_number: "AB-30",
+      name: "Awa",
+      due_at: new Date(Date.now() + 7 * day).toISOString(),
+    });
+    database.returnBook(back.id);
+
+    const titles = (filter, search = "") =>
+      database.listLoans({ filter, search }).map((loan) => loan.book_title).sort();
+    assert.deepEqual(titles("active"), ["En cours", "En retard"]);
+    assert.deepEqual(titles("overdue"), ["En retard"]);
+    assert.deepEqual(titles("returned"), ["Rendu"]);
+    assert.equal(titles("all").length, 3);
+    assert.deepEqual(titles("all", "retard"), ["En retard"]);
+    assert.equal(database.listLoans({ filter: "all", search: "AB-30" }).length, 3);
+    const [row] = database.listLoans({ filter: "overdue" });
+    assert.equal(row.subscriber_name, "Awa");
+    assert.equal(row.member_number, "AB-30");
+
+    const members = (filter) =>
+      database
+        .listSubscriptions({ filter })
+        .map((subscription) => subscription.member_number)
+        .sort();
+    assert.deepEqual(members("actifs"), ["AB-30"]);
+    assert.deepEqual(members("bientot"), ["AB-30"]);
+    assert.deepEqual(members("expires"), ["AB-31"]);
+    assert.deepEqual(members("suspendus"), []);
+    assert.equal(database.listSubscriptions({ search: "paul" }).length, 1);
+  } finally {
+    database.close();
+    cleanup();
+  }
+});
