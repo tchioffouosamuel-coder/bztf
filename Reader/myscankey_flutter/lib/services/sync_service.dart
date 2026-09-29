@@ -141,6 +141,8 @@ class SyncService extends ChangeNotifier {
           'entityType': entityType,
           'book': entityType == 'book' ? payload : null,
           'subscriber': entityType == 'subscriber' ? payload : null,
+          'subscription': entityType == 'subscription' ? payload : null,
+          'loan': entityType == 'loan' ? payload : null,
         };
       }).toList();
       final response = await _client

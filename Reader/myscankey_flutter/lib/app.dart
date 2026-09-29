@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 
 import 'models/book.dart';
+import 'screens/admin_screen.dart';
 import 'screens/catalogue_screen.dart';
 import 'screens/book_search_delegate.dart';
 import 'screens/dashboard_screen.dart';
@@ -39,6 +40,7 @@ class BiblioShell extends StatelessWidget {
     'inventory' => 'Inventaire RFID',
     'locator' => 'Localisation RFID',
     'history' => 'Historique',
+    'admin' => 'Terminal admin',
     'settings' => 'Paramètres',
     _ => 'Bibliothèque ZTF',
   };
@@ -84,9 +86,11 @@ class BiblioShell extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final selectedView = controller.view == 'locator'
-        ? 'station'
-        : controller.view;
+    final selectedView = switch (controller.view) {
+      'locator' => 'station',
+      'admin' => 'dashboard',
+      final view => view,
+    };
     final index = _destinations
         .indexWhere((item) => item.$1 == selectedView)
         .clamp(0, _destinations.length - 1);
@@ -99,7 +103,7 @@ class BiblioShell extends StatelessWidget {
       child: Scaffold(
         appBar: AppBar(
           leadingWidth: 48,
-          leading: controller.view == 'locator'
+          leading: controller.view == 'locator' || controller.view == 'admin'
               ? IconButton(
                   tooltip: 'Retour',
                   onPressed: controller.navigateBack,
@@ -179,6 +183,7 @@ class BiblioShell extends StatelessWidget {
             ),
             'history' => HistoryScreen(controller: controller),
             'settings' => SettingsScreen(controller: controller),
+            'admin' => AdminScreen(controller: controller),
             _ => DashboardScreen(controller: controller),
           },
         ),

@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 
 import '../services/library_controller.dart';
+import '../widgets/accounts_card.dart';
 import '../widgets/reader_connection_dialog.dart';
 
 class SettingsScreen extends StatefulWidget {
@@ -108,6 +109,15 @@ class _SettingsScreenState extends State<SettingsScreen> {
   Widget build(BuildContext context) => ListView(
     padding: const EdgeInsets.fromLTRB(16, 14, 16, 24),
     children: [
+      Text(
+        'Compte',
+        style: Theme.of(
+          context,
+        ).textTheme.titleLarge?.copyWith(fontWeight: FontWeight.w800),
+      ),
+      const SizedBox(height: 10),
+      AccountsCard(controller: controller),
+      const SizedBox(height: 22),
       Text(
         'Lecteur RFID',
         style: Theme.of(
@@ -335,6 +345,28 @@ class _SettingsScreenState extends State<SettingsScreen> {
                 label: const Text('Enregistrer et synchroniser'),
               ),
             ],
+          ),
+        ),
+      ),
+      const SizedBox(height: 22),
+      Text(
+        'Type d’appareil',
+        style: Theme.of(
+          context,
+        ).textTheme.titleLarge?.copyWith(fontWeight: FontWeight.w800),
+      ),
+      const SizedBox(height: 10),
+      Card(
+        child: ListTile(
+          leading: const Icon(Icons.phone_android_outlined),
+          title: const Text('Lecteur mobile'),
+          subtitle: const Text(
+            'Le poste d’emprunt et le changement de type d’appareil se '
+            'règlent dans le terminal admin.',
+          ),
+          trailing: TextButton(
+            onPressed: () => controller.setView('admin'),
+            child: const Text('Ouvrir'),
           ),
         ),
       ),

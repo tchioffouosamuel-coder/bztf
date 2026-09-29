@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:intl/intl.dart';
 
 import '../services/library_controller.dart';
+import 'kiosk_screen.dart';
 import '../widgets/status_pill.dart';
 
 class DashboardScreen extends StatelessWidget {
@@ -68,6 +69,36 @@ class DashboardScreen extends StatelessWidget {
                 ],
               );
             },
+          ),
+          const SizedBox(height: 22),
+          Text(
+            'Prêt en libre-service',
+            style: Theme.of(
+              context,
+            ).textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w800),
+          ),
+          const SizedBox(height: 8),
+          Row(
+            children: [
+              Expanded(
+                child: _ShortcutCard(
+                  icon: Icons.point_of_sale_outlined,
+                  title: 'Poste d’emprunt',
+                  subtitle: 'Carte + livres',
+                  onTap: () =>
+                      Navigator.of(context).push(KioskScreen.route(controller)),
+                ),
+              ),
+              const SizedBox(width: 10),
+              Expanded(
+                child: _ShortcutCard(
+                  icon: Icons.admin_panel_settings_outlined,
+                  title: 'Terminal admin',
+                  subtitle: 'Historique des emprunts',
+                  onTap: () => controller.setView('admin'),
+                ),
+              ),
+            ],
           ),
           const SizedBox(height: 22),
           _SectionHeading(
@@ -152,6 +183,10 @@ class DashboardScreen extends StatelessWidget {
     'ecriture' => Icons.verified_outlined,
     'desencodage' => Icons.remove_circle_outline,
     'connexion' => Icons.cable,
+    'emprunt' => Icons.outbox_outlined,
+    'retour' => Icons.move_to_inbox_outlined,
+    'carte' => Icons.badge_outlined,
+    'abonnement' => Icons.card_membership_outlined,
     _ => Icons.menu_book_outlined,
   };
 }
@@ -261,6 +296,40 @@ class _EmptyBlock extends StatelessWidget {
             ),
             const SizedBox(height: 8),
             Text(text),
+          ],
+        ),
+      ),
+    ),
+  );
+}
+
+class _ShortcutCard extends StatelessWidget {
+  const _ShortcutCard({
+    required this.icon,
+    required this.title,
+    required this.subtitle,
+    required this.onTap,
+  });
+
+  final IconData icon;
+  final String title;
+  final String subtitle;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) => Card(
+    clipBehavior: Clip.antiAlias,
+    child: InkWell(
+      onTap: onTap,
+      child: Padding(
+        padding: const EdgeInsets.all(14),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Icon(icon, color: Theme.of(context).colorScheme.primary),
+            const SizedBox(height: 8),
+            Text(title, style: const TextStyle(fontWeight: FontWeight.w800)),
+            Text(subtitle, style: Theme.of(context).textTheme.bodySmall),
           ],
         ),
       ),

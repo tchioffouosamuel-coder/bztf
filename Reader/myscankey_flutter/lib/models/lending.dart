@@ -1,3 +1,7 @@
+import 'dart:math';
+
+import 'package:intl/intl.dart';
+
 /// Abonné de la bibliothèque (personne autorisée à emprunter).
 class Subscriber {
   const Subscriber({
@@ -11,6 +15,7 @@ class Subscriber {
     this.active = true,
     this.subscriptionEndsAt,
     this.activeLoans = 0,
+    this.overdueLoans = 0,
     this.cardEpc,
     this.cardTid,
     this.cardTaggedAt,
@@ -30,6 +35,9 @@ class Subscriber {
 
   /// Nombre d'emprunts non rendus (calculé par la requête).
   final int activeLoans;
+
+  /// Emprunts non rendus dont la date de retour est dépassée.
+  final int overdueLoans;
 
   /// EPC réservé à la carte RFID de l'abonné (format « BCM » 2).
   final String? cardEpc;
@@ -66,6 +74,7 @@ class Subscriber {
     updatedAt: map['updated_at'] as String,
     subscriptionEndsAt: map['subscription_ends_at'] as String?,
     activeLoans: (map['active_loans'] as num?)?.toInt() ?? 0,
+    overdueLoans: (map['overdue_loans'] as num?)?.toInt() ?? 0,
     cardEpc: map['card_epc'] as String?,
     cardTid: map['card_tid'] as String?,
     cardTaggedAt: map['card_tagged_at'] as String?,
@@ -151,6 +160,8 @@ class Loan {
     this.subscriberEmail,
     this.subscriberPhone,
     this.subscriptionEndsAt,
+    this.bookTitle,
+    this.bookAccession,
   });
 
   static const statuses = ['active', 'returned', 'late'];
@@ -174,9 +185,18 @@ class Loan {
   final String? subscriberPhone;
   final String? subscriptionEndsAt;
 
+  // Champs joints depuis le livre (optionnels).
+  final String? bookTitle;
+  final String? bookAccession;
+
   bool get returned => returnedAt != null;
   bool get overdue =>
       !returned && DateTime.parse(dueAt).isBefore(DateTime.now().toUtc());
+
+  /// En retard : non rendu après l'échéance, ou rendu après celle-ci.
+  bool get late => returned
+      ? DateTime.parse(returnedAt!).isAfter(DateTime.parse(dueAt))
+      : overdue;
 
   factory Loan.fromMap(Map<String, Object?> map) => Loan(
     id: map['id'] as int,
@@ -195,6 +215,8 @@ class Loan {
     subscriberEmail: map['subscriber_email'] as String?,
     subscriberPhone: map['subscriber_phone'] as String?,
     subscriptionEndsAt: map['subscription_ends_at'] as String?,
+    bookTitle: map['book_title'] as String?,
+    bookAccession: map['book_accession'] as String?,
   );
 
   Map<String, Object?> toMap() => {
@@ -210,4 +232,67 @@ class Loan {
     'created_at': createdAt,
     'updated_at': updatedAt,
   };
+}
+
+/// Filtre de l'historique des emprunts.
+enum LoanFilter { active, overdue, returned, all }
+
+/// Compteurs du terminal admin.
+class LoanStats {
+  const LoanStats({
+    this.active = 0,
+    this.overdue = 0,
+    this.borrowedToday = 0,
+    this.returnedToday = 0,
+    this.total = 0,
+  });
+
+  final int active;
+  final int overdue;
+  final int borrowedToday;
+  final int returnedToday;
+  final int total;
+}
+
+/// Éligibilité d'un abonné à l'emprunt en libre-service.
+class BorrowerStatus {
+  const BorrowerStatus({
+    required this.subscriber,
+    required this.activeLoans,
+    required this.overdueLoans,
+    required this.maxLoans,
+    this.subscription,
+    this.latestSubscription,
+  });
+
+  final Subscriber subscriber;
+
+  /// Abonnement valide à la date du contrôle, s'il existe.
+  final Subscription? subscription;
+
+  /// Abonnement le plus récent, valide ou non (pour expliquer un refus).
+  final Subscription? latestSubscription;
+  final int activeLoans;
+  final int overdueLoans;
+  final int maxLoans;
+
+  List<String> get reasons => [
+    if (!subscriber.active) 'Compte d’abonné désactivé.',
+    if (subscription == null)
+      switch (latestSubscription) {
+        null => 'Aucun abonnement enregistré.',
+        final latest when latest.status == 'suspended' =>
+          'Abonnement suspendu.',
+        final latest =>
+          'Abonnement expiré le ${DateFormat('dd/MM/yyyy').format(DateTime.parse(latest.endsAt).toLocal())}.',
+      },
+    if (overdueLoans > 0) '$overdueLoans livre(s) en retard à rendre.',
+    if (activeLoans >= maxLoans)
+      'Limite de $maxLoans emprunt(s) simultané(s) atteinte.',
+  ];
+
+  bool get eligible => reasons.isEmpty;
+
+  /// Nombre de livres encore empruntables.
+  int get remaining => eligible ? max(0, maxLoans - activeLoans) : 0;
 }

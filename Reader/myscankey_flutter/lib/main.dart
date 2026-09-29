@@ -4,6 +4,9 @@ import 'package:flutter/material.dart';
 import 'package:intl/date_symbol_data_local.dart';
 
 import 'app.dart';
+import 'screens/device_role_screen.dart';
+import 'screens/kiosk_screen.dart';
+import 'screens/login_screen.dart';
 import 'services/library_controller.dart';
 
 Future<void> main() async {
@@ -90,7 +93,63 @@ class _BiblioRfidAppState extends State<BiblioRfidApp> {
           margin: EdgeInsets.zero,
         ),
       ),
-      home: BiblioShell(controller: widget.controller),
+      home: widget.controller.startupError != null
+          ? _StartupErrorScreen(controller: widget.controller)
+          : !widget.controller.initialized
+          ? const Scaffold(body: Center(child: CircularProgressIndicator()))
+          : widget.controller.currentUser == null
+          ? LoginScreen(controller: widget.controller)
+          : switch (widget.controller.deviceRole) {
+              null => DeviceRoleScreen(controller: widget.controller),
+              'kiosk' => KioskScreen(
+                controller: widget.controller,
+                asHome: true,
+              ),
+              _ => BiblioShell(controller: widget.controller),
+            },
+    ),
+  );
+}
+
+class _StartupErrorScreen extends StatelessWidget {
+  const _StartupErrorScreen({required this.controller});
+
+  final LibraryController controller;
+
+  @override
+  Widget build(BuildContext context) => Scaffold(
+    body: SafeArea(
+      child: Center(
+        child: Padding(
+          padding: const EdgeInsets.all(24),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(
+                Icons.error_outline,
+                size: 56,
+                color: Theme.of(context).colorScheme.error,
+              ),
+              const SizedBox(height: 12),
+              const Text(
+                'L’application n’a pas pu s’ouvrir.',
+                style: TextStyle(fontWeight: FontWeight.w800, fontSize: 18),
+              ),
+              const SizedBox(height: 8),
+              SelectableText(
+                controller.startupError ?? '',
+                textAlign: TextAlign.center,
+              ),
+              const SizedBox(height: 16),
+              FilledButton.icon(
+                onPressed: controller.initialize,
+                icon: const Icon(Icons.refresh),
+                label: const Text('Réessayer'),
+              ),
+            ],
+          ),
+        ),
+      ),
     ),
   );
 }

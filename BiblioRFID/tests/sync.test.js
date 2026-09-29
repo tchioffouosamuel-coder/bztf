@@ -198,3 +198,79 @@ test("synchronise les abonnés et leurs cartes RFID", async () => {
     fs.rmSync(directory, { recursive: true, force: true });
   }
 });
+
+test("synchronise les emprunts et les abonnements entre appareils", () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "biblio-loans-"));
+  const deskA = new LibraryDatabase(path.join(directory, "a.db"));
+  const book = deskA.createBook({ title: "Livre partagé" });
+  deskA.borrowBook(book.id, {
+    member_number: "ab-1",
+    name: "Awa",
+    due_at: new Date(Date.now() + 14 * 86400000).toISOString(),
+  });
+  const outbox = Object.fromEntries(
+    deskA.pendingMutations().map((row) => [row.entity_type, row]),
+  );
+  const loan = JSON.parse(outbox.loan.payload);
+  const subscription = JSON.parse(outbox.subscription.payload);
+  assert.equal(loan.bookServerId, deskA.getBook(book.id).server_id);
+  assert.equal(loan.memberNumber, "AB-1");
+  assert.equal(loan.subscriptionServerId, subscription.serverId);
+
+  const change = (entityType, entityId, payload) => ({
+    operation: "upsert",
+    entityType,
+    entityId,
+    [entityType]: payload,
+  });
+  const deskB = new LibraryDatabase(path.join(directory, "b.db"));
+  // L'emprunt arrive avant son livre : il attend ses références.
+  deskB.applyRemoteChanges([change("loan", loan.serverId, loan)], 1);
+  assert.equal(deskB.db.prepare("SELECT COUNT(*) AS n FROM loans").get().n, 0);
+  const sourceBook = deskA.getBook(book.id);
+  deskB.applyRemoteChanges(
+    [
+      change("subscription", subscription.serverId, subscription),
+      change("book", sourceBook.server_id, deskA.toSyncBook(sourceBook)),
+      change(
+        "subscriber",
+        "AB-1",
+        deskA.toSyncSubscriber(
+          deskA.db.prepare("SELECT * FROM subscribers").get(),
+        ),
+      ),
+    ],
+    2,
+  );
+  const localBook = deskB.db.prepare("SELECT * FROM books").get();
+  assert.equal(localBook.status, "indisponible");
+  assert.equal(deskB.activeLoanForBook(localBook.id).member_number, "AB-1");
+
+  // Retour sur B : l'emprunt repart avec sa date de retour.
+  deskB.returnBook(localBook.id);
+  const returned = deskB
+    .pendingMutations()
+    .find((row) => row.entity_type === "loan");
+  assert.equal(returned.entity_id, loan.serverId);
+  assert.ok(JSON.parse(returned.payload).returnedAt);
+  deskB.acknowledgeMutations(deskB.pendingMutations().map((row) => row.mutation_id));
+
+  // Nouvel emprunt fait ailleurs puis supprimé.
+  deskB.applyRemoteChanges(
+    [
+      change("loan", "loan-remote", {
+        ...loan,
+        serverId: "loan-remote",
+        borrowedAt: new Date().toISOString(),
+      }),
+    ],
+    3,
+  );
+  assert.equal(deskB.activeLoanForBook(localBook.id).server_id, "loan-remote");
+  deskB.applyRemoteChanges(
+    [{ operation: "delete", entityType: "loan", entityId: "loan-remote" }],
+    4,
+  );
+  assert.equal(deskB.activeLoanForBook(localBook.id), null);
+  assert.equal(deskB.getBook(localBook.id).status, "a_encoder");
+});

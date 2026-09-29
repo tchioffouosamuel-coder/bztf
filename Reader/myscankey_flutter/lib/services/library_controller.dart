@@ -6,15 +6,22 @@ import 'package:shared_preferences/shared_preferences.dart';
 import '../data/library_database.dart';
 import '../models/book.dart';
 import '../models/lending.dart';
+import '../models/user.dart';
+import 'desk_reader_service.dart';
+import 'kiosk_controller.dart';
 import 'locator_signal.dart';
 import 'reader_service.dart';
 import 'sync_service.dart';
 
 class LibraryController extends ChangeNotifier {
-  LibraryController({LibraryDatabase? database, ReaderService? reader})
-    : database = database ?? LibraryDatabase.instance,
-      reader = reader ?? ReaderService() {
+  LibraryController({
+    LibraryDatabase? database,
+    ReaderService? reader,
+    DeskReaderService? deskReader,
+  }) : database = database ?? LibraryDatabase.instance,
+       reader = reader ?? ReaderService() {
     sync = SyncService(this.database);
+    kiosk = KioskController(this, reader: deskReader);
     sync.addListener(_onSyncChanged);
     _tagSubscription = this.reader.tags.listen(_onTag, onError: _onReaderError);
     _nativeKeySubscription = this.reader.nativeRfidKeyEvents.listen(
@@ -26,6 +33,7 @@ class LibraryController extends ChangeNotifier {
   final LibraryDatabase database;
   final ReaderService reader;
   late final SyncService sync;
+  late final KioskController kiosk;
   final Map<String, ReaderTag> _observed = {};
   final Map<String, ReaderTag> _stationSessionTags = {};
   final Map<String, Book?> _recognized = {};
@@ -39,8 +47,23 @@ class LibraryController extends ChangeNotifier {
   bool _nativeRfidKeyHeld = false;
   bool _startingNativeRead = false;
   bool _capturingCard = false;
+
+  /// Le poste d'emprunt occupe l'écran : la gâchette du terminal est ignorée.
+  bool kioskActive = false;
   Timer? _locatorLossTimer;
   final LocatorSignalTracker locatorSignal = LocatorSignalTracker();
+
+  /// Rôle de l'appareil choisi à la première ouverture : `kiosk` (poste
+  /// d'emprunt) ou `mobile` (lecteur mobile). `null` tant qu'il n'est pas
+  /// choisi.
+  String? deviceRole;
+  bool initialized = false;
+
+  /// L'application ne s'ouvre qu'après identification d'un compte.
+  AppUser? currentUser;
+  bool hasAccounts = false;
+  int _failedSignIns = 0;
+  DateTime? _signInLockedUntil;
 
   String view = 'dashboard';
   String statusFilter = 'tous';
@@ -89,7 +112,23 @@ class LibraryController extends ChangeNotifier {
       (tag.tid.isNotEmpty ? _recognized[tag.tid] : null) ??
       _recognized[tag.epc];
 
+  /// Erreur survenue à l'ouverture (base locale, réglages), affichée à la
+  /// place de l'application.
+  String? startupError;
+
   Future<void> initialize() async {
+    startupError = null;
+    notifyListeners();
+    try {
+      await _initialize();
+    } catch (error, stack) {
+      debugPrint('Ouverture impossible : $error $stack');
+      startupError = error.toString();
+      notifyListeners();
+    }
+  }
+
+  Future<void> _initialize() async {
     reader.listenForNativeRfidKeys();
     final settings = await SharedPreferences.getInstance();
     transport = settings.getString('reader_transport') ?? 'serial';
@@ -99,11 +138,117 @@ class LibraryController extends ChangeNotifier {
       await settings.setString('reader_endpoint', endpoint);
     }
     darkTheme = settings.getBool('dark_theme') ?? false;
+    deviceRole = switch (settings.getString('device_role')) {
+      final role? when deviceRoles.contains(role) => role,
+      _ => null,
+    };
     readPower = settings.getInt('rfid_read_power') ?? 15;
     writePower = settings.getInt('rfid_write_power') ?? 25;
     inventoryPower = settings.getInt('rfid_inventory_power') ?? 20;
     await sync.initialize();
+    await kiosk.initialize();
+    hasAccounts = await database.countUsers() > 0;
     await Future.wait([refreshDashboard(), loadBooks(), loadActivity()]);
+    initialized = true;
+    notifyListeners();
+  }
+
+  static const deviceRoles = ['kiosk', 'mobile'];
+  static const _maxFailedSignIns = 5;
+  static const _signInLockDuration = Duration(seconds: 30);
+
+  /// Première ouverture : crée le compte administrateur et l'ouvre.
+  Future<void> createFirstAdmin({
+    required String name,
+    required String email,
+    required String password,
+  }) async {
+    if (await database.countUsers() > 0) {
+      throw StateError('Un compte administrateur existe déjà.');
+    }
+    currentUser = await database.createUser(
+      name: name,
+      email: email,
+      password: password,
+      role: 'admin',
+    );
+    hasAccounts = true;
+    await database.addActivity(
+      'connexion',
+      'succes',
+      'Connexion de ${currentUser!.name}',
+    );
+    notifyListeners();
+  }
+
+  Future<void> signIn(String email, String password) async {
+    final lockedUntil = _signInLockedUntil;
+    if (lockedUntil != null && DateTime.now().isBefore(lockedUntil)) {
+      final seconds = lockedUntil.difference(DateTime.now()).inSeconds + 1;
+      throw StateError('Trop d’essais. Réessayez dans $seconds s.');
+    }
+    final user = await database.authenticateUser(email, password);
+    if (user == null) {
+      _failedSignIns++;
+      if (_failedSignIns >= _maxFailedSignIns) {
+        _failedSignIns = 0;
+        _signInLockedUntil = DateTime.now().add(_signInLockDuration);
+      }
+      await database.addActivity(
+        'connexion',
+        'echec',
+        'Échec de connexion pour ${email.trim().toLowerCase()}',
+      );
+      throw StateError('E-mail ou mot de passe incorrect.');
+    }
+    _failedSignIns = 0;
+    _signInLockedUntil = null;
+    currentUser = user;
+    await database.addActivity(
+      'connexion',
+      'succes',
+      'Connexion de ${user.name}',
+    );
+    notifyListeners();
+  }
+
+  Future<void> signOut() async {
+    final user = currentUser;
+    if (user == null) return;
+    if (reader.reading) await reader.stopInventory();
+    currentUser = null;
+    _viewHistory
+      ..clear()
+      ..add('dashboard');
+    view = 'dashboard';
+    await database.addActivity(
+      'connexion',
+      'succes',
+      'Déconnexion de ${user.name}',
+    );
+    notifyListeners();
+  }
+
+  /// Enregistre le rôle de l'appareil ; `null` le fait choisir de nouveau.
+  Future<void> setDeviceRole(String? role) async {
+    if (role != null && !deviceRoles.contains(role)) {
+      throw ArgumentError('Rôle d’appareil inconnu : $role');
+    }
+    final settings = await SharedPreferences.getInstance();
+    if (role == null) {
+      await settings.remove('device_role');
+    } else {
+      await settings.setString('device_role', role);
+      await database.addActivity(
+        'connexion',
+        'succes',
+        role == 'kiosk'
+            ? 'Appareil configuré en poste d’emprunt'
+            : 'Appareil configuré en lecteur mobile',
+      );
+    }
+    deviceRole = role;
+    notifyListeners();
   }
 
   Future<void> refreshDashboard() async {
@@ -192,9 +337,9 @@ class LibraryController extends ChangeNotifier {
   }
 
   void _handleNativeRfidKey(String action) {
-    // Pendant la lecture d'une carte d'abonné, la gâchette ne change pas
-    // d'écran.
-    if (_capturingCard) return;
+    // Pendant la lecture d'une carte d'abonné ou sur le poste d'emprunt, la
+    // gâchette ne change pas d'écran.
+    if (_capturingCard || kioskActive) return;
     if (action == 'down') {
       if (_nativeRfidKeyHeld) return;
       _nativeRfidKeyHeld = true;
@@ -505,6 +650,34 @@ class LibraryController extends ChangeNotifier {
     await _reloadAfterMutation();
     unawaited(sync.syncNow());
     return returned;
+  }
+
+  /// Emprunt en libre-service de plusieurs livres (poste d'emprunt).
+  Future<List<Loan>> checkoutBooks(
+    Subscriber subscriber,
+    List<Book> books, {
+    required DateTime dueAt,
+    required int maxLoans,
+  }) async {
+    final loans = await database.checkoutBooks(
+      subscriber.id,
+      [for (final book in books) book.id],
+      dueAt: dueAt,
+      maxLoans: maxLoans,
+    );
+    await _reloadAfterMutation();
+    unawaited(sync.syncNow());
+    return loans;
+  }
+
+  /// Retour en libre-service de plusieurs livres (poste d'emprunt).
+  Future<List<Loan>> returnBooks(List<Book> books) async {
+    final loans = await database.returnBooks([
+      for (final book in books) book.id,
+    ]);
+    await _reloadAfterMutation();
+    unawaited(sync.syncNow());
+    return loans;
   }
 
   Future<Book> createAndEncode(
@@ -893,6 +1066,7 @@ class LibraryController extends ChangeNotifier {
     unawaited(_nativeKeySubscription.cancel());
     sync.removeListener(_onSyncChanged);
     sync.dispose();
+    kiosk.dispose();
     unawaited(reader.dispose());
     super.dispose();
   }

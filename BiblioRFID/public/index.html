@@ -87,6 +87,9 @@
           <button class="nav-item" data-view="catalogue">
             <i data-lucide="library"></i><span>Catalogue</span>
           </button>
+          <button class="nav-item" data-view="subscribers">
+            <i data-lucide="users"></i><span>Abonnés</span>
+          </button>
           <button class="nav-item" data-view="station">
             <i data-lucide="radio-tower"></i><span>Station RFID</span>
           </button>
@@ -315,6 +318,56 @@
                 >
                   <i data-lucide="refresh-cw"></i><span>Charger plus</span>
                 </button>
+              </div>
+            </div>
+          </section>
+
+          <section class="view" id="view-subscribers">
+            <div class="section-heading">
+              <div>
+                <h2>Abonnés</h2>
+                <p id="subscribers-count">0 abonné</p>
+              </div>
+              <div class="heading-actions">
+                <button class="button primary" id="new-subscriber" type="button">
+                  <i data-lucide="user-plus"></i><span>Nouvel abonné</span>
+                </button>
+              </div>
+            </div>
+            <div class="table-toolbar">
+              <label class="search-box"
+                ><i data-lucide="search"></i
+                ><input
+                  id="subscriber-search"
+                  type="search"
+                  placeholder="Nom, numéro, téléphone, e-mail…"
+              /></label>
+              <div class="segmented" id="subscriber-filter" aria-label="Filtrer les abonnés">
+                <button class="active" data-filter="tous">Tous</button>
+                <button data-filter="valides">Abonnement valide</button>
+                <button data-filter="sans">Sans abonnement</button>
+                <button data-filter="retard">En retard</button>
+                <button data-filter="inactifs">Désactivés</button>
+              </div>
+            </div>
+            <div class="table-wrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th>Abonné</th>
+                    <th>Contact</th>
+                    <th>Abonnement</th>
+                    <th>Emprunts</th>
+                    <th>Carte</th>
+                    <th class="actions-column">Actions</th>
+                  </tr>
+                </thead>
+                <tbody id="subscribers-table"></tbody>
+              </table>
+              <div class="empty-state hidden" id="subscribers-empty">
+                <i data-lucide="users"></i>
+                <h3>Aucun abonné trouvé</h3>
+                <p>Modifiez la recherche ou inscrivez un abonné.</p>
               </div>
             </div>
           </section>
@@ -934,8 +987,169 @@
       </form>
     </dialog>
 
+    <dialog id="subscriber-dialog">
+      <form method="dialog" class="dialog-shell" id="subscriber-form">
+        <div class="dialog-heading">
+          <div>
+            <p class="eyebrow">Abonné</p>
+            <h2 id="subscriber-dialog-title">Nouvel abonné</h2>
+          </div>
+          <button
+            class="icon-button"
+            value="cancel"
+            formnovalidate
+            title="Fermer"
+            aria-label="Fermer"
+          >
+            <i data-lucide="x"></i>
+          </button>
+        </div>
+        <input type="hidden" name="id" />
+        <div class="form-grid">
+          <label class="field"
+            ><span>N° d’abonné *</span
+            ><input name="member_number" required maxlength="80" autocomplete="off"
+          /></label>
+          <label class="field"
+            ><span>Nom complet *</span
+            ><input name="name" required maxlength="240" autocomplete="off"
+          /></label>
+          <label class="field"
+            ><span>Téléphone</span
+            ><input name="phone" maxlength="80" inputmode="tel"
+          /></label>
+          <label class="field"
+            ><span>E-mail</span><input name="email" type="email" maxlength="240"
+          /></label>
+          <label class="field wide checkbox-field hidden" id="subscriber-active-field"
+            ><input name="active" type="checkbox" />
+            <span>Compte actif (décoché : l’abonné ne peut plus emprunter)</span></label
+          >
+          <p class="field wide cell-subtle" id="subscriber-number-hint">
+            Le numéro d’abonné identifie l’abonné sur tous les appareils
+            synchronisés : il ne peut plus être modifié ensuite.
+          </p>
+        </div>
+        <div class="dialog-actions">
+          <button class="button secondary" value="cancel" formnovalidate>
+            Annuler</button
+          ><button class="button primary" type="submit" value="default">
+            <i data-lucide="save"></i><span>Enregistrer</span>
+          </button>
+        </div>
+      </form>
+    </dialog>
+
+    <dialog id="subscriber-detail-dialog">
+      <form method="dialog" class="dialog-shell subscriber-detail-shell">
+        <div class="dialog-heading">
+          <div>
+            <p class="eyebrow">Fiche abonné</p>
+            <h2 id="subscriber-detail-title">Abonné</h2>
+          </div>
+          <button
+            class="icon-button"
+            value="cancel"
+            formnovalidate
+            title="Fermer"
+            aria-label="Fermer"
+          >
+            <i data-lucide="x"></i>
+          </button>
+        </div>
+        <div class="subscriber-detail-summary" id="subscriber-detail-summary"></div>
+        <div class="subscriber-section-heading">
+          <h3>Abonnements</h3>
+          <button class="button secondary" id="new-subscription" type="button">
+            <i data-lucide="calendar-plus"></i><span>Nouvel abonnement</span>
+          </button>
+        </div>
+        <div class="table-wrap compact-table">
+          <table>
+            <thead>
+              <tr>
+                <th>Début</th>
+                <th>Fin</th>
+                <th>Statut</th>
+                <th>Emprunts</th>
+                <th class="actions-column">Actions</th>
+              </tr>
+            </thead>
+            <tbody id="subscriptions-table"></tbody>
+          </table>
+        </div>
+        <div class="subscriber-section-heading"><h3>Emprunts</h3></div>
+        <div class="table-wrap compact-table">
+          <table>
+            <thead>
+              <tr>
+                <th>Livre</th>
+                <th>Emprunté le</th>
+                <th>Retour prévu</th>
+                <th>Rendu le</th>
+              </tr>
+            </thead>
+            <tbody id="subscriber-loans-table"></tbody>
+          </table>
+        </div>
+        <div class="dialog-actions">
+          <button class="button danger" id="detail-delete-subscriber" type="button">
+            <i data-lucide="trash-2"></i><span>Supprimer</span>
+          </button>
+          <span class="action-spacer"></span>
+          <button class="button primary" id="detail-edit-subscriber" type="button">
+            <i data-lucide="user-pen"></i><span>Modifier</span>
+          </button>
+        </div>
+      </form>
+    </dialog>
+
+    <dialog id="subscription-dialog">
+      <form method="dialog" class="dialog-shell" id="subscription-form">
+        <div class="dialog-heading">
+          <div>
+            <p class="eyebrow" id="subscription-dialog-eyebrow">Abonnement</p>
+            <h2 id="subscription-dialog-title">Nouvel abonnement</h2>
+          </div>
+          <button
+            class="icon-button"
+            value="cancel"
+            formnovalidate
+            title="Fermer"
+            aria-label="Fermer"
+          >
+            <i data-lucide="x"></i>
+          </button>
+        </div>
+        <input type="hidden" name="id" />
+        <div class="form-grid">
+          <label class="field"
+            ><span>Début *</span><input name="starts_at" type="date" required
+          /></label>
+          <label class="field"
+            ><span>Fin *</span><input name="ends_at" type="date" required
+          /></label>
+          <label class="field"
+            ><span>Statut</span
+            ><select name="status">
+              <option value="active">Actif</option>
+              <option value="suspended">Suspendu</option>
+              <option value="expired">Expiré</option>
+            </select></label
+          >
+        </div>
+        <div class="dialog-actions">
+          <button class="button secondary" value="cancel" formnovalidate>
+            Annuler</button
+          ><button class="button primary" type="submit" value="default">
+            <i data-lucide="save"></i><span>Enregistrer</span>
+          </button>
+        </div>
+      </form>
+    </dialog>
+
     <div class="toast-region" id="toast-region" aria-live="polite"></div>
     <script src="/vendor/sweetalert2/sweetalert2.all.min.js"></script>
-    <script type="module" src="/app.js?v=23"></script>
+    <script type="module" src="/app.js?v=24"></script>
   </body>
 </html>

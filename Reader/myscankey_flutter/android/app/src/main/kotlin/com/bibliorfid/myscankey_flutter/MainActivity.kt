@@ -7,14 +7,13 @@ import Tool.TagBackData
 import Tool.TagFilter
 import ZAO_API.N01_Api
 import com.seuic.uhf.UHFService
-import com.seuic.scankey.IKeyEventCallback
-import com.seuic.scankey.ScanKeyService
 import android.os.Handler
 import android.os.Looper
 import android.os.SystemClock
 import android.media.AudioAttributes
 import android.media.SoundPool
 import android.util.Log
+import android.view.WindowManager
 import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.EventChannel
@@ -39,7 +38,7 @@ class MainActivity : FlutterActivity() {
 	@Volatile private var integratedInventoryJob: ScheduledFuture<*>? = null
 	@Volatile private var eventSink: EventChannel.EventSink? = null
 	@Volatile private var keyEventSink: EventChannel.EventSink? = null
-	@Volatile private var keyCallback: IKeyEventCallback? = null
+	@Volatile private var rfidKey: SeuicRfidKey? = null
 	@Volatile private var scanSoundLoaded = false
 	@Volatile private var configuredReadPower = 15
 	@Volatile private var configuredWritePower = 25
@@ -51,10 +50,26 @@ class MainActivity : FlutterActivity() {
 	private val tidCache = ConcurrentHashMap<String, String>()
 	private val tidAttemptAt = ConcurrentHashMap<String, Long>()
 	private val tagEventAt = ConcurrentHashMap<String, Long>()
+	private var deskReader: DeskReaderBridge? = null
 
 	override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
 		super.configureFlutterEngine(flutterEngine)
 		initializeScanSound()
+		// Lecteur de bureau du poste d'emprunt : son SDK (reader.jar) ne doit
+		// jamais empêcher l'application de démarrer, notamment sur un terminal
+		// Seuic dont les bibliothèques système partagent des classes avec lui.
+		deskReader = try {
+			DeskReaderBridge(flutterEngine.dartExecutor.binaryMessenger, mainHandler) { enabled ->
+				if (enabled) {
+					window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+				} else {
+					window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+				}
+			}
+		} catch (error: Throwable) {
+			Log.e("BiblioRFID", "Desk reader bridge unavailable", error)
+			null
+		}
 		MethodChannel(flutterEngine.dartExecutor.binaryMessenger, methodChannelName)
 			.setMethodCallHandler { call, result ->
 				when (call.method) {
@@ -129,33 +144,33 @@ class MainActivity : FlutterActivity() {
 	}
 
 	private fun registerRfidKey() {
-		if (keyCallback != null) return
-		val callback = object : IKeyEventCallback.Stub() {
-			override fun onKeyDown(keyCode: Int) {
-				if (keyCode != RFID_HANDLE_KEY_CODE) return
+		if (rfidKey != null || !SeuicRfidKey.isAvailable()) return
+		val key = SeuicRfidKey(
+			RFID_HANDLE_KEY_CODE,
+			onKeyDown = down@{ keyCode ->
+				if (keyCode != RFID_HANDLE_KEY_CODE) return@down
 				val now = SystemClock.elapsedRealtime()
-				if (!rfidKeyHeld.compareAndSet(false, true)) return
+				if (!rfidKeyHeld.compareAndSet(false, true)) return@down
 				if (now - lastRfidKeyPressAt.get() < RFID_KEY_DEBOUNCE_MS) {
 					rfidKeyHeld.set(false)
-					return
+					return@down
 				}
 				lastRfidKeyPressAt.set(now)
 				mainHandler.post {
 					keyEventSink?.success(mapOf("action" to "down", "scanCode" to keyCode))
 				}
-			}
-
-			override fun onKeyUp(keyCode: Int) {
-				if (keyCode != RFID_HANDLE_KEY_CODE) return
-				if (!rfidKeyHeld.compareAndSet(true, false)) return
+			},
+			onKeyUp = up@{ keyCode ->
+				if (keyCode != RFID_HANDLE_KEY_CODE) return@up
+				if (!rfidKeyHeld.compareAndSet(true, false)) return@up
 				mainHandler.post {
 					keyEventSink?.success(mapOf("action" to "up", "scanCode" to keyCode))
 				}
-			}
-		}
+			},
+		)
 		try {
-			ScanKeyService.getInstance().registerCallback(callback, RFID_HANDLE_KEY_CODE.toString())
-			keyCallback = callback
+			key.register()
+			rfidKey = key
 		} catch (error: Throwable) {
 			Log.e("BiblioRFID", "Unable to register the Seuic RFID key callback", error)
 			mainHandler.post { keyEventSink?.error("RFID_KEY_SERVICE", error.message, null) }
@@ -163,10 +178,10 @@ class MainActivity : FlutterActivity() {
 	}
 
 	private fun unregisterRfidKey() {
-		val callback = keyCallback ?: return
-		keyCallback = null
+		val key = rfidKey ?: return
+		rfidKey = null
 		rfidKeyHeld.set(false)
-		runCatching { ScanKeyService.getInstance().unregisterCallback(callback) }
+		runCatching { key.unregister() }
 	}
 
 	override fun onResume() {
@@ -208,7 +223,7 @@ class MainActivity : FlutterActivity() {
 						result.success(mapOf("connected" to true, "readerId" to "SEUIC-UHF", "version" to candidate.firmwareVersion.orEmpty()))
 					}
 				}
-			} catch (error: Exception) {
+			} catch (error: Throwable) {
 				postError(result, "READER_CONNECT", error.message ?: "Connexion RFID impossible.")
 			}
 		}
@@ -546,6 +561,8 @@ class MainActivity : FlutterActivity() {
 	override fun onDestroy() {
 		unregisterRfidKey()
 		closeReader()
+		runCatching { deskReader?.dispose() }
+		deskReader = null
 		executor.shutdownNow()
 		soundPool?.release()
 		soundPool = null

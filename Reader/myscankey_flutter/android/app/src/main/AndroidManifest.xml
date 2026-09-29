@@ -21,6 +21,8 @@
 		This is used by the Flutter tool to generate GeneratedPluginRegistrant.java
 		-->
 		<meta-data android:name="flutterEmbedding" android:value="2" />
+		<!-- Impeller/Vulkan plante sur le GPU Mali-G52 du RK3568 : rendu OpenGL (Skia) à la place. -->
+		<meta-data android:name="io.flutter.embedding.android.EnableImpeller" android:value="false" />
 	</application>
 	<!--
 	Required to query activities that can process text, see:

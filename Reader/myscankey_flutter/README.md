@@ -25,6 +25,54 @@ Le lecteur intégré utilise le service Seuic `UHFService` du démonstrateur `An
 
 Le flux RFID lit l’EPC et le TID en continu. Toute écriture ou désécriture exige un seul tag détecté et le TID correspondant; l’EPC est relu avant de modifier le catalogue.
 
+## Connexion
+
+L’application ne s’ouvre qu’après identification, comme l’application Windows :
+
+- à la toute première ouverture, on crée le compte **administrateur** de l’appareil (nom, e-mail, mot de passe de 8 caractères minimum) ;
+- ensuite, chaque ouverture demande l’e-mail et le mot de passe. Après 5 échecs, les essais sont bloqués 30 secondes ;
+- un administrateur ajoute, active ou désactive les comptes (administrateur ou opérateur) dans *Réglages › Compte* ou dans l’onglet *Poste* du terminal admin. Le dernier administrateur ne peut pas être désactivé.
+
+Les mots de passe sont stockés en PBKDF2-HMAC-SHA256 (60 000 itérations, sel aléatoire), jamais en clair. Les comptes sont propres à l’appareil et ne sont pas synchronisés.
+
+Sur un poste d’emprunt, le personnel se connecte au démarrage ; le poste reste ensuite ouvert pour les abonnés, qui n’ont pas de compte. La déconnexion se fait depuis le menu protégé par le code administrateur du poste.
+
+## Type d’appareil
+
+Après la première connexion, l’application demande le rôle de l’appareil :
+
+- **Poste d’emprunt** : tablette fixe reliée au lecteur RFID de bureau. L’application s’ouvre directement sur le poste en libre-service ; seul le code administrateur permet d’en sortir.
+- **Lecteur mobile** : terminal du personnel (catalogue, station, inventaire, localisation, prêts au comptoir).
+
+Le rôle se change ensuite dans le terminal admin (onglet *Poste*).
+
+## Poste d’emprunt
+
+Le poste utilise le SDK « RFID Desktop Reader » (`android/app/libs/reader.jar`, classe `GClient`) via `DeskReaderBridge.kt`, indépendamment du lecteur Seuic intégré :
+
+- **TCP/IP** : `192.168.1.168` ou `192.168.1.168:8160` (port 8160 par défaut) ;
+- **Série RS232** : `/dev/ttyS1` ou `/dev/ttyS1:115200`. Le port doit être accessible à l’application (le SDK tente `su chmod 666` sinon). La bibliothèque JNI `libSerialPort.so` attendue par le SDK est compilée depuis `android/app/src/main/cpp` pour arm64-v8a et armeabi-v7a (le SDK ne fournit qu’une version 32 bits) ;
+- **Simulation** : barre de test pour poser des cartes et des livres virtuels.
+
+Le SDK Android ne gère pas la connexion USB directe du lecteur de bureau : utilisez l’Ethernet (TCP) ou un port série.
+
+Parcours abonné :
+
+- **Emprunter** : l’abonné pose sa carte et ses livres. L’emprunt est autorisé si le compte est actif, l’abonnement valide, aucun livre n’est en retard et le nombre d’emprunts simultanés reste sous la limite. Un reçu indique la date de retour.
+- **Rendre** : les livres seuls, sans carte. Un livre emprunté posé sur l’accueil ouvre directement le retour.
+
+Les cartes sont reconnues par leur EPC « BCM 2 » et leur TID (un préfixe commun de 8 octets suffit, les lecteurs ne lisant pas tous la même longueur de TID).
+
+## Terminal admin
+
+Accessible depuis le poste (icône cadenas + code, **1234** par défaut, à changer) ou depuis l’accueil du lecteur mobile :
+
+- **Emprunts** : historique filtrable (en cours, en retard, rendus), recherche, retour manuel et export CSV ;
+- **Abonnés** : éligibilité, emprunts en cours, renouvellement ou suspension de l’abonnement ;
+- **Poste** : type d’appareil, connexion et puissance du lecteur de bureau, règles de prêt (livres par abonné, durée), code administrateur.
+
+Tout est synchronisé avec le serveur : livres, abonnés et cartes, abonnements et emprunts. Un livre emprunté sur un appareil (poste, mobile ou Windows) peut être rendu sur n’importe quel autre. Un emprunt reçu avant son livre ou son abonné est mis de côté puis appliqué dès que la référence arrive.
+
 ## Fonctions
 
 - Tableau de bord et compteurs du catalogue;
@@ -32,6 +80,7 @@ Le flux RFID lit l’EPC et le TID en continu. Toute écriture ou désécriture 
 - import XLSX, sans doublons, et export CSV;
 - lecture RFID, association d’un tag à un livre, encodage et désencodage vérifiés;
 - historique des connexions et opérations;
+- poste d’emprunt en libre-service et terminal admin des emprunts ;
 - mode Simulation pour essayer le parcours sans matériel.
 
 Les données restent dans la base SQLite privée de l’application. L’import prend le classeur fourni par le sélecteur de fichiers Android.

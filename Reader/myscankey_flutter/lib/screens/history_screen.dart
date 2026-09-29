@@ -129,6 +129,10 @@ class _ActivityCard extends StatelessWidget {
     'ecriture' => Icons.edit_note,
     'desencodage' => Icons.remove_circle_outline,
     'connexion' => Icons.cable,
+    'emprunt' => Icons.outbox_outlined,
+    'retour' => Icons.move_to_inbox_outlined,
+    'carte' => Icons.badge_outlined,
+    'abonnement' => Icons.card_membership_outlined,
     _ => Icons.library_books_outlined,
   };
 }

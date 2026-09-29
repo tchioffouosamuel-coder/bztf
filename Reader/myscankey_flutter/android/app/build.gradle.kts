@@ -35,17 +35,26 @@ android {
         }
     }
 
+    externalNativeBuild {
+        cmake {
+            path = file("src/main/cpp/CMakeLists.txt")
+            version = "3.22.1"
+        }
+    }
+
     buildTypes {
         release {
             // TODO: Add your own signing config for the release build.
             // Signing with the debug keys for now, so `flutter run --release` works.
             signingConfig = signingConfigs.getByName("debug")
+            proguardFiles("proguard-rules.pro")
         }
     }
 }
 
 dependencies {
     implementation(files("libs/N01_1.3.1.6.jar"))
+    implementation(files("libs/reader.jar"))
     compileOnly(files("libs/uhf.jar"))
     compileOnly(files("libs/scankey.jar"))
     implementation("com.google.code.gson:gson:2.8.7")

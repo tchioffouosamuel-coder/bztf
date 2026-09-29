@@ -32,6 +32,19 @@ function cleanText(value, maxLength = 500) {
     .slice(0, maxLength);
 }
 
+function formatDay(value) {
+  return new Intl.DateTimeFormat("fr-FR").format(new Date(value));
+}
+
+/** Ordre d'application : les références avant ce qui les utilise. */
+function changePriority(change) {
+  return (
+    { book: 0, subscriber: 1, subscription: 2, loan: 3 }[
+      change?.entityType || "book"
+    ] ?? 4
+  );
+}
+
 export class LibraryDatabase {
   constructor(filePath) {
     fs.mkdirSync(path.dirname(filePath), { recursive: true });
@@ -215,6 +228,39 @@ export class LibraryDatabase {
       this.db.exec(
         "ALTER TABLE sync_outbox ADD COLUMN entity_type TEXT NOT NULL DEFAULT 'book';",
       );
+    // Emprunts et abonnements synchronisés : identifiant global (UUID).
+    for (const table of ["subscriptions", "loans"]) {
+      const columns = new Set(
+        this.db
+          .prepare(`PRAGMA table_info(${table})`)
+          .all()
+          .map((column) => column.name),
+      );
+      if (!columns.has("server_id"))
+        this.db.exec(`ALTER TABLE ${table} ADD COLUMN server_id TEXT;`);
+      if (!columns.has("sync_state"))
+        this.db.exec(
+          `ALTER TABLE ${table} ADD COLUMN sync_state TEXT NOT NULL DEFAULT 'pending';`,
+        );
+      const assignId = this.db.prepare(
+        `UPDATE ${table} SET server_id=? WHERE id=?`,
+      );
+      for (const row of this.db
+        .prepare(`SELECT id FROM ${table} WHERE server_id IS NULL`)
+        .all())
+        assignId.run(randomUUID(), row.id);
+      this.db.exec(
+        `CREATE UNIQUE INDEX IF NOT EXISTS idx_${table}_server_id ON ${table}(server_id);`,
+      );
+    }
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS sync_deferred (
+        entity_type TEXT NOT NULL,
+        entity_id TEXT NOT NULL,
+        change TEXT NOT NULL,
+        PRIMARY KEY(entity_type, entity_id)
+      );
+    `);
     this.db.exec(`
       CREATE UNIQUE INDEX IF NOT EXISTS idx_subscribers_card_epc ON subscribers(card_epc) WHERE card_epc IS NOT NULL;
       CREATE UNIQUE INDEX IF NOT EXISTS idx_subscribers_card_tid ON subscribers(card_tid) WHERE card_tid IS NOT NULL;
@@ -478,6 +524,12 @@ export class LibraryDatabase {
       );
     this.queueDeleteMutation(current);
     // L'historique des emprunts rendus reste tracé dans `activity`.
+    for (const loan of this.db
+      .prepare(
+        "SELECT server_id FROM loans WHERE book_id=? AND server_id IS NOT NULL",
+      )
+      .all(Number(id)))
+      this.queueEntityDelete("loan", loan.server_id);
     this.db.prepare("DELETE FROM loans WHERE book_id = ?").run(Number(id));
     this.db.prepare("DELETE FROM books WHERE id = ?").run(Number(id));
     this.addActivity(
@@ -523,12 +575,247 @@ export class LibraryDatabase {
       .prepare(
         `SELECT s.*,
           (SELECT ends_at FROM subscriptions WHERE subscriber_id=s.id AND status='active' ORDER BY ends_at DESC LIMIT 1) AS subscription_ends_at,
-          (SELECT COUNT(*) FROM loans WHERE subscriber_id=s.id AND returned_at IS NULL) AS active_loans
+          (SELECT status FROM subscriptions WHERE subscriber_id=s.id ORDER BY ends_at DESC, id DESC LIMIT 1) AS latest_subscription_status,
+          (SELECT COUNT(*) FROM loans WHERE subscriber_id=s.id AND returned_at IS NULL) AS active_loans,
+          (SELECT COUNT(*) FROM loans WHERE subscriber_id=s.id AND returned_at IS NULL AND due_at < ?) AS overdue_loans
          FROM subscribers s
          WHERE s.member_number LIKE ? OR s.name LIKE ? OR s.email LIKE ? OR s.phone LIKE ?
-         ORDER BY s.name COLLATE NOCASE LIMIT 100`,
+         ORDER BY s.name COLLATE NOCASE LIMIT ?`,
       )
-      .all(term, term, term, term);
+      .all(new Date().toISOString(), term, term, term, term, 500);
+  }
+
+  /** Fiche d'un abonné : abonnements, emprunts en cours et historique. */
+  getSubscriberDetails(id) {
+    const subscriber = this.getSubscriber(id);
+    if (!subscriber) return null;
+    const subscriptions = this.db
+      .prepare(
+        `SELECT sub.*, (SELECT COUNT(*) FROM loans WHERE subscription_id=sub.id) AS loan_count
+         FROM subscriptions sub WHERE subscriber_id=? ORDER BY ends_at DESC, id DESC`,
+      )
+      .all(subscriber.id);
+    const loans = this.db
+      .prepare(
+        `SELECT l.*, b.title AS book_title, b.accession AS book_accession
+         FROM loans l LEFT JOIN books b ON b.id=l.book_id
+         WHERE l.subscriber_id=? ORDER BY COALESCE(l.returned_at, l.borrowed_at) DESC LIMIT 100`,
+      )
+      .all(subscriber.id);
+    return { subscriber, subscriptions, loans };
+  }
+
+  createSubscriber(input) {
+    const memberNumber = cleanText(input.member_number, 80).toUpperCase();
+    if (
+      memberNumber &&
+      this.db
+        .prepare("SELECT 1 FROM subscribers WHERE member_number=?")
+        .get(memberNumber)
+    )
+      throw new Error(`Le numéro d'abonné ${memberNumber} existe déjà.`);
+    const subscriber = this.upsertSubscriber(input);
+    this.addActivity(
+      "abonne",
+      "succes",
+      null,
+      `Abonné créé : ${subscriber.name} (${subscriber.member_number})`,
+    );
+    return subscriber;
+  }
+
+  /**
+   * Modifie les coordonnées et l'état d'un abonné. Le numéro d'abonné est
+   * son identifiant de synchronisation : il ne change pas.
+   */
+  updateSubscriber(id, input) {
+    const current = this.getSubscriber(id);
+    if (!current) return null;
+    const name = cleanText(input.name, 240);
+    if (!name) throw new Error("Le nom de l'abonné est obligatoire.");
+    const active = input.active === undefined ? current.active : input.active ? 1 : 0;
+    const now = new Date().toISOString();
+    this.db
+      .prepare(
+        "UPDATE subscribers SET name=?, email=?, phone=?, active=?, updated_at=? WHERE id=?",
+      )
+      .run(
+        name,
+        cleanText(input.email, 240),
+        cleanText(input.phone, 80),
+        active,
+        now,
+        current.id,
+      );
+    const updated = this.getSubscriber(current.id);
+    this.queueSubscriberMutation(updated);
+    this.addActivity(
+      "abonne",
+      "succes",
+      null,
+      `Abonné modifié : ${updated.name} (${updated.member_number})${
+        current.active && !active ? " — désactivé" : ""
+      }`,
+    );
+    return updated;
+  }
+
+  /**
+   * Supprime un abonné sans historique d'emprunt. Avec un historique, il faut
+   * le désactiver : ses emprunts passés restent traçables.
+   */
+  deleteSubscriber(id) {
+    const subscriber = this.getSubscriber(id);
+    if (!subscriber) return false;
+    const loans = Number(
+      this.db
+        .prepare("SELECT COUNT(*) AS total FROM loans WHERE subscriber_id=?")
+        .get(subscriber.id).total,
+    );
+    if (loans)
+      throw new Error(
+        `${subscriber.name} a ${loans} emprunt(s) enregistré(s). Désactivez l'abonné au lieu de le supprimer.`,
+      );
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      for (const row of this.db
+        .prepare(
+          "SELECT server_id FROM subscriptions WHERE subscriber_id=? AND server_id IS NOT NULL",
+        )
+        .all(subscriber.id))
+        this.queueEntityDelete("subscription", row.server_id);
+      this.db
+        .prepare("DELETE FROM subscriptions WHERE subscriber_id=?")
+        .run(subscriber.id);
+      this.db.prepare("DELETE FROM subscribers WHERE id=?").run(subscriber.id);
+      this.queueEntityDelete("subscriber", subscriber.member_number);
+      this.addActivity(
+        "abonne",
+        "succes",
+        null,
+        `Abonné supprimé : ${subscriber.name} (${subscriber.member_number})`,
+        subscriber.card_epc,
+        subscriber.card_tid,
+      );
+      this.db.exec("COMMIT");
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
+    return true;
+  }
+
+  getSubscription(id) {
+    return (
+      this.db
+        .prepare(
+          `SELECT sub.*, s.name AS subscriber_name, s.member_number
+           FROM subscriptions sub JOIN subscribers s ON s.id=sub.subscriber_id
+           WHERE sub.id=?`,
+        )
+        .get(Number(id)) || null
+    );
+  }
+
+  subscriptionValues(input, current = {}) {
+    const startsAt = new Date(input.starts_at ?? current.starts_at);
+    const endsAt = new Date(input.ends_at ?? current.ends_at);
+    if (Number.isNaN(startsAt.getTime()))
+      throw new Error("La date de début de l'abonnement est invalide.");
+    if (Number.isNaN(endsAt.getTime()))
+      throw new Error("La date de fin de l'abonnement est invalide.");
+    if (endsAt <= startsAt)
+      throw new Error("La fin de l'abonnement doit suivre son début.");
+    const status = cleanText(input.status ?? current.status ?? "active", 20);
+    if (!["active", "expired", "suspended"].includes(status))
+      throw new Error("Statut d'abonnement inconnu.");
+    return {
+      startsAt: startsAt.toISOString(),
+      endsAt: endsAt.toISOString(),
+      status,
+    };
+  }
+
+  createSubscription(subscriberId, input) {
+    const subscriber = this.getSubscriber(subscriberId);
+    if (!subscriber) throw new Error("Abonné introuvable.");
+    const values = this.subscriptionValues(input);
+    const now = new Date().toISOString();
+    const result = this.db
+      .prepare(
+        `INSERT INTO subscriptions (subscriber_id, starts_at, ends_at, status, created_at, updated_at, server_id)
+         VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        subscriber.id,
+        values.startsAt,
+        values.endsAt,
+        values.status,
+        now,
+        now,
+        randomUUID(),
+      );
+    const id = Number(result.lastInsertRowid);
+    this.queueSubscriptionMutation(id);
+    this.addActivity(
+      "abonnement",
+      "succes",
+      null,
+      `Abonnement de ${subscriber.name} (${subscriber.member_number}) jusqu'au ${formatDay(values.endsAt)}`,
+    );
+    return this.getSubscription(id);
+  }
+
+  updateSubscription(id, input) {
+    const current = this.getSubscription(id);
+    if (!current) return null;
+    const values = this.subscriptionValues(input, current);
+    this.db
+      .prepare(
+        "UPDATE subscriptions SET starts_at=?, ends_at=?, status=?, updated_at=? WHERE id=?",
+      )
+      .run(
+        values.startsAt,
+        values.endsAt,
+        values.status,
+        new Date().toISOString(),
+        current.id,
+      );
+    this.queueSubscriptionMutation(current.id);
+    this.addActivity(
+      "abonnement",
+      "succes",
+      null,
+      `Abonnement de ${current.subscriber_name} modifié : ${values.status}, jusqu'au ${formatDay(values.endsAt)}`,
+    );
+    return this.getSubscription(current.id);
+  }
+
+  /** Les emprunts faits sous cet abonnement restent, sans abonnement lié. */
+  deleteSubscription(id) {
+    const current = this.getSubscription(id);
+    if (!current) return false;
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      const loans = this.db
+        .prepare("SELECT id FROM loans WHERE subscription_id=?")
+        .all(current.id);
+      this.db.prepare("DELETE FROM subscriptions WHERE id=?").run(current.id);
+      if (current.server_id)
+        this.queueEntityDelete("subscription", current.server_id);
+      for (const loan of loans) this.queueLoanMutation(loan.id);
+      this.addActivity(
+        "abonnement",
+        "succes",
+        null,
+        `Abonnement de ${current.subscriber_name} supprimé`,
+      );
+      this.db.exec("COMMIT");
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
+    return true;
   }
 
   getSubscriber(id) {
@@ -669,8 +956,8 @@ export class LibraryDatabase {
       if (!subscription) {
         const subscriptionResult = this.db
           .prepare(
-            `INSERT INTO subscriptions (subscriber_id, starts_at, ends_at, status, created_at, updated_at)
-             VALUES (?, ?, ?, 'active', ?, ?)`,
+            `INSERT INTO subscriptions (subscriber_id, starts_at, ends_at, status, created_at, updated_at, server_id)
+             VALUES (?, ?, ?, 'active', ?, ?, ?)`,
           )
           .run(
             subscriber.id,
@@ -678,15 +965,17 @@ export class LibraryDatabase {
             subscriptionEnd.toISOString(),
             timestamp,
             timestamp,
+            randomUUID(),
           );
+        this.queueSubscriptionMutation(Number(subscriptionResult.lastInsertRowid));
         subscription = this.db
           .prepare("SELECT * FROM subscriptions WHERE id=?")
           .get(Number(subscriptionResult.lastInsertRowid));
       }
       const loanResult = this.db
         .prepare(
-          `INSERT INTO loans (book_id, subscriber_id, subscription_id, borrowed_at, due_at, status, notes, created_at, updated_at)
-           VALUES (?, ?, ?, ?, ?, 'active', ?, ?, ?)`,
+          `INSERT INTO loans (book_id, subscriber_id, subscription_id, borrowed_at, due_at, status, notes, created_at, updated_at, server_id)
+           VALUES (?, ?, ?, ?, ?, 'active', ?, ?, ?, ?)`,
         )
         .run(
           Number(bookId),
@@ -697,7 +986,9 @@ export class LibraryDatabase {
           cleanText(input.notes, 1000),
           timestamp,
           timestamp,
+          randomUUID(),
         );
+      this.queueLoanMutation(Number(loanResult.lastInsertRowid));
       this.db
         .prepare("UPDATE books SET status='indisponible', updated_at=? WHERE id=?")
         .run(timestamp, Number(bookId));
@@ -738,6 +1029,7 @@ export class LibraryDatabase {
           "UPDATE loans SET returned_at=?, status='returned', updated_at=? WHERE id=?",
         )
         .run(now, now, loan.id);
+      this.queueLoanMutation(loan.id);
       this.db
         .prepare("UPDATE books SET status=?, updated_at=? WHERE id=?")
         .run(status, now, Number(bookId));
@@ -897,6 +1189,88 @@ export class LibraryDatabase {
     this.onMutation?.();
   }
 
+  queueSubscriptionMutation(subscriptionId) {
+    const row = this.db
+      .prepare(
+        `SELECT sub.*, s.member_number FROM subscriptions sub
+         JOIN subscribers s ON s.id=sub.subscriber_id WHERE sub.id=?`,
+      )
+      .get(Number(subscriptionId));
+    if (!row?.server_id) return;
+    this.queueEntity("subscriptions", row.id, "subscription", row.server_id, {
+      serverId: row.server_id,
+      memberNumber: row.member_number,
+      startsAt: row.starts_at,
+      endsAt: row.ends_at,
+      status: row.status,
+      createdAt: row.created_at,
+      updatedAt: row.updated_at,
+    });
+  }
+
+  queueLoanMutation(loanId) {
+    const row = this.db
+      .prepare(
+        `SELECT l.*, s.member_number, b.server_id AS book_server_id,
+           sub.server_id AS subscription_server_id
+         FROM loans l
+         JOIN subscribers s ON s.id=l.subscriber_id
+         JOIN books b ON b.id=l.book_id
+         LEFT JOIN subscriptions sub ON sub.id=l.subscription_id
+         WHERE l.id=?`,
+      )
+      .get(Number(loanId));
+    if (!row?.server_id || !row.book_server_id) return;
+    this.queueEntity("loans", row.id, "loan", row.server_id, {
+      serverId: row.server_id,
+      bookServerId: row.book_server_id,
+      memberNumber: row.member_number,
+      subscriptionServerId: row.subscription_server_id || null,
+      borrowedAt: row.borrowed_at,
+      dueAt: row.due_at,
+      returnedAt: row.returned_at || null,
+      status: row.status,
+      notes: row.notes || "",
+      createdAt: row.created_at,
+      updatedAt: row.updated_at,
+    });
+  }
+
+  queueEntity(table, id, entityType, serverId, payload) {
+    this.db
+      .prepare(`UPDATE ${table} SET sync_state='pending' WHERE id=?`)
+      .run(id);
+    this.db
+      .prepare(
+        `INSERT INTO sync_outbox(mutation_id, operation, entity_id, payload, created_at, entity_type)
+         VALUES (?, 'upsert', ?, ?, ?, ?)
+         ON CONFLICT(entity_id) DO UPDATE SET mutation_id=excluded.mutation_id,
+           operation=excluded.operation, payload=excluded.payload,
+           created_at=excluded.created_at, entity_type=excluded.entity_type`,
+      )
+      .run(
+        randomUUID(),
+        serverId,
+        JSON.stringify(payload),
+        new Date().toISOString(),
+        entityType,
+      );
+    this.onMutation?.();
+  }
+
+  queueEntityDelete(entityType, serverId) {
+    this.db
+      .prepare(
+        `INSERT INTO sync_outbox(mutation_id, operation, entity_id, payload, created_at, entity_type)
+         VALUES (?, 'delete', ?, NULL, ?, ?)
+         ON CONFLICT(entity_id) DO UPDATE SET mutation_id=excluded.mutation_id,
+           operation=excluded.operation, payload=NULL,
+           created_at=excluded.created_at, entity_type=excluded.entity_type`,
+      )
+      .run(randomUUID(), serverId, new Date().toISOString(), entityType);
+    this.onMutation?.();
+  }
+
   queueDeleteMutation(book) {
     if (!book?.server_id) return;
     this.db
@@ -917,7 +1291,19 @@ export class LibraryDatabase {
     const subscribers = this.db
       .prepare("SELECT * FROM subscribers WHERE sync_state <> 'synced'")
       .all();
-    if (!books.length && !subscribers.length) return;
+    const subscriptions = this.db
+      .prepare("SELECT id FROM subscriptions WHERE sync_state <> 'synced' ORDER BY id")
+      .all();
+    const loans = this.db
+      .prepare("SELECT id FROM loans WHERE sync_state <> 'synced' ORDER BY id")
+      .all();
+    if (
+      !books.length &&
+      !subscribers.length &&
+      !subscriptions.length &&
+      !loans.length
+    )
+      return;
     const markPending = this.db.prepare(
       "UPDATE books SET sync_state='pending' WHERE id=?",
     );
@@ -942,6 +1328,9 @@ export class LibraryDatabase {
       }
       for (const subscriber of subscribers)
         this.queueSubscriberMutation(subscriber);
+      for (const subscription of subscriptions)
+        this.queueSubscriptionMutation(subscription.id);
+      for (const loan of loans) this.queueLoanMutation(loan.id);
       this.db.exec("COMMIT");
     } catch (error) {
       this.db.exec("ROLLBACK");
@@ -973,6 +1362,14 @@ export class LibraryDatabase {
     const subscriberSynced = this.db.prepare(
       "UPDATE subscribers SET sync_state='synced' WHERE member_number=?",
     );
+    const lendingSynced = {
+      subscription: this.db.prepare(
+        "UPDATE subscriptions SET sync_state='synced' WHERE server_id=?",
+      ),
+      loan: this.db.prepare(
+        "UPDATE loans SET sync_state='synced' WHERE server_id=?",
+      ),
+    };
     const remove = this.db.prepare(
       "DELETE FROM sync_outbox WHERE mutation_id=?",
     );
@@ -982,6 +1379,8 @@ export class LibraryDatabase {
         const mutation = find.get(mutationId);
         if (mutation?.entity_type === "subscriber")
           subscriberSynced.run(mutation.entity_id);
+        else if (lendingSynced[mutation?.entity_type])
+          lendingSynced[mutation.entity_type].run(mutation.entity_id);
         else if (mutation) bookSynced.run(mutation.entity_id);
         remove.run(mutationId);
       }
@@ -1041,13 +1440,23 @@ export class LibraryDatabase {
     `);
     this.db.exec("BEGIN IMMEDIATE");
     try {
-      for (const change of Array.isArray(changes) ? changes : []) {
+      // Livres et abonnés d'abord : abonnements et emprunts les référencent.
+      const ordered = (Array.isArray(changes) ? changes : [])
+        .filter(Boolean)
+        .sort((a, b) => changePriority(a) - changePriority(b));
+      for (const change of ordered) {
         const serverId = String(change?.entityId || "");
         if (!serverId || pending.get(serverId)) continue;
-        if ((change.entityType || "book") === "subscriber") {
+        const entityType = change.entityType || "book";
+        if (entityType === "subscriber") {
           this.applyRemoteSubscriber(change, serverId);
           continue;
         }
+        if (entityType === "subscription" || entityType === "loan") {
+          this.applyLendingChange(change);
+          continue;
+        }
+        if (entityType !== "book") continue;
         if (change.operation === "delete") {
           removeLoans.run(serverId);
           remove.run(serverId);
@@ -1058,12 +1467,176 @@ export class LibraryDatabase {
         if (localByServerId.get(serverId)) update.run(book);
         else insert.run(book);
       }
+      this.retryDeferred();
       this.setSyncMeta("cursor", cursor);
       this.db.exec("COMMIT");
     } catch (error) {
       this.db.exec("ROLLBACK");
       throw new Error(`Conflit de synchronisation du catalogue : ${error.message}`);
     }
+  }
+
+  /**
+   * Applique un abonnement ou un emprunt distant ; s'il référence un livre ou
+   * un abonné encore inconnu, il est mis de côté et réessayé plus tard.
+   */
+  applyLendingChange(change) {
+    const entityType = change.entityType;
+    const serverId = String(change.entityId);
+    const applied =
+      entityType === "loan"
+        ? this.applyRemoteLoan(change, serverId)
+        : this.applyRemoteSubscription(change, serverId);
+    if (applied)
+      this.db
+        .prepare(
+          "DELETE FROM sync_deferred WHERE entity_type=? AND entity_id=?",
+        )
+        .run(entityType, serverId);
+    else
+      this.db
+        .prepare(
+          `INSERT INTO sync_deferred(entity_type, entity_id, change) VALUES (?, ?, ?)
+           ON CONFLICT(entity_type, entity_id) DO UPDATE SET change=excluded.change`,
+        )
+        .run(entityType, serverId, JSON.stringify(change));
+  }
+
+  retryDeferred() {
+    const deferred = this.db
+      .prepare("SELECT change FROM sync_deferred")
+      .all()
+      .map((row) => JSON.parse(row.change))
+      .sort((a, b) => changePriority(a) - changePriority(b));
+    for (const change of deferred) this.applyLendingChange(change);
+  }
+
+  localId(table, column, value) {
+    const key = cleanText(value, 200);
+    if (!key) return null;
+    return (
+      this.db
+        .prepare(`SELECT id FROM ${table} WHERE ${column}=? LIMIT 1`)
+        .get(column === "member_number" ? key.toUpperCase() : key)?.id ?? null
+    );
+  }
+
+  applyRemoteSubscription(change, serverId) {
+    if (change.operation === "delete") {
+      this.db.prepare("DELETE FROM subscriptions WHERE server_id=?").run(serverId);
+      return true;
+    }
+    const remote = change.subscription;
+    if (!remote) return true;
+    const subscriberId = this.localId(
+      "subscribers",
+      "member_number",
+      remote.memberNumber,
+    );
+    if (!subscriberId) return false;
+    const now = new Date().toISOString();
+    const status = ["active", "expired", "suspended"].includes(remote.status)
+      ? remote.status
+      : "active";
+    this.db
+      .prepare(
+        `INSERT INTO subscriptions (server_id, subscriber_id, starts_at, ends_at, status,
+           created_at, updated_at, sync_state)
+         VALUES (?, ?, ?, ?, ?, ?, ?, 'synced')
+         ON CONFLICT(server_id) DO UPDATE SET subscriber_id=excluded.subscriber_id,
+           starts_at=excluded.starts_at, ends_at=excluded.ends_at, status=excluded.status,
+           updated_at=excluded.updated_at, sync_state='synced'`,
+      )
+      .run(
+        serverId,
+        subscriberId,
+        remote.startsAt || now,
+        remote.endsAt || now,
+        status,
+        remote.createdAt || now,
+        remote.updatedAt || now,
+      );
+    return true;
+  }
+
+  applyRemoteLoan(change, serverId) {
+    if (change.operation === "delete") {
+      const loan = this.db
+        .prepare("SELECT book_id FROM loans WHERE server_id=?")
+        .get(serverId);
+      this.db.prepare("DELETE FROM loans WHERE server_id=?").run(serverId);
+      if (loan) this.syncBookLoanStatus(loan.book_id);
+      return true;
+    }
+    const remote = change.loan;
+    if (!remote) return true;
+    const bookId = this.localId("books", "server_id", remote.bookServerId);
+    const subscriberId = this.localId(
+      "subscribers",
+      "member_number",
+      remote.memberNumber,
+    );
+    if (!bookId || !subscriberId) return false;
+    const now = new Date().toISOString();
+    const borrowedAt = remote.borrowedAt || now;
+    const returnedAt = remote.returnedAt || null;
+    const existing = this.localId("loans", "server_id", serverId);
+    // Un seul emprunt en cours par livre : un autre emprunt local encore
+    // ouvert a forcément été rendu avant ce nouvel emprunt.
+    if (!returnedAt)
+      this.db
+        .prepare(
+          `UPDATE loans SET returned_at=?, status='returned', updated_at=?
+           WHERE book_id=? AND returned_at IS NULL AND id<>?`,
+        )
+        .run(borrowedAt, now, bookId, existing ?? -1);
+    const status = ["active", "returned", "late"].includes(remote.status)
+      ? remote.status
+      : "active";
+    this.db
+      .prepare(
+        `INSERT INTO loans (server_id, book_id, subscriber_id, subscription_id, borrowed_at,
+           due_at, returned_at, status, notes, created_at, updated_at, sync_state)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'synced')
+         ON CONFLICT(server_id) DO UPDATE SET book_id=excluded.book_id,
+           subscriber_id=excluded.subscriber_id, subscription_id=excluded.subscription_id,
+           borrowed_at=excluded.borrowed_at, due_at=excluded.due_at,
+           returned_at=excluded.returned_at, status=excluded.status, notes=excluded.notes,
+           updated_at=excluded.updated_at, sync_state='synced'`,
+      )
+      .run(
+        serverId,
+        bookId,
+        subscriberId,
+        this.localId("subscriptions", "server_id", remote.subscriptionServerId),
+        borrowedAt,
+        remote.dueAt || borrowedAt,
+        returnedAt,
+        status,
+        cleanText(remote.notes, 1000),
+        remote.createdAt || now,
+        remote.updatedAt || now,
+      );
+    this.syncBookLoanStatus(bookId);
+    return true;
+  }
+
+  /** Aligne le statut local du livre sur ses emprunts. */
+  syncBookLoanStatus(bookId) {
+    const active = this.db
+      .prepare("SELECT 1 FROM loans WHERE book_id=? AND returned_at IS NULL LIMIT 1")
+      .get(bookId);
+    if (active)
+      this.db
+        .prepare("UPDATE books SET status='indisponible' WHERE id=?")
+        .run(bookId);
+    else
+      this.db
+        .prepare(
+          `UPDATE books SET status=CASE WHEN tid IS NULL THEN 'a_encoder' ELSE 'encode' END
+           WHERE id=? AND status='indisponible'`,
+        )
+        .run(bookId);
   }
 
   applyRemoteSubscriber(change, memberNumber) {

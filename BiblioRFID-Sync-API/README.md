@@ -24,6 +24,8 @@ de développement par défaut.
 - `GET /api/v1/sync?since=0`
 - `GET /api/v1/books`
 - `GET /api/v1/subscribers`
+- `GET /api/v1/subscriptions`
+- `GET /api/v1/loans`
 - `WS /api/v1/events?apiKey=...`
 
 Les routes `/api/v1` attendent l'en-tête `X-Device-Key`.
@@ -39,7 +41,19 @@ Chaque mutation et chaque changement portent un `entityType` :
   même tag physique (`cardTid`) est encodé pour un autre abonné, l'ancien
   titulaire perd la carte et un changement est émis pour lui.
 
-Les bases existantes sont migrées au démarrage (colonne `events.entity_type`).
+- `subscription` : champ `subscription`, identifiant UUID `serverId`, abonné désigné
+  par `memberNumber`.
+- `loan` : champ `loan`, identifiant UUID `serverId`, livre désigné par
+  `bookServerId`, abonné par `memberNumber`, abonnement par `subscriptionServerId`.
+  Règles de conflit : un retour enregistré n'est jamais annulé par une copie plus
+  ancienne ; si deux emprunts d'un même livre sont en cours, le plus récent reste
+  actif et l'autre est clôturé à sa date d'emprunt (un changement est émis).
+
+Dans un lot, le serveur applique les livres, puis les abonnés, les abonnements et
+enfin les emprunts, pour que les clients reçoivent les références avant leur usage.
+
+Les bases existantes sont migrées au démarrage (colonne `events.entity_type`, tables
+`subscriptions` et `loans`).
 
 ## Compiler
 

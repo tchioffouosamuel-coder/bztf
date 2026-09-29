@@ -2272,3 +2272,53 @@ dialog::backdrop {
     justify-self: start;
   }
 }
+
+/* Abonnés et abonnements */
+#subscriber-detail-dialog {
+  width: min(920px, calc(100vw - 32px));
+}
+.subscriber-detail-summary {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 12px;
+  padding: 18px 20px 4px;
+}
+.subscriber-detail-summary .status-badge {
+  align-self: flex-start;
+}
+.subscriber-detail-summary div {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+.subscriber-detail-summary small {
+  color: var(--muted);
+}
+.subscriber-section-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin: 16px 20px 8px;
+}
+.subscriber-section-heading h3 {
+  margin: 0;
+  font-size: 1rem;
+}
+.compact-table {
+  max-height: 240px;
+  overflow: auto;
+  margin: 0 20px 4px;
+}
+.checkbox-field {
+  flex-direction: row;
+  align-items: center;
+  gap: 10px;
+}
+.checkbox-field input {
+  width: auto;
+}
+.danger-text {
+  color: var(--danger);
+  font-weight: 700;
+}

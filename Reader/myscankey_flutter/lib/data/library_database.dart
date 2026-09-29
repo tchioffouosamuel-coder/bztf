@@ -5,8 +5,10 @@ import 'package:path/path.dart' as path;
 import 'package:sqflite/sqflite.dart';
 
 import '../core/epc.dart';
+import '../core/password.dart';
 import '../models/book.dart';
 import '../models/lending.dart';
+import '../models/user.dart';
 
 class LibraryDatabase {
   LibraryDatabase._();
@@ -19,7 +21,7 @@ class LibraryDatabase {
     final directory = await getDatabasesPath();
     _database = await openDatabase(
       path.join(directory, 'biblio_rfid.db'),
-      version: 5,
+      version: 7,
       onConfigure: (database) => database.execute('PRAGMA foreign_keys = ON'),
       onCreate: (database, version) async {
         await database.execute('''
@@ -64,6 +66,8 @@ class LibraryDatabase {
         await _createLendingTables(database);
         await _addSubscriberCards(database);
         await _addSubscriberSync(database);
+        await _addLendingSync(database);
+        await _createUsers(database);
       },
       onUpgrade: (database, oldVersion, newVersion) async {
         if (oldVersion < 2) {
@@ -91,6 +95,8 @@ class LibraryDatabase {
         if (oldVersion < 3) await _createLendingTables(database);
         if (oldVersion < 4) await _addSubscriberCards(database);
         if (oldVersion < 5) await _addSubscriberSync(database);
+        if (oldVersion < 6) await _addLendingSync(database);
+        if (oldVersion < 7) await _createUsers(database);
       },
     );
     return _database!;
@@ -264,6 +270,19 @@ class LibraryDatabase {
     await db.transaction((transaction) async {
       await _queueDelete(transaction, book);
       // L'historique des emprunts rendus reste tracé dans `activity`.
+      final loans = await transaction.query(
+        'loans',
+        columns: ['server_id'],
+        where: 'book_id = ? AND server_id IS NOT NULL',
+        whereArgs: [book.id],
+      );
+      for (final row in loans) {
+        await _queueEntityDelete(
+          transaction,
+          'loan',
+          row['server_id'] as String,
+        );
+      }
       await transaction.delete(
         'loans',
         where: 'book_id = ?',
@@ -283,19 +302,182 @@ class LibraryDatabase {
     });
   }
 
+  Future<int> countUsers() async =>
+      Sqflite.firstIntValue(
+        await (await database).rawQuery('SELECT COUNT(*) FROM users'),
+      ) ??
+      0;
+
+  Future<List<AppUser>> listUsers() async {
+    final rows = await (await database).query(
+      'users',
+      columns: ['id', 'name', 'email', 'role', 'active'],
+      orderBy: 'name COLLATE NOCASE',
+    );
+    return rows.map(AppUser.fromMap).toList();
+  }
+
+  /// Crée un compte ; le premier compte de l'appareil est toujours
+  /// administrateur.
+  Future<AppUser> createUser({
+    required String name,
+    required String email,
+    required String password,
+    String role = 'operateur',
+  }) async {
+    final normalizedName = _clean(name, 120);
+    final normalizedEmail = _clean(email, 240).toLowerCase();
+    if (normalizedName.length < 2) {
+      throw ArgumentError('Le nom doit contenir au moins 2 caractères.');
+    }
+    if (!RegExp(r'^[^\s@]+@[^\s@]+\.[^\s@]+$').hasMatch(normalizedEmail)) {
+      throw ArgumentError('L’adresse e-mail est invalide.');
+    }
+    _checkPassword(password);
+    final salt = newPasswordSalt();
+    final hash = await hashPassword(password, salt, passwordIterations);
+    final now = DateTime.now().toUtc().toIso8601String();
+    final db = await database;
+    final first = await countUsers() == 0;
+    try {
+      final id = await db.insert('users', {
+        'name': normalizedName,
+        'email': normalizedEmail,
+        'password_hash': hash,
+        'password_salt': salt,
+        'password_iterations': passwordIterations,
+        'role': first || role == 'admin' ? 'admin' : 'operateur',
+        'created_at': now,
+        'updated_at': now,
+      });
+      await addActivity(
+        'compte',
+        'succes',
+        'Compte créé : $normalizedName ($normalizedEmail)',
+      );
+      return (await _user(id))!;
+    } on DatabaseException catch (error) {
+      if (error.isUniqueConstraintError()) {
+        throw StateError('Un compte utilise déjà cette adresse e-mail.');
+      }
+      rethrow;
+    }
+  }
+
+  /// Compte actif correspondant, ou `null` si l'identification échoue.
+  Future<AppUser?> authenticateUser(String email, String password) async {
+    final rows = await (await database).query(
+      'users',
+      where: 'email = ? AND active = 1',
+      whereArgs: [_clean(email, 240).toLowerCase()],
+      limit: 1,
+    );
+    if (rows.isEmpty) {
+      // Même coût de calcul qu'un compte existant.
+      await hashPassword(password, newPasswordSalt(), passwordIterations);
+      return null;
+    }
+    final row = rows.first;
+    final hash = await hashPassword(
+      password,
+      row['password_salt'] as String,
+      (row['password_iterations'] as num).toInt(),
+    );
+    return sameDigest(hash, row['password_hash'] as String)
+        ? AppUser.fromMap(row)
+        : null;
+  }
+
+  Future<void> changePassword(
+    int userId, {
+    required String current,
+    required String next,
+  }) async {
+    final user = await _user(userId);
+    if (user == null || await authenticateUser(user.email, current) == null) {
+      throw StateError('Mot de passe actuel incorrect.');
+    }
+    _checkPassword(next);
+    final salt = newPasswordSalt();
+    await (await database).update(
+      'users',
+      {
+        'password_hash': await hashPassword(next, salt, passwordIterations),
+        'password_salt': salt,
+        'password_iterations': passwordIterations,
+        'updated_at': DateTime.now().toUtc().toIso8601String(),
+      },
+      where: 'id = ?',
+      whereArgs: [userId],
+    );
+  }
+
+  /// Active ou désactive un compte ; le dernier administrateur actif reste.
+  Future<void> setUserActive(int userId, bool active) async {
+    final user = await _user(userId);
+    if (user == null) throw StateError('Compte introuvable.');
+    final db = await database;
+    if (!active && user.isAdmin) {
+      final admins = Sqflite.firstIntValue(
+        await db.rawQuery(
+          "SELECT COUNT(*) FROM users WHERE role = 'admin' AND active = 1",
+        ),
+      );
+      if ((admins ?? 0) <= 1) {
+        throw StateError(
+          'Le dernier administrateur ne peut pas être désactivé.',
+        );
+      }
+    }
+    await db.update(
+      'users',
+      {
+        'active': active ? 1 : 0,
+        'updated_at': DateTime.now().toUtc().toIso8601String(),
+      },
+      where: 'id = ?',
+      whereArgs: [userId],
+    );
+  }
+
+  Future<AppUser?> _user(int id) async {
+    final rows = await (await database).query(
+      'users',
+      columns: ['id', 'name', 'email', 'role', 'active'],
+      where: 'id = ?',
+      whereArgs: [id],
+      limit: 1,
+    );
+    return rows.isEmpty ? null : AppUser.fromMap(rows.first);
+  }
+
+  static void _checkPassword(String password) {
+    if (password.length < 8) {
+      throw ArgumentError(
+        'Le mot de passe doit contenir au moins 8 caractères.',
+      );
+    }
+  }
+
   Future<List<Subscriber>> listSubscribers({String search = ''}) async {
     final term = '%${_clean(search, 120)}%';
-    final rows = await (await database).rawQuery('''
+    final rows = await (await database).rawQuery(
+      '''
       SELECT s.*,
         (SELECT ends_at FROM subscriptions
           WHERE subscriber_id = s.id AND status = 'active'
           ORDER BY ends_at DESC LIMIT 1) AS subscription_ends_at,
         (SELECT COUNT(*) FROM loans
-          WHERE subscriber_id = s.id AND returned_at IS NULL) AS active_loans
+          WHERE subscriber_id = s.id AND returned_at IS NULL) AS active_loans,
+        (SELECT COUNT(*) FROM loans
+          WHERE subscriber_id = s.id AND returned_at IS NULL
+            AND due_at < ?) AS overdue_loans
       FROM subscribers s
       WHERE s.member_number LIKE ? OR s.name LIKE ? OR s.email LIKE ? OR s.phone LIKE ?
       ORDER BY s.name COLLATE NOCASE LIMIT 100
-    ''', List.filled(4, term));
+    ''',
+      [DateTime.now().toUtc().toIso8601String(), ...List.filled(4, term)],
+    );
     return rows.map(Subscriber.fromMap).toList();
   }
 
@@ -413,21 +595,383 @@ class LibraryDatabase {
     return (await getSubscriber(subscriberId))!;
   }
 
-  Future<Loan?> activeLoanForBook(int bookId) async {
-    final rows = await (await database).rawQuery(
-      '''
+  static const _loanSelect = '''
       SELECT l.*, s.member_number, s.name AS subscriber_name,
         s.email AS subscriber_email, s.phone AS subscriber_phone,
-        sub.ends_at AS subscription_ends_at
+        sub.ends_at AS subscription_ends_at,
+        b.title AS book_title, b.accession AS book_accession
       FROM loans l
       JOIN subscribers s ON s.id = l.subscriber_id
       LEFT JOIN subscriptions sub ON sub.id = l.subscription_id
+      LEFT JOIN books b ON b.id = l.book_id
+  ''';
+
+  Future<Loan?> activeLoanForBook(int bookId) async {
+    final rows = await (await database).rawQuery(
+      '''
+      $_loanSelect
       WHERE l.book_id = ? AND l.returned_at IS NULL
       ORDER BY l.id DESC LIMIT 1
     ''',
       [bookId],
     );
     return rows.isEmpty ? null : Loan.fromMap(rows.first);
+  }
+
+  /// Historique des emprunts pour le terminal admin.
+  Future<List<Loan>> listLoans({
+    LoanFilter filter = LoanFilter.all,
+    String search = '',
+    int? subscriberId,
+    int limit = 100,
+    int offset = 0,
+  }) async {
+    final where = <String>[];
+    final args = <Object?>[];
+    final now = DateTime.now().toUtc().toIso8601String();
+    switch (filter) {
+      case LoanFilter.active:
+        where.add('l.returned_at IS NULL');
+      case LoanFilter.overdue:
+        where.add('l.returned_at IS NULL AND l.due_at < ?');
+        args.add(now);
+      case LoanFilter.returned:
+        where.add('l.returned_at IS NOT NULL');
+      case LoanFilter.all:
+        break;
+    }
+    if (subscriberId != null) {
+      where.add('l.subscriber_id = ?');
+      args.add(subscriberId);
+    }
+    final term = _clean(search, 120);
+    if (term.isNotEmpty) {
+      where.add(
+        '(b.title LIKE ? OR b.accession LIKE ? OR s.name LIKE ? OR s.member_number LIKE ?)',
+      );
+      args.addAll(List.filled(4, '%$term%'));
+    }
+    final orderBy = switch (filter) {
+      LoanFilter.overdue => 'l.due_at ASC',
+      LoanFilter.returned => 'l.returned_at DESC',
+      _ => 'COALESCE(l.returned_at, l.borrowed_at) DESC',
+    };
+    final rows = await (await database).rawQuery(
+      '''
+      $_loanSelect
+      ${where.isEmpty ? '' : 'WHERE ${where.join(' AND ')}'}
+      ORDER BY $orderBy, l.id DESC LIMIT ? OFFSET ?
+    ''',
+      [...args, limit, offset],
+    );
+    return rows.map(Loan.fromMap).toList();
+  }
+
+  Future<LoanStats> loanStats() async {
+    final row = (await (await database).rawQuery(
+      '''
+      SELECT COUNT(*) AS total,
+        SUM(CASE WHEN returned_at IS NULL THEN 1 ELSE 0 END) AS active,
+        SUM(CASE WHEN returned_at IS NULL AND due_at < ? THEN 1 ELSE 0 END) AS overdue,
+        SUM(CASE WHEN date(borrowed_at) = date('now') THEN 1 ELSE 0 END) AS borrowed_today,
+        SUM(CASE WHEN date(returned_at) = date('now') THEN 1 ELSE 0 END) AS returned_today
+      FROM loans
+    ''',
+      [DateTime.now().toUtc().toIso8601String()],
+    )).first;
+    int value(String key) => (row[key] as num?)?.toInt() ?? 0;
+    return LoanStats(
+      active: value('active'),
+      overdue: value('overdue'),
+      borrowedToday: value('borrowed_today'),
+      returnedToday: value('returned_today'),
+      total: value('total'),
+    );
+  }
+
+  Future<List<Loan>> _loansByIds(List<int> ids) async {
+    if (ids.isEmpty) return const [];
+    final rows = await (await database).rawQuery('''
+      $_loanSelect
+      WHERE l.id IN (${List.filled(ids.length, '?').join(', ')})
+      ORDER BY l.id
+    ''', ids);
+    return rows.map(Loan.fromMap).toList();
+  }
+
+  /// Deux lecteurs ne lisent pas toujours la même longueur de TID : un
+  /// préfixe commun d'au moins 8 octets identifie la même puce.
+  static bool tidMatches(String? stored, String read) {
+    final known = (stored ?? '').trim().toUpperCase();
+    final seen = read.trim().toUpperCase();
+    if (known.isEmpty || seen.isEmpty) return false;
+    if (known == seen) return true;
+    final common = min(known.length, seen.length);
+    return common >= 16 &&
+        known.substring(0, common) == seen.substring(0, common);
+  }
+
+  /// Carte d'abonné posée sur le poste d'emprunt. Le TID est obligatoire :
+  /// un EPC recopié sur un autre tag ne suffit pas. Un compte désactivé est
+  /// reconnu (pour expliquer le refus) mais ne sera pas éligible.
+  Future<Subscriber?> cardForTag(String epc, String tid) async {
+    final normalizedEpc = epc.trim().toUpperCase();
+    if (!isCardEpc(normalizedEpc) || tid.trim().isEmpty) return null;
+    final rows = await (await database).query(
+      'subscribers',
+      where: 'card_epc = ? AND card_tid IS NOT NULL',
+      whereArgs: [normalizedEpc],
+      limit: 1,
+    );
+    if (rows.isEmpty) return null;
+    final subscriber = Subscriber.fromMap(rows.first);
+    return tidMatches(subscriber.cardTid, tid) ? subscriber : null;
+  }
+
+  /// Livre encodé posé sur le poste, qu'il soit disponible ou emprunté.
+  Future<Book?> bookForTag(String epc, String tid) async {
+    final normalizedEpc = epc.trim().toUpperCase();
+    if (!isValidEpc(normalizedEpc)) return null;
+    final rows = await (await database).query(
+      'books',
+      where: 'epc = ? AND tid IS NOT NULL',
+      whereArgs: [normalizedEpc],
+      limit: 1,
+    );
+    if (rows.isEmpty) return null;
+    final book = Book.fromMap(rows.first);
+    // Sans TID (lecture partielle), l'EPC signé BCM suffit pour un livre.
+    if (tid.trim().isEmpty || tidMatches(book.tid, tid)) return book;
+    return null;
+  }
+
+  Future<BorrowerStatus> borrowerStatus(
+    int subscriberId, {
+    required int maxLoans,
+  }) async => _borrowerStatus(
+    await database,
+    subscriberId,
+    maxLoans,
+    DateTime.now().toUtc(),
+  );
+
+  static Future<BorrowerStatus> _borrowerStatus(
+    DatabaseExecutor database,
+    int subscriberId,
+    int maxLoans,
+    DateTime now,
+  ) async {
+    final rows = await database.query(
+      'subscribers',
+      where: 'id = ?',
+      whereArgs: [subscriberId],
+      limit: 1,
+    );
+    if (rows.isEmpty) throw StateError('Abonné introuvable.');
+    final timestamp = now.toIso8601String();
+    final valid = await database.query(
+      'subscriptions',
+      where: "subscriber_id = ? AND status = 'active' AND ends_at >= ?",
+      whereArgs: [subscriberId, timestamp],
+      orderBy: 'ends_at DESC',
+      limit: 1,
+    );
+    final latest = await database.query(
+      'subscriptions',
+      where: 'subscriber_id = ?',
+      whereArgs: [subscriberId],
+      orderBy: 'ends_at DESC, id DESC',
+      limit: 1,
+    );
+    final loans = (await database.rawQuery(
+      '''
+      SELECT COUNT(*) AS active,
+        SUM(CASE WHEN due_at < ? THEN 1 ELSE 0 END) AS overdue
+      FROM loans WHERE subscriber_id = ? AND returned_at IS NULL
+    ''',
+      [timestamp, subscriberId],
+    )).first;
+    return BorrowerStatus(
+      subscriber: Subscriber.fromMap(rows.first),
+      subscription: valid.isEmpty ? null : Subscription.fromMap(valid.first),
+      latestSubscription: latest.isEmpty
+          ? null
+          : Subscription.fromMap(latest.first),
+      activeLoans: (loans['active'] as num?)?.toInt() ?? 0,
+      overdueLoans: (loans['overdue'] as num?)?.toInt() ?? 0,
+      maxLoans: maxLoans,
+    );
+  }
+
+  /// Emprunt en libre-service : l'abonné identifié par sa carte emprunte
+  /// plusieurs livres d'un coup. L'éligibilité est revérifiée dans la
+  /// transaction ; aucun emprunt n'est créé si un livre est refusé.
+  Future<List<Loan>> checkoutBooks(
+    int subscriberId,
+    List<int> bookIds, {
+    required DateTime dueAt,
+    required int maxLoans,
+  }) async {
+    final ids = bookIds.toSet().toList();
+    if (ids.isEmpty) throw ArgumentError('Aucun livre à emprunter.');
+    final now = DateTime.now().toUtc();
+    if (!dueAt.toUtc().isAfter(now)) {
+      throw ArgumentError(
+        'La date de retour doit être postérieure à aujourd’hui.',
+      );
+    }
+    final timestamp = now.toIso8601String();
+    final loanIds = await (await database).transaction((transaction) async {
+      final status = await _borrowerStatus(
+        transaction,
+        subscriberId,
+        maxLoans,
+        now,
+      );
+      if (!status.eligible) throw StateError(status.reasons.first);
+      if (ids.length > status.remaining) {
+        throw StateError(
+          'Vous pouvez emprunter ${status.remaining} livre(s) de plus.',
+        );
+      }
+      final subscriber = status.subscriber;
+      final created = <int>[];
+      for (final bookId in ids) {
+        final rows = await transaction.query(
+          'books',
+          where: 'id = ?',
+          whereArgs: [bookId],
+          limit: 1,
+        );
+        if (rows.isEmpty) throw StateError('Livre introuvable.');
+        final book = Book.fromMap(rows.first);
+        if (book.status != 'encode') {
+          throw StateError('« ${book.title} » n’est pas disponible au prêt.');
+        }
+        created.add(
+          await _insertLoan(
+            transaction,
+            book: book,
+            subscriberId: subscriber.id,
+            subscriptionId: status.subscription!.id,
+            dueAt: dueAt,
+            timestamp: timestamp,
+            message:
+                'Emprunt au poste par ${subscriber.name} (${subscriber.memberNumber})',
+          ),
+        );
+      }
+      return created;
+    });
+    return _loansByIds(loanIds);
+  }
+
+  /// Retour en libre-service de plusieurs livres. Les livres sans emprunt
+  /// actif sont ignorés ; renvoie les emprunts clôturés.
+  Future<List<Loan>> returnBooks(List<int> bookIds) async {
+    final now = DateTime.now().toUtc().toIso8601String();
+    final returnedIds = await (await database).transaction((transaction) async {
+      final returned = <int>[];
+      for (final bookId in bookIds.toSet()) {
+        final rows = await transaction.rawQuery(
+          '$_loanSelect WHERE l.book_id = ? AND l.returned_at IS NULL LIMIT 1',
+          [bookId],
+        );
+        if (rows.isEmpty) continue;
+        final loan = Loan.fromMap(rows.first);
+        await _closeLoan(
+          transaction,
+          await _bookIn(transaction, bookId),
+          loan,
+          now,
+          selfService: true,
+        );
+        returned.add(loan.id);
+      }
+      return returned;
+    });
+    return _loansByIds(returnedIds);
+  }
+
+  /// Ouvre un nouvel abonnement valable jusqu'à [endsAt].
+  Future<Subscription> renewSubscription(
+    int subscriberId,
+    DateTime endsAt,
+  ) async {
+    final now = DateTime.now().toUtc();
+    if (!endsAt.toUtc().isAfter(now)) {
+      throw ArgumentError('La fin de l’abonnement doit être dans le futur.');
+    }
+    final subscriber = await getSubscriber(subscriberId);
+    if (subscriber == null) throw StateError('Abonné introuvable.');
+    final timestamp = now.toIso8601String();
+    return (await database).transaction((transaction) async {
+      final id = await transaction.insert('subscriptions', {
+        'subscriber_id': subscriberId,
+        'starts_at': timestamp,
+        'ends_at': endsAt.toUtc().toIso8601String(),
+        'status': 'active',
+        'created_at': timestamp,
+        'updated_at': timestamp,
+        'server_id': _newId(),
+      });
+      await _queueSubscription(transaction, id);
+      await _addActivity(
+        transaction,
+        'abonnement',
+        'succes',
+        null,
+        'Abonnement de ${subscriber.name} (${subscriber.memberNumber}) '
+            'valable jusqu’au ${_frenchDate(endsAt)}',
+        null,
+        null,
+        timestamp,
+      );
+      return Subscription.fromMap(
+        (await transaction.query(
+          'subscriptions',
+          where: 'id = ?',
+          whereArgs: [id],
+        )).first,
+      );
+    });
+  }
+
+  /// Suspend les abonnements actifs : l'abonné ne peut plus emprunter.
+  Future<void> suspendSubscription(int subscriberId) async {
+    final subscriber = await getSubscriber(subscriberId);
+    if (subscriber == null) throw StateError('Abonné introuvable.');
+    final timestamp = DateTime.now().toUtc().toIso8601String();
+    await (await database).transaction((transaction) async {
+      final active = await transaction.query(
+        'subscriptions',
+        columns: ['id'],
+        where: "subscriber_id = ? AND status = 'active'",
+        whereArgs: [subscriberId],
+      );
+      if (active.isEmpty) {
+        throw StateError('Cet abonné n’a aucun abonnement actif.');
+      }
+      for (final row in active) {
+        await transaction.update(
+          'subscriptions',
+          {'status': 'suspended', 'updated_at': timestamp},
+          where: 'id = ?',
+          whereArgs: [row['id']],
+        );
+        await _queueSubscription(transaction, row['id'] as int);
+      }
+      await _addActivity(
+        transaction,
+        'abonnement',
+        'succes',
+        null,
+        'Abonnement suspendu : ${subscriber.name} (${subscriber.memberNumber})',
+        null,
+        null,
+        timestamp,
+      );
+    });
   }
 
   /// Enregistre un emprunt : crée ou met à jour l'abonné, ouvre un abonnement
@@ -485,45 +1029,31 @@ class LibraryDatabase {
         orderBy: 'ends_at DESC',
         limit: 1,
       );
-      final subscriptionId = subscriptions.isNotEmpty
-          ? subscriptions.first['id'] as int
-          : await transaction.insert('subscriptions', {
-              'subscriber_id': subscriberId,
-              'starts_at': timestamp,
-              'ends_at': subscriptionEnd.toIso8601String(),
-              'status': 'active',
-              'created_at': timestamp,
-              'updated_at': timestamp,
-            });
-      final id = await transaction.insert('loans', {
-        'book_id': bookId,
-        'subscriber_id': subscriberId,
-        'subscription_id': subscriptionId,
-        'borrowed_at': timestamp,
-        'due_at': dueAt.toUtc().toIso8601String(),
-        'status': 'active',
-        'notes': _clean(notes, 1000),
-        'created_at': timestamp,
-        'updated_at': timestamp,
-      });
-      await transaction.update(
-        'books',
-        {'status': 'indisponible', 'updated_at': timestamp},
-        where: 'id = ?',
-        whereArgs: [bookId],
-      );
-      await _addActivity(
+      final int subscriptionId;
+      if (subscriptions.isNotEmpty) {
+        subscriptionId = subscriptions.first['id'] as int;
+      } else {
+        subscriptionId = await transaction.insert('subscriptions', {
+          'subscriber_id': subscriberId,
+          'starts_at': timestamp,
+          'ends_at': subscriptionEnd.toIso8601String(),
+          'status': 'active',
+          'created_at': timestamp,
+          'updated_at': timestamp,
+          'server_id': _newId(),
+        });
+        await _queueSubscription(transaction, subscriptionId);
+      }
+      return _insertLoan(
         transaction,
-        'emprunt',
-        'succes',
-        bookId,
-        'Livre emprunté par $normalizedName ($normalizedNumber)',
-        book.epc,
-        book.tid,
-        timestamp,
+        book: book,
+        subscriberId: subscriberId,
+        subscriptionId: subscriptionId,
+        dueAt: dueAt,
+        timestamp: timestamp,
+        notes: notes,
+        message: 'Livre emprunté par $normalizedName ($normalizedNumber)',
       );
-      await _queueBook(transaction, await _bookIn(transaction, bookId));
-      return id;
     });
     final loan = await activeLoanForBook(bookId);
     if (loan == null || loan.id != loanId) {
@@ -538,36 +1068,95 @@ class LibraryDatabase {
     final loan = await activeLoanForBook(bookId);
     if (loan == null) throw StateError('Ce livre n’a aucun emprunt actif.');
     final now = DateTime.now().toUtc().toIso8601String();
-    return (await database).transaction((transaction) async {
-      await transaction.update(
-        'loans',
-        {'returned_at': now, 'status': 'returned', 'updated_at': now},
-        where: 'id = ?',
-        whereArgs: [loan.id],
-      );
-      await transaction.update(
-        'books',
-        {
-          'status': book.tid == null ? 'a_encoder' : 'encode',
-          'updated_at': now,
-        },
-        where: 'id = ?',
-        whereArgs: [bookId],
-      );
-      await _addActivity(
-        transaction,
-        'retour',
-        'succes',
-        bookId,
-        'Retour enregistré pour ${loan.subscriberName}',
-        book.epc,
-        book.tid,
-        now,
-      );
-      final returned = await _bookIn(transaction, bookId);
-      await _queueBook(transaction, returned);
-      return returned;
+    return (await database).transaction(
+      (transaction) => _closeLoan(transaction, book, loan, now),
+    );
+  }
+
+  static Future<int> _insertLoan(
+    Transaction transaction, {
+    required Book book,
+    required int subscriberId,
+    required int subscriptionId,
+    required DateTime dueAt,
+    required String timestamp,
+    required String message,
+    String notes = '',
+  }) async {
+    final id = await transaction.insert('loans', {
+      'book_id': book.id,
+      'subscriber_id': subscriberId,
+      'subscription_id': subscriptionId,
+      'borrowed_at': timestamp,
+      'due_at': dueAt.toUtc().toIso8601String(),
+      'status': 'active',
+      'notes': _clean(notes, 1000),
+      'created_at': timestamp,
+      'updated_at': timestamp,
+      'server_id': _newId(),
     });
+    await _queueLoan(transaction, id);
+    await transaction.update(
+      'books',
+      {'status': 'indisponible', 'updated_at': timestamp},
+      where: 'id = ?',
+      whereArgs: [book.id],
+    );
+    await _addActivity(
+      transaction,
+      'emprunt',
+      'succes',
+      book.id,
+      message,
+      book.epc,
+      book.tid,
+      timestamp,
+    );
+    await _queueBook(transaction, await _bookIn(transaction, book.id));
+    return id;
+  }
+
+  static Future<Book> _closeLoan(
+    Transaction transaction,
+    Book book,
+    Loan loan,
+    String now, {
+    bool selfService = false,
+  }) async {
+    await transaction.update(
+      'loans',
+      {'returned_at': now, 'status': 'returned', 'updated_at': now},
+      where: 'id = ?',
+      whereArgs: [loan.id],
+    );
+    await _queueLoan(transaction, loan.id);
+    await transaction.update(
+      'books',
+      {'status': book.tid == null ? 'a_encoder' : 'encode', 'updated_at': now},
+      where: 'id = ?',
+      whereArgs: [book.id],
+    );
+    final late = DateTime.parse(now).isAfter(DateTime.parse(loan.dueAt));
+    await _addActivity(
+      transaction,
+      'retour',
+      'succes',
+      book.id,
+      '${late ? 'Retour en retard' : 'Retour'} '
+          '${selfService ? 'au poste ' : ''}enregistré pour ${loan.subscriberName}',
+      book.epc,
+      book.tid,
+      now,
+    );
+    final returned = await _bookIn(transaction, book.id);
+    await _queueBook(transaction, returned);
+    return returned;
+  }
+
+  static String _frenchDate(DateTime date) {
+    final local = date.toLocal();
+    String two(int value) => value.toString().padLeft(2, '0');
+    return '${two(local.day)}/${two(local.month)}/${local.year}';
   }
 
   Future<Book> markTagged(int id, String tid) async {
@@ -831,6 +1420,23 @@ class LibraryDatabase {
       for (final row in subscribers) {
         await _queueSubscriber(transaction, Subscriber.fromMap(row));
       }
+      // Les abonnements avant les emprunts qui les référencent.
+      for (final row in await transaction.query(
+        'subscriptions',
+        columns: ['id'],
+        where: "sync_state <> 'synced'",
+        orderBy: 'id',
+      )) {
+        await _queueSubscription(transaction, row['id'] as int);
+      }
+      for (final row in await transaction.query(
+        'loans',
+        columns: ['id'],
+        where: "sync_state <> 'synced'",
+        orderBy: 'id',
+      )) {
+        await _queueLoan(transaction, row['id'] as int);
+      }
     });
   }
 
@@ -860,11 +1466,16 @@ class LibraryDatabase {
           limit: 1,
         );
         if (rows.isNotEmpty) {
-          final subscriber = rows.first['entity_type'] == 'subscriber';
+          final (table, key) = switch (rows.first['entity_type']) {
+            'subscriber' => ('subscribers', 'member_number'),
+            'subscription' => ('subscriptions', 'server_id'),
+            'loan' => ('loans', 'server_id'),
+            _ => ('books', 'server_id'),
+          };
           await transaction.update(
-            subscriber ? 'subscribers' : 'books',
+            table,
             {'sync_state': 'synced'},
-            where: subscriber ? 'member_number = ?' : 'server_id = ?',
+            where: '$key = ?',
             whereArgs: [rows.first['entity_id']],
           );
         }
@@ -895,14 +1506,25 @@ class LibraryDatabase {
 
   Future<void> applyRemoteChanges(List<Object?> changes, int cursor) async {
     final db = await database;
+    // Livres et abonnés d'abord : abonnements et emprunts les référencent.
+    final ordered = [
+      for (final raw in changes.whereType<Map>()) raw.cast<String, Object?>(),
+    ]..sort((a, b) => _priority(a).compareTo(_priority(b)));
     await db.transaction((transaction) async {
-      for (final raw in changes.whereType<Map>()) {
-        final change = raw.cast<String, Object?>();
+      for (final change in ordered) {
         final serverId = change['entityId']?.toString() ?? '';
         if (serverId.isEmpty) continue;
-        if ((change['entityType'] ?? 'book') == 'subscriber') {
-          await _applyRemoteSubscriber(transaction, serverId, change);
-          continue;
+        switch (change['entityType'] ?? 'book') {
+          case 'subscriber':
+            await _applyRemoteSubscriber(transaction, serverId, change);
+            continue;
+          case 'subscription' || 'loan':
+            await _applyLendingChange(transaction, change);
+            continue;
+          case 'book':
+            break;
+          default:
+            continue;
         }
         if (change['operation'] == 'delete') {
           final pending = await transaction.query(
@@ -958,11 +1580,267 @@ class LibraryDatabase {
           );
         }
       }
+      await _retryDeferred(transaction);
       await transaction.insert('sync_meta', {
         'key': 'cursor',
         'value': cursor.toString(),
       }, conflictAlgorithm: ConflictAlgorithm.replace);
     });
+  }
+
+  static int _priority(Map<String, Object?> change) =>
+      switch (change['entityType'] ?? 'book') {
+        'book' => 0,
+        'subscriber' => 1,
+        'subscription' => 2,
+        'loan' => 3,
+        _ => 4,
+      };
+
+  /// Applique un abonnement ou un emprunt distant ; s'il référence un livre
+  /// ou un abonné encore inconnu, il est mis de côté et réessayé plus tard.
+  static Future<void> _applyLendingChange(
+    Transaction transaction,
+    Map<String, Object?> change,
+  ) async {
+    final type = change['entityType'].toString();
+    final serverId = change['entityId'].toString();
+    final applied = type == 'loan'
+        ? await _applyRemoteLoan(transaction, serverId, change)
+        : await _applyRemoteSubscription(transaction, serverId, change);
+    if (applied) {
+      await transaction.delete(
+        'sync_deferred',
+        where: 'entity_type = ? AND entity_id = ?',
+        whereArgs: [type, serverId],
+      );
+    } else {
+      await transaction.insert('sync_deferred', {
+        'entity_type': type,
+        'entity_id': serverId,
+        'change': jsonEncode(change),
+      }, conflictAlgorithm: ConflictAlgorithm.replace);
+    }
+  }
+
+  static Future<void> _retryDeferred(Transaction transaction) async {
+    final rows = await transaction.query('sync_deferred');
+    final deferred = [
+      for (final row in rows)
+        (jsonDecode(row['change'] as String) as Map).cast<String, Object?>(),
+    ]..sort((a, b) => _priority(a).compareTo(_priority(b)));
+    for (final change in deferred) {
+      await _applyLendingChange(transaction, change);
+    }
+  }
+
+  static Future<bool> _hasPending(
+    Transaction transaction,
+    String entityId,
+  ) async => (await transaction.query(
+    'sync_outbox',
+    columns: ['mutation_id'],
+    where: 'entity_id = ?',
+    whereArgs: [entityId],
+    limit: 1,
+  )).isNotEmpty;
+
+  static Future<int?> _idFor(
+    Transaction transaction,
+    String table,
+    String column,
+    Object? value,
+  ) async {
+    final key = value?.toString().trim() ?? '';
+    if (key.isEmpty) return null;
+    final rows = await transaction.query(
+      table,
+      columns: ['id'],
+      where: '$column = ?',
+      whereArgs: [column == 'member_number' ? key.toUpperCase() : key],
+      limit: 1,
+    );
+    return rows.isEmpty ? null : rows.first['id'] as int;
+  }
+
+  static Future<bool> _applyRemoteSubscription(
+    Transaction transaction,
+    String serverId,
+    Map<String, Object?> change,
+  ) async {
+    // Une modification locale en attente l'emporte ; le serveur renverra
+    // sa version après l'envoi.
+    if (await _hasPending(transaction, serverId)) return true;
+    if (change['operation'] == 'delete') {
+      await transaction.delete(
+        'subscriptions',
+        where: 'server_id = ?',
+        whereArgs: [serverId],
+      );
+      return true;
+    }
+    final raw = change['subscription'];
+    if (raw is! Map) return true;
+    final remote = raw.cast<String, Object?>();
+    final subscriberId = await _idFor(
+      transaction,
+      'subscribers',
+      'member_number',
+      remote['memberNumber'],
+    );
+    if (subscriberId == null) return false;
+    final now = DateTime.now().toUtc().toIso8601String();
+    final status = remote['status']?.toString() ?? 'active';
+    final values = <String, Object?>{
+      'subscriber_id': subscriberId,
+      'starts_at': remote['startsAt'] ?? now,
+      'ends_at': remote['endsAt'] ?? now,
+      'status': Subscription.statuses.contains(status) ? status : 'active',
+      'updated_at': remote['updatedAt'] ?? now,
+      'sync_state': 'synced',
+    };
+    final existing = await _idFor(
+      transaction,
+      'subscriptions',
+      'server_id',
+      serverId,
+    );
+    if (existing == null) {
+      await transaction.insert('subscriptions', {
+        ...values,
+        'server_id': serverId,
+        'created_at': remote['createdAt'] ?? now,
+      });
+    } else {
+      await transaction.update(
+        'subscriptions',
+        values,
+        where: 'id = ?',
+        whereArgs: [existing],
+      );
+    }
+    return true;
+  }
+
+  static Future<bool> _applyRemoteLoan(
+    Transaction transaction,
+    String serverId,
+    Map<String, Object?> change,
+  ) async {
+    if (await _hasPending(transaction, serverId)) return true;
+    if (change['operation'] == 'delete') {
+      final bookId =
+          (await transaction.query(
+                'loans',
+                columns: ['book_id'],
+                where: 'server_id = ?',
+                whereArgs: [serverId],
+                limit: 1,
+              )).firstOrNull?['book_id']
+              as int?;
+      await transaction.delete(
+        'loans',
+        where: 'server_id = ?',
+        whereArgs: [serverId],
+      );
+      if (bookId != null) await _syncBookLoanStatus(transaction, bookId);
+      return true;
+    }
+    final raw = change['loan'];
+    if (raw is! Map) return true;
+    final remote = raw.cast<String, Object?>();
+    final bookId = await _idFor(
+      transaction,
+      'books',
+      'server_id',
+      remote['bookServerId'],
+    );
+    final subscriberId = await _idFor(
+      transaction,
+      'subscribers',
+      'member_number',
+      remote['memberNumber'],
+    );
+    if (bookId == null || subscriberId == null) return false;
+    final now = DateTime.now().toUtc().toIso8601String();
+    final borrowedAt = remote['borrowedAt']?.toString() ?? now;
+    final returnedAt = remote['returnedAt']?.toString();
+    final existing = await _idFor(transaction, 'loans', 'server_id', serverId);
+    if (returnedAt == null) {
+      // Un seul emprunt en cours par livre : un autre emprunt local encore
+      // ouvert a forcément été rendu avant ce nouvel emprunt.
+      await transaction.update(
+        'loans',
+        {'returned_at': borrowedAt, 'status': 'returned', 'updated_at': now},
+        where: 'book_id = ? AND returned_at IS NULL AND id <> ?',
+        whereArgs: [bookId, existing ?? -1],
+      );
+    }
+    final status = remote['status']?.toString() ?? 'active';
+    final values = <String, Object?>{
+      'book_id': bookId,
+      'subscriber_id': subscriberId,
+      'subscription_id': await _idFor(
+        transaction,
+        'subscriptions',
+        'server_id',
+        remote['subscriptionServerId'],
+      ),
+      'borrowed_at': borrowedAt,
+      'due_at': remote['dueAt'] ?? borrowedAt,
+      'returned_at': returnedAt,
+      'status': Loan.statuses.contains(status) ? status : 'active',
+      'notes': _clean(remote['notes'], 1000),
+      'updated_at': remote['updatedAt'] ?? now,
+      'sync_state': 'synced',
+    };
+    if (existing == null) {
+      await transaction.insert('loans', {
+        ...values,
+        'server_id': serverId,
+        'created_at': remote['createdAt'] ?? now,
+      });
+    } else {
+      await transaction.update(
+        'loans',
+        values,
+        where: 'id = ?',
+        whereArgs: [existing],
+      );
+    }
+    await _syncBookLoanStatus(transaction, bookId);
+    return true;
+  }
+
+  /// Aligne le statut local du livre sur ses emprunts (le statut du livre
+  /// est aussi synchronisé par l'appareil qui a prêté).
+  static Future<void> _syncBookLoanStatus(
+    Transaction transaction,
+    int bookId,
+  ) async {
+    final active = await transaction.query(
+      'loans',
+      columns: ['id'],
+      where: 'book_id = ? AND returned_at IS NULL',
+      whereArgs: [bookId],
+      limit: 1,
+    );
+    if (active.isNotEmpty) {
+      await transaction.update(
+        'books',
+        {'status': 'indisponible'},
+        where: 'id = ?',
+        whereArgs: [bookId],
+      );
+    } else {
+      await transaction.rawUpdate(
+        '''
+        UPDATE books SET status = CASE WHEN tid IS NULL THEN 'a_encoder' ELSE 'encode' END
+        WHERE id = ? AND status = 'indisponible'
+      ''',
+        [bookId],
+      );
+    }
   }
 
   Future<void> close() async {
@@ -1086,6 +1964,56 @@ class LibraryDatabase {
     await database.execute(
       "ALTER TABLE sync_outbox ADD COLUMN entity_type TEXT NOT NULL DEFAULT 'book'",
     );
+  }
+
+  /// Comptes du personnel, propres à l'appareil (comme sur Windows).
+  static Future<void> _createUsers(DatabaseExecutor database) async {
+    await database.execute('''
+      CREATE TABLE IF NOT EXISTS users (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        name TEXT NOT NULL,
+        email TEXT NOT NULL UNIQUE COLLATE NOCASE,
+        password_hash TEXT NOT NULL,
+        password_salt TEXT NOT NULL,
+        password_iterations INTEGER NOT NULL,
+        role TEXT NOT NULL DEFAULT 'operateur'
+          CHECK(role IN ('admin', 'operateur')),
+        active INTEGER NOT NULL DEFAULT 1,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      )
+    ''');
+  }
+
+  /// Emprunts et abonnements synchronisés : identifiant global (UUID) et
+  /// file des changements distants en attente de leurs références.
+  static Future<void> _addLendingSync(DatabaseExecutor database) async {
+    for (final table in const ['subscriptions', 'loans']) {
+      await database.execute('ALTER TABLE $table ADD COLUMN server_id TEXT');
+      await database.execute(
+        "ALTER TABLE $table ADD COLUMN sync_state TEXT NOT NULL DEFAULT 'pending'",
+      );
+      final rows = await database.query(table, columns: ['id']);
+      for (final row in rows) {
+        await database.update(
+          table,
+          {'server_id': _newId()},
+          where: 'id = ?',
+          whereArgs: [row['id']],
+        );
+      }
+      await database.execute(
+        'CREATE UNIQUE INDEX IF NOT EXISTS idx_${table}_server_id ON $table(server_id)',
+      );
+    }
+    await database.execute('''
+      CREATE TABLE IF NOT EXISTS sync_deferred (
+        entity_type TEXT NOT NULL,
+        entity_id TEXT NOT NULL,
+        change TEXT NOT NULL,
+        PRIMARY KEY(entity_type, entity_id)
+      )
+    ''');
   }
 
   static Future<Subscriber> _subscriberIn(
@@ -1277,6 +2205,111 @@ class LibraryDatabase {
       'operation': 'upsert',
       'entity_id': serverId,
       'payload': jsonEncode(book.toSyncJson()),
+      'created_at': DateTime.now().toUtc().toIso8601String(),
+    }, conflictAlgorithm: ConflictAlgorithm.replace);
+  }
+
+  static Future<void> _queueSubscription(
+    DatabaseExecutor database,
+    int subscriptionId,
+  ) async {
+    final rows = await database.rawQuery(
+      '''
+      SELECT sub.*, s.member_number FROM subscriptions sub
+      JOIN subscribers s ON s.id = sub.subscriber_id
+      WHERE sub.id = ?
+    ''',
+      [subscriptionId],
+    );
+    if (rows.isEmpty) return;
+    final row = rows.first;
+    final serverId = row['server_id'] as String?;
+    if (serverId == null) return;
+    await _queueEntity(
+      database,
+      'subscriptions',
+      subscriptionId,
+      'subscription',
+      serverId,
+      {
+        'serverId': serverId,
+        'memberNumber': row['member_number'],
+        'startsAt': row['starts_at'],
+        'endsAt': row['ends_at'],
+        'status': row['status'],
+        'createdAt': row['created_at'],
+        'updatedAt': row['updated_at'],
+      },
+    );
+  }
+
+  static Future<void> _queueLoan(DatabaseExecutor database, int loanId) async {
+    final rows = await database.rawQuery(
+      '''
+      SELECT l.*, s.member_number, b.server_id AS book_server_id,
+        sub.server_id AS subscription_server_id
+      FROM loans l
+      JOIN subscribers s ON s.id = l.subscriber_id
+      JOIN books b ON b.id = l.book_id
+      LEFT JOIN subscriptions sub ON sub.id = l.subscription_id
+      WHERE l.id = ?
+    ''',
+      [loanId],
+    );
+    if (rows.isEmpty) return;
+    final row = rows.first;
+    final serverId = row['server_id'] as String?;
+    if (serverId == null || row['book_server_id'] == null) return;
+    await _queueEntity(database, 'loans', loanId, 'loan', serverId, {
+      'serverId': serverId,
+      'bookServerId': row['book_server_id'],
+      'memberNumber': row['member_number'],
+      'subscriptionServerId': row['subscription_server_id'],
+      'borrowedAt': row['borrowed_at'],
+      'dueAt': row['due_at'],
+      'returnedAt': row['returned_at'],
+      'status': row['status'],
+      'notes': row['notes'],
+      'createdAt': row['created_at'],
+      'updatedAt': row['updated_at'],
+    });
+  }
+
+  static Future<void> _queueEntity(
+    DatabaseExecutor database,
+    String table,
+    int id,
+    String entityType,
+    String serverId,
+    Map<String, Object?> payload,
+  ) async {
+    await database.update(
+      table,
+      {'sync_state': 'pending'},
+      where: 'id = ?',
+      whereArgs: [id],
+    );
+    await database.insert('sync_outbox', {
+      'mutation_id': _newId(),
+      'operation': 'upsert',
+      'entity_id': serverId,
+      'entity_type': entityType,
+      'payload': jsonEncode(payload),
+      'created_at': DateTime.now().toUtc().toIso8601String(),
+    }, conflictAlgorithm: ConflictAlgorithm.replace);
+  }
+
+  static Future<void> _queueEntityDelete(
+    DatabaseExecutor database,
+    String entityType,
+    String serverId,
+  ) async {
+    await database.insert('sync_outbox', {
+      'mutation_id': _newId(),
+      'operation': 'delete',
+      'entity_id': serverId,
+      'entity_type': entityType,
+      'payload': null,
       'created_at': DateTime.now().toUtc().toIso8601String(),
     }, conflictAlgorithm: ConflictAlgorithm.replace);
   }

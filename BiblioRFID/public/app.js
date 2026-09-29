@@ -44,7 +44,10 @@ import TriangleAlert from "/vendor/lucide/icons/triangle-alert.js";
 import Undo2 from "/vendor/lucide/icons/undo-2.js";
 import Upload from "/vendor/lucide/icons/upload.js";
 import Usb from "/vendor/lucide/icons/usb.js";
+import UserPen from "/vendor/lucide/icons/user-pen.js";
+import UserPlus from "/vendor/lucide/icons/user-plus.js";
 import UserRound from "/vendor/lucide/icons/user-round.js";
+import Users from "/vendor/lucide/icons/users.js";
 import X from "/vendor/lucide/icons/x.js";
 
 const lucideIcons = {
@@ -93,7 +96,10 @@ const lucideIcons = {
   "undo-2": Undo2,
   upload: Upload,
   usb: Usb,
+  "user-pen": UserPen,
+  "user-plus": UserPlus,
   "user-round": UserRound,
+  users: Users,
   x: X,
 };
 
@@ -115,6 +121,10 @@ const state = {
   detailBook: null,
   detailLoan: null,
   subscribers: [],
+  subscriberRows: [],
+  subscriberFilter: "tous",
+  subscriberSearch: "",
+  detailSubscriber: null,
   cardScanActive: false,
   cardScanTimer: null,
   cardTagKey: null,
@@ -143,6 +153,7 @@ const state = {
 const viewMeta = {
   dashboard: ["Vue d’ensemble", "Tableau de bord"],
   catalogue: ["Gestion du fonds", "Catalogue"],
+  subscribers: ["Lecteurs inscrits", "Abonnés"],
   station: ["Opérations RFID", "Station RFID"],
   history: ["Traçabilité", "Historique"],
   settings: ["Configuration", "Paramètres"],
@@ -341,6 +352,7 @@ function setView(name) {
   history.replaceState(null, "", `#${name}`);
   if (name === "dashboard") loadDashboard();
   if (name === "catalogue") loadBooks();
+  if (name === "subscribers") loadSubscribers();
   if (name === "station") startAutoReading();
   if (name === "history") loadHistory();
   if (name === "settings") loadSyncStatus(false);
@@ -811,6 +823,304 @@ async function deleteDetailBook() {
     toast(error.message, "error");
     dialog.showModal();
   }
+}
+
+// ---------------------------------------------------------------------------
+// Abonnés et abonnements
+
+function subscriptionBadge(subscriber) {
+  if (!subscriber.active)
+    return { css: "indisponible", label: "Compte désactivé" };
+  const ends = subscriber.subscription_ends_at;
+  if (ends && new Date(ends) >= new Date())
+    return { css: "encode", label: `Jusqu’au ${formatDate(ends, false)}` };
+  if (subscriber.latest_subscription_status === "suspended")
+    return { css: "indisponible", label: "Abonnement suspendu" };
+  if (!ends && !subscriber.latest_subscription_status)
+    return { css: "a_encoder", label: "Aucun abonnement" };
+  return {
+    css: "a_encoder",
+    label: ends ? `Expiré le ${formatDate(ends, false)}` : "Abonnement expiré",
+  };
+}
+
+function subscriptionStatusLabel(subscription) {
+  if (subscription.status === "suspended")
+    return { css: "indisponible", label: "Suspendu" };
+  if (
+    subscription.status === "expired" ||
+    new Date(subscription.ends_at) < new Date()
+  )
+    return { css: "a_encoder", label: "Expiré" };
+  if (new Date(subscription.starts_at) > new Date())
+    return { css: "a_encoder", label: "À venir" };
+  return { css: "encode", label: "Actif" };
+}
+
+function subscriberMatchesFilter(subscriber) {
+  const badge = subscriptionBadge(subscriber);
+  switch (state.subscriberFilter) {
+    case "valides":
+      return badge.css === "encode";
+    case "sans":
+      return subscriber.active && badge.css !== "encode";
+    case "retard":
+      return Number(subscriber.overdue_loans) > 0;
+    case "inactifs":
+      return !subscriber.active;
+    default:
+      return true;
+  }
+}
+
+async function loadSubscribers() {
+  try {
+    state.subscriberRows = await api(
+      `/api/subscribers?search=${encodeURIComponent(state.subscriberSearch)}`,
+    );
+    renderSubscribers();
+  } catch (error) {
+    toast(error.message, "error");
+  }
+}
+
+function renderSubscribers() {
+  const rows = state.subscriberRows.filter(subscriberMatchesFilter);
+  $("#subscribers-count").textContent =
+    `${rows.length} abonné${rows.length > 1 ? "s" : ""}`;
+  $("#subscribers-empty").classList.toggle("hidden", rows.length > 0);
+  $("#subscribers-table").innerHTML = rows
+    .map((subscriber) => {
+      const badge = subscriptionBadge(subscriber);
+      const overdue = Number(subscriber.overdue_loans) || 0;
+      return `<tr data-subscriber-id="${subscriber.id}">
+    <td><div class="table-book"><span class="book-glyph"><i data-lucide="user-round"></i></span><div><strong>${escapeHtml(subscriber.name)}</strong><small class="mono">${escapeHtml(subscriber.member_number)}</small></div></div></td>
+    <td>${escapeHtml(subscriber.phone || "—")}<div class="cell-subtle">${escapeHtml(subscriber.email || "")}</div></td>
+    <td><span class="status-badge ${badge.css}">${escapeHtml(badge.label)}</span></td>
+    <td>${Number(subscriber.active_loans) || 0} en cours${overdue ? `<div class="cell-subtle danger-text">${overdue} en retard</div>` : ""}</td>
+    <td>${subscriber.card_tid ? `<span class="status-badge encode">Encodée</span>` : `<span class="cell-subtle">Non encodée</span>`}</td>
+    <td><div class="table-actions">
+      <button class="icon-button" data-subscriber-action="edit" data-id="${subscriber.id}" title="Modifier" aria-label="Modifier"><i data-lucide="pencil"></i></button>
+      <button class="icon-button danger" data-subscriber-action="delete" data-id="${subscriber.id}" title="Supprimer" aria-label="Supprimer"><i data-lucide="trash-2"></i></button>
+    </div></td>
+  </tr>`;
+    })
+    .join("");
+  icons();
+}
+
+function openSubscriberDialog(subscriber = null) {
+  const form = $("#subscriber-form");
+  form.reset();
+  form.elements.id.value = subscriber?.id || "";
+  form.elements.member_number.value = subscriber?.member_number || "";
+  form.elements.member_number.readOnly = Boolean(subscriber);
+  form.elements.name.value = subscriber?.name || "";
+  form.elements.phone.value = subscriber?.phone || "";
+  form.elements.email.value = subscriber?.email || "";
+  form.elements.active.checked = subscriber ? Boolean(subscriber.active) : true;
+  $("#subscriber-active-field").classList.toggle("hidden", !subscriber);
+  $("#subscriber-number-hint").classList.toggle("hidden", Boolean(subscriber));
+  $("#subscriber-dialog-title").textContent = subscriber
+    ? "Modifier l’abonné"
+    : "Nouvel abonné";
+  $("#subscriber-dialog").showModal();
+  setTimeout(
+    () =>
+      (subscriber ? form.elements.name : form.elements.member_number).focus(),
+    50,
+  );
+}
+
+async function saveSubscriber(event) {
+  if (event.submitter?.value === "cancel") return;
+  event.preventDefault();
+  const form = event.currentTarget;
+  const id = form.elements.id.value;
+  const input = {
+    member_number: form.elements.member_number.value,
+    name: form.elements.name.value,
+    phone: form.elements.phone.value,
+    email: form.elements.email.value,
+  };
+  if (id) input.active = form.elements.active.checked;
+  try {
+    const saved = await api(id ? `/api/subscribers/${id}` : "/api/subscribers", {
+      method: id ? "PUT" : "POST",
+      body: JSON.stringify(input),
+    });
+    $("#subscriber-dialog").close();
+    toast(id ? "Abonné mis à jour." : `Abonné ${saved.member_number} créé.`);
+    await loadSubscribers();
+    if (state.detailSubscriber?.subscriber.id === saved.id)
+      await openSubscriberDetails(saved.id);
+  } catch (error) {
+    toast(error.message, "error");
+  }
+}
+
+async function openSubscriberDetails(id) {
+  try {
+    state.detailSubscriber = await api(`/api/subscribers/${id}`);
+    renderSubscriberDetails();
+    const dialog = $("#subscriber-detail-dialog");
+    if (!dialog.open) dialog.showModal();
+  } catch (error) {
+    toast(error.message, "error");
+  }
+}
+
+function renderSubscriberDetails() {
+  const { subscriber, subscriptions, loans } = state.detailSubscriber;
+  // Les abonnements arrivent triés par date de fin décroissante.
+  const badge = subscriptionBadge({
+    ...subscriber,
+    subscription_ends_at: subscriptions.find((item) => item.status === "active")
+      ?.ends_at,
+    latest_subscription_status: subscriptions[0]?.status,
+  });
+  $("#subscriber-detail-title").textContent = subscriber.name;
+  $("#subscriber-detail-summary").innerHTML = `
+    <div><small>N° d’abonné</small><strong class="mono">${escapeHtml(subscriber.member_number)}</strong></div>
+    <div><small>Contact</small><strong>${escapeHtml(subscriber.phone || "—")}</strong><span>${escapeHtml(subscriber.email || "")}</span></div>
+    <div><small>Abonnement</small><span class="status-badge ${badge.css}">${escapeHtml(badge.label)}</span></div>
+    <div><small>Carte RFID</small><strong>${subscriber.card_tid ? `Encodée le ${formatDate(subscriber.card_tagged_at, false)}` : "Non encodée"}</strong></div>`;
+  $("#subscriptions-table").innerHTML = subscriptions.length
+    ? subscriptions
+        .map((subscription) => {
+          const status = subscriptionStatusLabel(subscription);
+          return `<tr>
+      <td>${formatDate(subscription.starts_at, false)}</td>
+      <td>${formatDate(subscription.ends_at, false)}</td>
+      <td><span class="status-badge ${status.css}">${status.label}</span></td>
+      <td>${Number(subscription.loan_count) || 0}</td>
+      <td><div class="table-actions">
+        <button class="icon-button" type="button" data-subscription-action="edit" data-id="${subscription.id}" title="Modifier" aria-label="Modifier"><i data-lucide="pencil"></i></button>
+        <button class="icon-button danger" type="button" data-subscription-action="delete" data-id="${subscription.id}" title="Supprimer" aria-label="Supprimer"><i data-lucide="trash-2"></i></button>
+      </div></td>
+    </tr>`;
+        })
+        .join("")
+    : `<tr><td colspan="5">Aucun abonnement : l’abonné ne peut pas emprunter.</td></tr>`;
+  $("#subscriber-loans-table").innerHTML = loans.length
+    ? loans
+        .map(
+          (loan) => `<tr>
+      <td>${escapeHtml(loan.book_title || "Livre supprimé")}<div class="cell-subtle mono">${escapeHtml(loan.book_accession || "")}</div></td>
+      <td>${formatDate(loan.borrowed_at, false)}</td>
+      <td>${formatDate(loan.due_at, false)}</td>
+      <td>${loan.returned_at ? formatDate(loan.returned_at, false) : new Date(loan.due_at) < new Date() ? `<span class="status-badge indisponible">En retard</span>` : `<span class="status-badge encode">En cours</span>`}</td>
+    </tr>`,
+        )
+        .join("")
+    : `<tr><td colspan="4">Aucun emprunt.</td></tr>`;
+  icons();
+}
+
+async function deleteSubscriber(subscriber, dialog = null) {
+  const options = {
+    title: "Supprimer cet abonné ?",
+    text: `${subscriber.name} (${subscriber.member_number}) et ses abonnements seront supprimés. Un abonné ayant déjà emprunté doit être désactivé à la place.`,
+    confirmButtonText: "Supprimer",
+    confirmButtonClass: "button danger",
+  };
+  const confirmed = dialog
+    ? await confirmOverDialog(dialog, options)
+    : await confirmAction(options);
+  if (!confirmed) return;
+  try {
+    await api(`/api/subscribers/${subscriber.id}`, { method: "DELETE" });
+    state.detailSubscriber = null;
+    toast("Abonné supprimé.");
+    await loadSubscribers();
+  } catch (error) {
+    toast(error.message, "error");
+    if (dialog) dialog.showModal();
+  }
+}
+
+async function handleSubscriberTable(event) {
+  const button = event.target.closest("button[data-subscriber-action]");
+  const id = Number(
+    button?.dataset.id || event.target.closest("tr[data-subscriber-id]")?.dataset.subscriberId,
+  );
+  if (!id) return;
+  const subscriber = state.subscriberRows.find((row) => row.id === id);
+  if (button?.dataset.subscriberAction === "edit") openSubscriberDialog(subscriber);
+  else if (button?.dataset.subscriberAction === "delete") deleteSubscriber(subscriber);
+  else openSubscriberDetails(id);
+}
+
+function openSubscriptionDialog(subscription = null) {
+  const subscriber = state.detailSubscriber.subscriber;
+  const form = $("#subscription-form");
+  form.reset();
+  const start = subscription ? new Date(subscription.starts_at) : new Date();
+  const end = subscription
+    ? new Date(subscription.ends_at)
+    : new Date(start.getFullYear() + 1, start.getMonth(), start.getDate());
+  form.elements.id.value = subscription?.id || "";
+  form.elements.starts_at.value = localDateValue(start);
+  form.elements.ends_at.value = localDateValue(end);
+  form.elements.status.value = subscription?.status || "active";
+  $("#subscription-dialog-eyebrow").textContent = subscriber.name;
+  $("#subscription-dialog-title").textContent = subscription
+    ? "Modifier l’abonnement"
+    : "Nouvel abonnement";
+  $("#subscription-dialog").showModal();
+}
+
+async function saveSubscription(event) {
+  if (event.submitter?.value === "cancel") return;
+  event.preventDefault();
+  const form = event.currentTarget;
+  const id = form.elements.id.value;
+  const subscriberId = state.detailSubscriber.subscriber.id;
+  // Du début de la première journée à la fin de la dernière, heure locale.
+  const input = {
+    starts_at: new Date(`${form.elements.starts_at.value}T00:00:00`).toISOString(),
+    ends_at: new Date(`${form.elements.ends_at.value}T23:59:00`).toISOString(),
+    status: form.elements.status.value,
+  };
+  try {
+    await api(
+      id ? `/api/subscriptions/${id}` : `/api/subscribers/${subscriberId}/subscriptions`,
+      { method: id ? "PUT" : "POST", body: JSON.stringify(input) },
+    );
+    $("#subscription-dialog").close();
+    toast(id ? "Abonnement mis à jour." : "Abonnement enregistré.");
+    await Promise.all([openSubscriberDetails(subscriberId), loadSubscribers()]);
+  } catch (error) {
+    toast(error.message, "error");
+  }
+}
+
+async function handleSubscriptionTable(event) {
+  const button = event.target.closest("button[data-subscription-action]");
+  if (!button) return;
+  const subscription = state.detailSubscriber.subscriptions.find(
+    (item) => item.id === Number(button.dataset.id),
+  );
+  if (button.dataset.subscriptionAction === "edit") {
+    openSubscriptionDialog(subscription);
+    return;
+  }
+  const dialog = $("#subscriber-detail-dialog");
+  const confirmed = await confirmOverDialog(dialog, {
+    title: "Supprimer cet abonnement ?",
+    text: `Du ${formatDate(subscription.starts_at, false)} au ${formatDate(subscription.ends_at, false)}. Les emprunts déjà faits sont conservés.`,
+    confirmButtonText: "Supprimer",
+    confirmButtonClass: "button danger",
+  });
+  if (!confirmed) return;
+  try {
+    await api(`/api/subscriptions/${subscription.id}`, { method: "DELETE" });
+    toast("Abonnement supprimé.");
+    await loadSubscribers();
+  } catch (error) {
+    toast(error.message, "error");
+  }
+  await openSubscriberDetails(state.detailSubscriber.subscriber.id);
 }
 
 function localDateValue(date) {
@@ -2007,6 +2317,35 @@ function bindEvents() {
   $("#new-title-button").addEventListener("click", revealNewBookFields);
   $("#quick-register-form").addEventListener("submit", submitQuickBook);
   $("#refresh-history").addEventListener("click", loadHistory);
+  $("#new-subscriber").addEventListener("click", () => openSubscriberDialog());
+  $("#subscriber-form").addEventListener("submit", saveSubscriber);
+  $("#subscribers-table").addEventListener("click", handleSubscriberTable);
+  $("#subscriber-search").addEventListener("input", (event) => {
+    state.subscriberSearch = event.target.value;
+    clearTimeout(event.target.timer);
+    event.target.timer = setTimeout(loadSubscribers, 180);
+  });
+  $$("#subscriber-filter button").forEach((button) =>
+    button.addEventListener("click", () => {
+      state.subscriberFilter = button.dataset.filter;
+      $$("#subscriber-filter button").forEach((item) =>
+        item.classList.toggle("active", item === button),
+      );
+      renderSubscribers();
+    }),
+  );
+  $("#new-subscription").addEventListener("click", () => openSubscriptionDialog());
+  $("#subscription-form").addEventListener("submit", saveSubscription);
+  $("#subscriptions-table").addEventListener("click", handleSubscriptionTable);
+  $("#detail-edit-subscriber").addEventListener("click", () =>
+    openSubscriberDialog(state.detailSubscriber.subscriber),
+  );
+  $("#detail-delete-subscriber").addEventListener("click", () =>
+    deleteSubscriber(
+      state.detailSubscriber.subscriber,
+      $("#subscriber-detail-dialog"),
+    ),
+  );
   $$("input[name=connection_type]").forEach((input) =>
     input.addEventListener("change", updateConnectionFields),
   );

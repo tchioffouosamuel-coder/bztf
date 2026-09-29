@@ -661,6 +661,61 @@ async function api(request, response, url) {
       200,
       db.listSubscribers(url.searchParams.get("search") || ""),
     );
+  // Abonnés et abonnements : les erreurs de validation renvoient 400.
+  const lending = async (status, action) => {
+    try {
+      return json(response, status, await action());
+    } catch (error) {
+      return json(response, 400, { error: error.message });
+    }
+  };
+  if (request.method === "POST" && pathname === "/api/subscribers")
+    return lending(201, async () => db.createSubscriber(await readBody(request)));
+  const subscriberMatch = pathname.match(/^\/api\/subscribers\/(\d+)$/);
+  if (subscriberMatch && request.method === "GET") {
+    const details = db.getSubscriberDetails(subscriberMatch[1]);
+    return details
+      ? json(response, 200, details)
+      : json(response, 404, { error: "Abonné introuvable." });
+  }
+  if (subscriberMatch && request.method === "PUT") {
+    const input = await readBody(request);
+    return lending(200, () => {
+      const updated = db.updateSubscriber(subscriberMatch[1], input);
+      if (!updated) throw new Error("Abonné introuvable.");
+      return updated;
+    });
+  }
+  if (subscriberMatch && request.method === "DELETE")
+    return lending(200, () => {
+      if (!db.deleteSubscriber(subscriberMatch[1]))
+        throw new Error("Abonné introuvable.");
+      return { ok: true };
+    });
+  const subscriberSubscriptionsMatch = pathname.match(
+    /^\/api\/subscribers\/(\d+)\/subscriptions$/,
+  );
+  if (subscriberSubscriptionsMatch && request.method === "POST") {
+    const input = await readBody(request);
+    return lending(201, () =>
+      db.createSubscription(subscriberSubscriptionsMatch[1], input),
+    );
+  }
+  const subscriptionMatch = pathname.match(/^\/api\/subscriptions\/(\d+)$/);
+  if (subscriptionMatch && request.method === "PUT") {
+    const input = await readBody(request);
+    return lending(200, () => {
+      const updated = db.updateSubscription(subscriptionMatch[1], input);
+      if (!updated) throw new Error("Abonnement introuvable.");
+      return updated;
+    });
+  }
+  if (subscriptionMatch && request.method === "DELETE")
+    return lending(200, () => {
+      if (!db.deleteSubscription(subscriptionMatch[1]))
+        throw new Error("Abonnement introuvable.");
+      return { ok: true };
+    });
   if (request.method === "DELETE" && pathname === "/api/books") {
     const input = await readBody(request);
     if (!Array.isArray(input.ids) || !input.ids.length)

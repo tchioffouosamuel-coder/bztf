@@ -1,6 +1,6 @@
 {
   "name": "biblio-rfid",
-  "version": "1.2.5",
+  "version": "1.2.6",
   "private": true,
   "description": "Bibliotèque ZTF - catalogue local et station d'encodage RFID UHF",
   "author": "BCM",
