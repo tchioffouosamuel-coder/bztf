@@ -326,7 +326,7 @@ class MainActivity : FlutterActivity() {
 							mainHandler.post { eventSink?.success(tag) }
 						}
 					})
-					val status = currentNetworkReader.N01_StartReadingBank(null, BankData(2, 0, 6))
+					val status = currentNetworkReader.N01_StartReadingBank(TagFilter(1, 32, "", true), BankData(2, 0, 6))
 					if (status != N01_Api.RET_ERRNO.RET_OK) {
 						postError(result, "INVENTORY_START", "Lecture EPC/TID refusée: $status")
 						return@execute
@@ -485,7 +485,7 @@ class MainActivity : FlutterActivity() {
 						mainHandler.post { result.success(mapOf("verified" to true, "epc" to readBack, "tid" to tid)) }
 					} finally {
 						applyNetworkPowers(network, restorePower, configuredWritePower)
-						network.N01_StartReadingBank(null, BankData(2, 0, 6))
+						network.N01_StartReadingBank(TagFilter(1, 32, "", true), BankData(2, 0, 6))
 					}
 				}
 			} catch (error: Exception) {

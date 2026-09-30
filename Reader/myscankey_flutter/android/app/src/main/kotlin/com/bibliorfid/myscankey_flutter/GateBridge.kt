@@ -7,6 +7,7 @@ import Tool.Epc_Filter
 import Tool.GPIState
 import Tool.N01AntPwr
 import Tool.TagBackData
+import Tool.TagFilter
 import ZAO_API.N01_Api
 import android.content.Context
 import android.media.AudioAttributes
@@ -212,7 +213,7 @@ class GateBridge(
 				tagEventAt.clear()
 				current.AsyncInvStartThread(TagReadDataEventCallback { data -> onTag(data) })
 				// EPC et TID (6 mots) : le TID authentifie cartes et badges.
-				val status = current.N01_StartReadingBank(null, BankData(2, 0, 6))
+				val status = current.N01_StartReadingBank(TagFilter(1, 32, "", true), BankData(2, 0, 6))
 				if (status != N01_Api.RET_ERRNO.RET_OK) {
 					postError(result, "INVENTORY_START", "Le portail a refusé la lecture ($status).")
 					return@execute
