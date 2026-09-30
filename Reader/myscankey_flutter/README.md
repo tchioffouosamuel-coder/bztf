@@ -98,6 +98,7 @@ Tout est synchronisé avec le serveur : livres, abonnés et cartes, abonnements 
 - catalogue local SQLite, recherche, filtres, création, modification et suppression;
 - import XLSX, sans doublons, et export CSV;
 - lecture RFID, association d’un tag à un livre, encodage et désencodage vérifiés;
+- localisation d’un livre sur radar : la boussole du terminal associe chaque lecture du tag au cap visé ; en tournant lentement sur soi-même, le point jaune se place vers le livre, plus près du centre quand le signal augmente, avec la consigne « Tournez de 40° à droite » (sans boussole : force du signal seule);
 - historique des connexions et opérations;
 - poste d’emprunt en libre-service et terminal admin des emprunts ;
 - mode Simulation pour essayer le parcours sans matériel.

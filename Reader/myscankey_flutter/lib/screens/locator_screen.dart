@@ -3,6 +3,7 @@ import 'dart:math' as math;
 import 'package:flutter/material.dart';
 
 import '../services/library_controller.dart';
+import '../services/locator_direction.dart';
 
 class LocatorScreen extends StatelessWidget {
   const LocatorScreen({
@@ -147,26 +148,14 @@ class LocatorScreen extends StatelessWidget {
                   textAlign: TextAlign.center,
                 ),
                 const SizedBox(height: 12),
-                ConstrainedBox(
-                  constraints: const BoxConstraints(maxWidth: 310),
-                  child: AspectRatio(
-                    aspectRatio: 1,
-                    child: Semantics(
-                      label: tag == null
-                          ? 'Aucun signal RFID'
-                          : 'Proximité ${_proximityLabel(strength)}',
-                      child: CustomPaint(
-                        painter: _RadarPainter(
-                          strength: strength,
-                          confidence: confidence,
-                          hasSignal: tag != null,
-                          live: live,
-                          colors: colors,
-                        ),
-                      ),
-                    ),
-                  ),
+                _DirectionRadar(
+                  direction: controller.locatorDirection,
+                  strength: strength,
+                  hasSignal: tag != null,
+                  live: live,
                 ),
+                const SizedBox(height: 14),
+                _SignalBar(strength: tag == null ? 0 : strength, live: live),
                 const SizedBox(height: 8),
                 Wrap(
                   alignment: WrapAlignment.center,
@@ -245,7 +234,8 @@ class LocatorScreen extends StatelessWidget {
     required bool hasSignal,
   }) {
     if (live) {
-      return 'Le point rouge se rapproche du centre lorsque le signal augmente.';
+      return 'Le point jaune indique la direction du livre ; il se rapproche '
+          'du centre quand le signal augmente.';
     }
     if (reading && hasSignal) {
       return 'Revenez vers la dernière zone puis pointez le lecteur devant vous.';
@@ -282,134 +272,358 @@ class _Metric extends StatelessWidget {
   );
 }
 
-class _RadarPainter extends CustomPainter {
-  const _RadarPainter({
+/// Radar orienté nord comme la démo du terminal : secteur bleu = direction
+/// visée par le lecteur, point jaune = livre (plus il est proche du centre,
+/// plus le signal est fort), traces bleues = force mesurée dans chaque
+/// direction balayée.
+class _DirectionRadar extends StatelessWidget {
+  const _DirectionRadar({
+    required this.direction,
     required this.strength,
-    required this.confidence,
+    required this.hasSignal,
+    required this.live,
+  });
+
+  final LocatorDirection direction;
+  final double strength;
+  final bool hasSignal;
+  final bool live;
+
+  @override
+  Widget build(BuildContext context) => ListenableBuilder(
+    listenable: direction,
+    builder: (context, _) {
+      final colors = Theme.of(context).colorScheme;
+      final heading = direction.heading;
+      final estimate = direction.estimate;
+      final turn = direction.turn;
+      final (guidance, guidanceIcon) = _guidance(
+        heading: heading,
+        estimate: estimate,
+        turn: turn,
+        compass: direction.compassAvailable,
+        hasSignal: hasSignal,
+      );
+      return Column(
+        children: [
+          ConstrainedBox(
+            constraints: const BoxConstraints(maxWidth: 360),
+            child: AspectRatio(
+              aspectRatio: 1,
+              child: Semantics(
+                label: guidance,
+                child: CustomPaint(
+                  painter: _CompassRadarPainter(
+                    heading: heading,
+                    sectors: direction.sectors,
+                    estimate: estimate,
+                    strength: strength,
+                    hasSignal: hasSignal,
+                    live: live,
+                    colors: colors,
+                  ),
+                ),
+              ),
+            ),
+          ),
+          const SizedBox(height: 10),
+          Row(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              Icon(guidanceIcon, color: colors.primary),
+              const SizedBox(width: 8),
+              Flexible(
+                child: Text(
+                  guidance,
+                  textAlign: TextAlign.center,
+                  style: const TextStyle(
+                    fontWeight: FontWeight.w800,
+                    fontSize: 16,
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ],
+      );
+    },
+  );
+
+  static (String, IconData) _guidance({
+    required double? heading,
+    required LocatorEstimate? estimate,
+    required double? turn,
+    required bool compass,
+    required bool hasSignal,
+  }) {
+    if (!compass) {
+      return (
+        'Boussole indisponible : suivez la force du signal.',
+        Icons.explore_off_outlined,
+      );
+    }
+    if (heading == null) {
+      return ('Calibrage de la boussole…', Icons.explore_outlined);
+    }
+    if (estimate == null || turn == null) {
+      return hasSignal
+          ? (
+              'Tournez lentement sur vous-même pour situer le livre.',
+              Icons.threesixty,
+            )
+          : ('Balayez lentement les rayons autour de vous.', Icons.threesixty);
+    }
+    if (estimate.confidence < 0.25) {
+      return (
+        'Direction à confirmer : balayez de part et d’autre.',
+        Icons.threesixty,
+      );
+    }
+    final degrees = turn.abs().round();
+    if (degrees <= 15) return ('Droit devant', Icons.arrow_upward);
+    if (degrees >= 150) {
+      return ('Derrière vous : faites demi-tour', Icons.u_turn_left);
+    }
+    return turn > 0
+        ? ('Tournez de $degrees° à droite', Icons.turn_right)
+        : ('Tournez de $degrees° à gauche', Icons.turn_left);
+  }
+}
+
+/// Barre de force du signal, en pourcentage.
+class _SignalBar extends StatelessWidget {
+  const _SignalBar({required this.strength, required this.live});
+
+  final double strength;
+  final bool live;
+
+  @override
+  Widget build(BuildContext context) {
+    final colors = Theme.of(context).colorScheme;
+    final color = !live
+        ? colors.outline
+        : strength >= .72
+        ? const Color(0xFF2E9D57)
+        : strength >= .42
+        ? const Color(0xFFE0A100)
+        : const Color(0xFFE53935);
+    return Row(
+      children: [
+        Expanded(
+          child: ClipRRect(
+            borderRadius: BorderRadius.circular(20),
+            child: LinearProgressIndicator(
+              value: strength,
+              minHeight: 22,
+              color: color,
+              backgroundColor: colors.surfaceContainerHighest,
+            ),
+          ),
+        ),
+        const SizedBox(width: 12),
+        SizedBox(
+          width: 60,
+          child: Text(
+            '${(strength * 100).round()} %',
+            textAlign: TextAlign.end,
+            style: const TextStyle(fontWeight: FontWeight.w800),
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+class _CompassRadarPainter extends CustomPainter {
+  _CompassRadarPainter({
+    required this.heading,
+    required this.sectors,
+    required this.estimate,
+    required this.strength,
     required this.hasSignal,
     required this.live,
     required this.colors,
   });
 
+  final double? heading;
+  final List<double> sectors;
+  final LocatorEstimate? estimate;
   final double strength;
-  final double confidence;
   final bool hasSignal;
   final bool live;
   final ColorScheme colors;
 
+  static const _dial = Color(0xFF2F6FE4);
+  static const _target = Color(0xFFFFD600);
+
+  /// Angle du canevas pour un cap (0° = nord en haut, sens horaire).
+  static double _angle(double bearing) => (bearing - 90) * math.pi / 180;
+
+  static Offset _at(Offset center, double bearing, double distance) => Offset(
+    center.dx + math.cos(_angle(bearing)) * distance,
+    center.dy + math.sin(_angle(bearing)) * distance,
+  );
+
   @override
   void paint(Canvas canvas, Size size) {
     final center = Offset(size.width / 2, size.height / 2);
-    final radius = math.min(size.width, size.height) * .42;
-    final grid = Paint()
-      ..color = colors.outlineVariant.withValues(alpha: .72)
-      ..style = PaintingStyle.stroke
-      ..strokeWidth = 1;
-    final fill = Paint()
-      ..color = colors.surfaceContainerLow
-      ..style = PaintingStyle.fill;
+    final outer = math.min(size.width, size.height) / 2 - 2;
+    final radius = outer * .86;
 
-    canvas.drawCircle(center, radius, fill);
-
-    final sector = Path()
-      ..moveTo(center.dx, center.dy)
-      ..lineTo(
-        center.dx + math.cos(-math.pi * .68) * radius,
-        center.dy + math.sin(-math.pi * .68) * radius,
-      )
-      ..arcTo(
-        Rect.fromCircle(center: center, radius: radius),
-        -math.pi * .68,
-        math.pi * .36,
-        false,
-      )
-      ..close();
-    canvas.drawPath(
-      sector,
+    // Cadran.
+    canvas.drawCircle(
+      center,
+      outer,
       Paint()
-        ..color = colors.primary.withValues(alpha: .08)
-        ..style = PaintingStyle.fill,
+        ..shader = RadialGradient(
+          colors: [_dial.withValues(alpha: .10), _dial.withValues(alpha: .32)],
+        ).createShader(Rect.fromCircle(center: center, radius: outer)),
+    );
+    canvas.drawCircle(
+      center,
+      outer,
+      Paint()
+        ..color = _dial
+        ..style = PaintingStyle.stroke
+        ..strokeWidth = 2,
     );
 
+    // Force mesurée dans chaque direction balayée.
+    final width = 360 / sectors.length;
+    for (var index = 0; index < sectors.length; index++) {
+      final value = sectors[index];
+      if (value <= 0.02) continue;
+      canvas.drawArc(
+        Rect.fromCircle(center: center, radius: radius * (.25 + .75 * value)),
+        _angle(index * width),
+        width * math.pi / 180,
+        true,
+        Paint()..color = _dial.withValues(alpha: .12 + .25 * value),
+      );
+    }
+
+    // Direction visée par le lecteur.
+    final current = heading;
+    if (current != null) {
+      canvas.drawArc(
+        Rect.fromCircle(center: center, radius: outer),
+        _angle(current - 22),
+        44 * math.pi / 180,
+        true,
+        Paint()..color = _dial.withValues(alpha: .55),
+      );
+    }
+
+    // Cercles et axes.
+    final grid = Paint()
+      ..color = _dial.withValues(alpha: .7)
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = 1;
     for (var ring = 1; ring <= 4; ring++) {
       canvas.drawCircle(center, radius * ring / 4, grid);
     }
-    for (var index = 0; index < 8; index++) {
-      final angle = index * math.pi / 4;
+    for (final bearing in const [0.0, 90.0, 180.0, 270.0]) {
+      canvas.drawLine(center, _at(center, bearing, outer), grid);
+    }
+
+    // Graduations et repères.
+    final ticks = Paint()
+      ..color = _dial
+      ..strokeWidth = 1.2;
+    for (var degrees = 0; degrees < 360; degrees += 10) {
+      final long = degrees % 30 == 0;
       canvas.drawLine(
-        center,
-        Offset(
-          center.dx + math.cos(angle) * radius,
-          center.dy + math.sin(angle) * radius,
+        _at(center, degrees.toDouble(), outer - (long ? 10 : 5)),
+        _at(center, degrees.toDouble(), outer),
+        ticks,
+      );
+    }
+    void label(String text, double bearing, double distance, double fontSize) {
+      final painter = TextPainter(
+        text: TextSpan(
+          text: text,
+          style: TextStyle(
+            color: _dial,
+            fontSize: fontSize,
+            fontWeight: FontWeight.w800,
+          ),
         ),
-        grid,
+        textDirection: TextDirection.ltr,
+      )..layout();
+      final position = _at(center, bearing, distance);
+      painter.paint(
+        canvas,
+        position - Offset(painter.width / 2, painter.height / 2),
       );
     }
 
-    final forwardPaint = Paint()
-      ..color = colors.primary
-      ..strokeWidth = 2.5
-      ..strokeCap = StrokeCap.round;
-    canvas.drawLine(
-      center,
-      Offset(center.dx, center.dy - radius),
-      forwardPaint,
-    );
+    for (final (text, bearing) in const [
+      ('N', 0.0),
+      ('E', 90.0),
+      ('S', 180.0),
+      ('O', 270.0),
+    ]) {
+      label(text, bearing, outer - 20, 14);
+    }
+    for (var degrees = 30; degrees < 360; degrees += 30) {
+      if (degrees % 90 == 0) continue;
+      label('$degrees', degrees.toDouble(), outer - 20, 9);
+    }
 
-    canvas.drawCircle(
-      center,
-      10,
-      Paint()..color = colors.primary.withValues(alpha: .18),
+    // Terminal au centre, orienté selon son cap.
+    canvas.save();
+    canvas.translate(center.dx, center.dy);
+    canvas.rotate((current ?? 0) * math.pi / 180);
+    final phone = RRect.fromRectAndRadius(
+      Rect.fromCenter(center: Offset.zero, width: 20, height: 34),
+      const Radius.circular(4),
     );
-    canvas.drawCircle(center, 4, Paint()..color = colors.primary);
+    canvas.drawCircle(Offset.zero, 24, Paint()..color = colors.surface);
+    canvas.drawRRect(phone, Paint()..color = const Color(0xFF263238));
+    canvas.drawRect(
+      Rect.fromCenter(center: const Offset(0, -2), width: 14, height: 22),
+      Paint()..color = const Color(0xFF90CAF9),
+    );
+    canvas.drawCircle(const Offset(0, -21), 3, Paint()..color = _dial);
+    canvas.restore();
 
-    if (hasSignal) {
-      final targetRadius = 18 + ((1 - strength) * (radius - 30));
-      final target = Offset(center.dx, center.dy - targetRadius);
-      final alpha = live ? 1.0 : .46;
-      final haloRadius = 20 + ((1 - confidence) * 15);
+    // Livre recherché.
+    final target = estimate;
+    if (target != null) {
+      final distance = 30 + (1 - target.strength) * (radius - 38);
+      final position = _at(center, target.bearing, distance);
+      final alpha = live ? 1.0 : .55;
       canvas.drawCircle(
-        target,
-        haloRadius,
-        Paint()..color = const Color(0xFFD64545).withValues(alpha: .12 * alpha),
+        position,
+        14 + (1 - target.confidence) * 14,
+        Paint()..color = _target.withValues(alpha: .25 * alpha),
       );
       canvas.drawCircle(
-        target,
-        10,
+        position,
+        11,
+        Paint()..color = _target.withValues(alpha: alpha),
+      );
+      canvas.drawCircle(
+        position,
+        11,
         Paint()
-          ..color = colors.surface
-          ..style = PaintingStyle.fill,
+          ..color = const Color(0xFFB08800).withValues(alpha: alpha)
+          ..style = PaintingStyle.stroke
+          ..strokeWidth = 1.5,
       );
+    } else if (hasSignal) {
+      // Direction encore inconnue : distance seule, en anneau.
       canvas.drawCircle(
-        target,
-        7,
-        Paint()..color = const Color(0xFFD64545).withValues(alpha: alpha),
+        center,
+        30 + (1 - strength) * (radius - 38),
+        Paint()
+          ..color = _target.withValues(alpha: live ? .9 : .4)
+          ..style = PaintingStyle.stroke
+          ..strokeWidth = 4,
       );
     }
-
-    final textPainter = TextPainter(
-      text: TextSpan(
-        text: 'AVANT',
-        style: TextStyle(
-          color: colors.primary,
-          fontSize: 11,
-          fontWeight: FontWeight.w800,
-          letterSpacing: 0,
-        ),
-      ),
-      textDirection: TextDirection.ltr,
-    )..layout();
-    textPainter.paint(
-      canvas,
-      Offset(center.dx - textPainter.width / 2, center.dy - radius - 19),
-    );
   }
 
   @override
-  bool shouldRepaint(covariant _RadarPainter oldDelegate) =>
-      oldDelegate.strength != strength ||
-      oldDelegate.confidence != confidence ||
-      oldDelegate.hasSignal != hasSignal ||
-      oldDelegate.live != live ||
-      oldDelegate.colors != colors;
+  bool shouldRepaint(covariant _CompassRadarPainter oldDelegate) => true;
 }

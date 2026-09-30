@@ -8,6 +8,9 @@ import '../widgets/book_editor.dart';
 import '../widgets/reader_connection_dialog.dart';
 import '../widgets/status_pill.dart';
 
+/// Tags détaillés au plus dans la liste d'une lecture multiple.
+const _maxListedTags = 30;
+
 class StationScreen extends StatelessWidget {
   const StationScreen({required this.controller, super.key});
 
@@ -336,7 +339,9 @@ class StationScreen extends StatelessWidget {
                     style: const TextStyle(fontWeight: FontWeight.w800),
                   ),
                 ),
-                for (final tag in tags)
+                // L'écran de la station sert à un livre à la fois : au-delà,
+                // seul le compte exact compte, pas le détail de chaque tag.
+                for (final tag in tags.take(_maxListedTags))
                   Builder(
                     builder: (context) {
                       final book = controller.recognizedBook(tag);
@@ -367,6 +372,15 @@ class StationScreen extends StatelessWidget {
                         trailing: book == null ? null : StatusPill(book.status),
                       );
                     },
+                  ),
+                if (tags.length > _maxListedTags)
+                  Padding(
+                    padding: const EdgeInsets.fromLTRB(16, 4, 16, 16),
+                    child: Text(
+                      '… et ${tags.length - _maxListedTags} autre(s). Utilisez '
+                      'l’inventaire pour la liste complète.',
+                      style: Theme.of(context).textTheme.bodySmall,
+                    ),
                   ),
               ],
             ),

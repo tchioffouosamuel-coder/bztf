@@ -10,6 +10,8 @@ import '../models/user.dart';
 import 'desk_reader_service.dart';
 import 'gate_controller.dart';
 import 'gate_reader_service.dart';
+import 'heading_service.dart';
+import 'locator_direction.dart';
 import 'kiosk_controller.dart';
 import 'locator_signal.dart';
 import 'reader_service.dart';
@@ -21,7 +23,9 @@ class LibraryController extends ChangeNotifier {
     ReaderService? reader,
     DeskReaderService? deskReader,
     GateReaderService? gateReader,
+    HeadingService? heading,
   }) : database = database ?? LibraryDatabase.instance,
+       _headingService = heading ?? HeadingService(),
        reader = reader ?? ReaderService() {
     sync = SyncService(this.database);
     kiosk = KioskController(this, reader: deskReader);
@@ -53,10 +57,44 @@ class LibraryController extends ChangeNotifier {
   bool _startingNativeRead = false;
   bool _capturingCard = false;
 
+  /// Plusieurs tags remontent chacun plusieurs fois par seconde : l'écran
+  /// n'est rafraîchi qu'une fois par intervalle, pas à chaque lecture.
+  static const _tagRefreshInterval = Duration(milliseconds: 150);
+
+  /// Un tag présent n'est reconnu de nouveau dans le catalogue qu'après ce
+  /// délai (le résultat est gardé en mémoire entre-temps).
+  static const _recognitionInterval = Duration(seconds: 3);
+  Timer? _tagRefreshTimer;
+  Timer? _catalogueRefreshTimer;
+
+  void _notifyTagChange() {
+    _tagRefreshTimer ??= Timer(_tagRefreshInterval, () {
+      _tagRefreshTimer = null;
+      _inventoryCache = null;
+      notifyListeners();
+    });
+  }
+
+  /// Tableau de bord ou catalogue affiché : relu au plus une fois par
+  /// seconde pendant une lecture, jamais s'il n'est pas à l'écran.
+  void _scheduleCatalogueRefresh({required bool books}) {
+    if (view != 'dashboard' && !(books && view == 'catalogue')) return;
+    _catalogueRefreshTimer ??= Timer(const Duration(seconds: 1), () {
+      _catalogueRefreshTimer = null;
+      if (view == 'dashboard') unawaited(refreshDashboard());
+      if (view == 'catalogue') unawaited(loadBooks());
+    });
+  }
+
   /// Le poste d'emprunt occupe l'écran : la gâchette du terminal est ignorée.
   bool kioskActive = false;
   Timer? _locatorLossTimer;
   final LocatorSignalTracker locatorSignal = LocatorSignalTracker();
+
+  /// Direction du livre recherché d'après la boussole du terminal.
+  final LocatorDirection locatorDirection = LocatorDirection();
+  final HeadingService _headingService;
+  StreamSubscription<double>? _headingSubscription;
 
   /// Rôle de l'appareil choisi à la première ouverture : `kiosk` (poste
   /// d'emprunt), `mobile` (lecteur mobile) ou `gate` (portail antivol).
@@ -100,11 +138,14 @@ class LibraryController extends ChangeNotifier {
   List<ReaderTag> get observedTags => view == 'station'
       ? _stationSessionTags.values.toList()
       : _observed.values.toList();
-  List<InventoryRecord> get inventoryRecords {
-    final records = _inventoryRecords.values.toList();
-    records.sort((a, b) => b.lastSeen.compareTo(a.lastSeen));
-    return records;
-  }
+
+  /// Livres de l'inventaire, les derniers apparus en tête. L'ordre ne
+  /// dépend pas des relectures : les lignes ne sautent pas pendant la
+  /// lecture. Calculé une fois par rafraîchissement de l'écran.
+  List<InventoryRecord> get inventoryRecords =>
+      _inventoryCache ??= _inventoryRecords.values.toList()
+        ..sort((a, b) => b.firstSeen.compareTo(a.firstSeen));
+  List<InventoryRecord>? _inventoryCache;
 
   List<InventoryRecord> get referencedInventoryRecords =>
       inventoryRecords.where((record) => record.book != null).toList();
@@ -328,6 +369,7 @@ class LibraryController extends ChangeNotifier {
       await reader.stopInventory();
     }
     view = value;
+    _followHeading(value == 'locator');
     if ((value == 'station' || value == 'locator') &&
         reader.connected &&
         !reader.reading &&
@@ -338,6 +380,34 @@ class LibraryController extends ChangeNotifier {
     if (value == 'catalogue') await loadBooks();
     if (value == 'history') await loadActivity();
     notifyListeners();
+  }
+
+  /// Boussole écoutée seulement pendant la localisation (économie d'énergie).
+  void _followHeading(bool enabled) {
+    if (!enabled) {
+      unawaited(_headingSubscription?.cancel());
+      _headingSubscription = null;
+      return;
+    }
+    if (_headingSubscription != null) return;
+    // Sans boussole, la recherche continue avec la seule force du signal.
+    try {
+      _headingSubscription = _headingService.headings.listen(
+        (degrees) => locatorDirection.updateHeading(
+          degrees,
+          signalLive: locatorSignalLive,
+        ),
+        onError: (Object _) {
+          locatorDirection.compassAvailable = false;
+          _headingSubscription = null;
+          notifyListeners();
+        },
+        cancelOnError: true,
+      );
+    } catch (error) {
+      locatorDirection.compassAvailable = false;
+      debugPrint('Boussole indisponible : $error');
+    }
   }
 
   void _handleNativeRfidKey(String action) {
@@ -461,6 +531,7 @@ class LibraryController extends ChangeNotifier {
       locatorTag = null;
       locatorSignalLive = false;
       locatorSignal.reset();
+      locatorDirection.reset();
     }
     try {
       await reader.startInventory(
@@ -514,6 +585,7 @@ class LibraryController extends ChangeNotifier {
     locatorTag = null;
     locatorSignalLive = false;
     locatorSignal.reset();
+    locatorDirection.reset();
     _locatorLossTimer?.cancel();
     if (view == 'locator') {
       if (restartSearch) {
@@ -603,6 +675,7 @@ class LibraryController extends ChangeNotifier {
 
   void clearInventorySession() {
     _inventoryRecords.clear();
+    _inventoryCache = null;
     notifyListeners();
   }
 
@@ -936,12 +1009,12 @@ class LibraryController extends ChangeNotifier {
       _observed.remove(key);
       _lastTagRecognitionAt.remove(key);
       _releaseTimers.remove(key);
-      notifyListeners();
+      _notifyTagChange();
     });
     final lastRecognizedAt = _lastTagRecognitionAt[key];
     if (lastRecognizedAt != null &&
-        now.difference(lastRecognizedAt) < const Duration(milliseconds: 400)) {
-      notifyListeners();
+        now.difference(lastRecognizedAt) < _recognitionInterval) {
+      _notifyTagChange();
       return;
     }
     _lastTagRecognitionAt[key] = now;
@@ -956,12 +1029,11 @@ class LibraryController extends ChangeNotifier {
       if (view == 'inventory') {
         _setInventoryBook(key, tag, recognized);
       }
-      await refreshDashboard();
-      if (view == 'catalogue' && recognized != null) await loadBooks();
+      _scheduleCatalogueRefresh(books: recognized != null);
     } catch (error) {
       readerError = error.toString();
     }
-    notifyListeners();
+    _notifyTagChange();
   }
 
   void _onLocatorTag(ReaderTag tag) {
@@ -979,6 +1051,9 @@ class LibraryController extends ChangeNotifier {
     }
     final firstDetection = locatorTag == null;
     locatorSignal.add(tag.rssi);
+    locatorDirection.addSample(
+      LocatorSignalTracker.normalizeRssi(tag.rssi.toDouble()),
+    );
     locatorTag = ReaderTag(
       epc: tag.epc,
       tid: tag.tid,
@@ -1000,6 +1075,7 @@ class LibraryController extends ChangeNotifier {
     if (tag.epc == ReaderService.emptyEpc && tag.tid.isEmpty) return;
     final inventoryKey = _inventoryKey(key, tag);
     final existing = _inventoryRecords[inventoryKey];
+    _inventoryCache = null;
     if (existing == null) {
       _inventoryRecords[inventoryKey] = InventoryRecord(
         tag: tag,
@@ -1025,6 +1101,7 @@ class LibraryController extends ChangeNotifier {
         (existing.tag.tid.isNotEmpty && existing.tag.tid != tag.tid)) {
       return;
     }
+    _inventoryCache = null;
     _inventoryRecords[inventoryKey] = existing.copyWith(
       book: book,
       preserveBook: false,
@@ -1063,6 +1140,10 @@ class LibraryController extends ChangeNotifier {
   @override
   void dispose() {
     _locatorLossTimer?.cancel();
+    _tagRefreshTimer?.cancel();
+    _catalogueRefreshTimer?.cancel();
+    unawaited(_headingSubscription?.cancel());
+    locatorDirection.dispose();
     for (final timer in _releaseTimers.values) {
       timer.cancel();
     }

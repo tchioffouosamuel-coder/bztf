@@ -381,6 +381,54 @@ void main() {
   );
 
   test(
+    'une lecture de nombreux tags ne rafraîchit l’écran que par lots',
+    () async {
+      final directory = await getDatabasesPath();
+      final filePath = path.join(directory, 'biblio_rfid.db');
+      await LibraryDatabase.instance.close();
+      await databaseFactory.deleteDatabase(filePath);
+      final database = LibraryDatabase.instance;
+      final reader = _FakeReaderService();
+      final controller = LibraryController(database: database, reader: reader);
+      try {
+        await controller.setView('inventory');
+        var refreshes = 0;
+        controller.addListener(() => refreshes++);
+        // 50 tags lus 4 fois chacun, en rafale.
+        for (var pass = 0; pass < 4; pass++) {
+          for (var index = 0; index < 50; index++) {
+            reader.emit(
+              ReaderTag(
+                epc: generateEpc(2026, index + 1),
+                tid: 'E2806894000050CA4D00${index.toString().padLeft(4, '0')}',
+                rssi: -40,
+              ),
+            );
+          }
+        }
+        await Future<void>.delayed(const Duration(milliseconds: 600));
+        expect(controller.inventoryRecords, hasLength(50));
+        expect(controller.inventoryRecords.first.readCount, 4);
+        // 200 lectures : quelques rafraîchissements, pas un par lecture.
+        expect(refreshes, lessThan(12));
+        // Ordre stable : le dernier tag apparu reste en tête.
+        final order = [
+          for (final record in controller.inventoryRecords) record.tag.epc,
+        ];
+        reader.emit(controller.inventoryRecords.last.tag);
+        await Future<void>.delayed(const Duration(milliseconds: 200));
+        expect([
+          for (final record in controller.inventoryRecords) record.tag.epc,
+        ], order);
+      } finally {
+        controller.dispose();
+        await database.close();
+        await databaseFactory.deleteDatabase(filePath);
+      }
+    },
+  );
+
+  test(
     'la station conserve la dernière lecture jusqu’au scan suivant',
     () async {
       final reader = _FakeReaderService()

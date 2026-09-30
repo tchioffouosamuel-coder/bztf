@@ -49,9 +49,12 @@ class MainActivity : FlutterActivity() {
 	private val lastRfidKeyPressAt = AtomicLong(0L)
 	private val tidCache = ConcurrentHashMap<String, String>()
 	private val tidAttemptAt = ConcurrentHashMap<String, Long>()
+	/** Échecs de lecture du TID par EPC, remis à zéro à chaque lecture. */
+	private val tidFailures = ConcurrentHashMap<String, Int>()
 	private val tagEventAt = ConcurrentHashMap<String, Long>()
 	private var deskReader: DeskReaderBridge? = null
 	private var gate: GateBridge? = null
+	private var heading: HeadingBridge? = null
 
 	override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
 		super.configureFlutterEngine(flutterEngine)
@@ -71,6 +74,9 @@ class MainActivity : FlutterActivity() {
 			Log.e("BiblioRFID", "Desk reader bridge unavailable", error)
 			null
 		}
+		heading = runCatching { HeadingBridge(flutterEngine.dartExecutor.binaryMessenger, applicationContext) }
+			.onFailure { Log.e("BiblioRFID", "Compass unavailable", it) }
+			.getOrNull()
 		// Portail antivol N01 : même garde, son SDK ne doit jamais bloquer le
 		// démarrage de l'application.
 		gate = try {
@@ -288,6 +294,7 @@ class MainActivity : FlutterActivity() {
 			try {
 				activeTargetEpc = targetEpc
 				tagEventAt.clear()
+				tidFailures.clear()
 				if (currentIntegratedReader != null) {
 					if (!currentIntegratedReader.setPower(power)) {
 						postError(result, "POWER_SET", "Le lecteur Seuic a refusé la puissance de $power dBm.")
@@ -524,6 +531,9 @@ class MainActivity : FlutterActivity() {
 		if (!force && !cached.isNullOrEmpty()) return cached
 		val now = System.currentTimeMillis()
 		if (!force && now - (tidAttemptAt[epc] ?: 0L) < 1000) return ""
+		// Un tag dont le TID ne se lit pas ne doit pas ralentir la boucle de
+		// lecture : trois essais par session, puis il remonte sans TID.
+		if (!force && (tidFailures[epc] ?: 0) >= MAX_TID_ATTEMPTS) return ""
 		tidAttemptAt[epc] = now
 		val epcBytes = epc.hexToBytes()
 		for (length in TID_LENGTHS_BYTES) {
@@ -532,8 +542,10 @@ class MainActivity : FlutterActivity() {
 			val tid = data.toHexString()
 			if (tid.isEmpty() || tid.all { it == '0' }) continue
 			tidCache[epc] = tid
+			tidFailures.remove(epc)
 			return tid
 		}
+		tidFailures.merge(epc, 1, Int::plus)
 		return ""
 	}
 
@@ -561,6 +573,7 @@ class MainActivity : FlutterActivity() {
 		activeTargetEpc = null
 		tidCache.clear()
 		tidAttemptAt.clear()
+		tidFailures.clear()
 		tagEventAt.clear()
 		networkReader?.let { runCatching { it.N01_StopReading() }; runCatching { it.N01_Close() } }
 		networkReader = null
@@ -580,6 +593,8 @@ class MainActivity : FlutterActivity() {
 		deskReader = null
 		runCatching { gate?.dispose() }
 		gate = null
+		runCatching { heading?.dispose() }
+		heading = null
 		executor.shutdownNow()
 		soundPool?.release()
 		soundPool = null
@@ -598,5 +613,6 @@ class MainActivity : FlutterActivity() {
 		const val RFID_KEY_DEBOUNCE_MS = 450L
 		const val TAG_EVENT_DEBOUNCE_MS = 350L
 		const val LOCATOR_EVENT_DEBOUNCE_MS = 100L
+		const val MAX_TID_ATTEMPTS = 3
 	}
 }
