@@ -10,8 +10,10 @@ import fs from "node:fs";
 import path from "node:path";
 import {
   formatAccession,
+  generateBadgeEpc,
   generateCardEpc,
   generateEpc,
+  isBadgeEpc,
   isCardEpc,
 } from "./epc.js";
 
@@ -39,10 +41,33 @@ function formatDay(value) {
 /** Ordre d'application : les références avant ce qui les utilise. */
 function changePriority(change) {
   return (
-    { book: 0, subscriber: 1, subscription: 2, loan: 3 }[
-      change?.entityType || "book"
-    ] ?? 4
+    {
+      book: 0,
+      subscriber: 1,
+      staff: 1,
+      subscription: 2,
+      loan: 3,
+      staff_passage: 3,
+      gate_day: 3,
+    }[change?.entityType || "book"] ?? 4
   );
+}
+
+/** Bornes UTC d'une journée locale `AAAA-MM-JJ`. */
+function localDayRange(day) {
+  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(day || ""));
+  const start = match
+    ? new Date(Number(match[1]), Number(match[2]) - 1, Number(match[3]))
+    : new Date(new Date().setHours(0, 0, 0, 0));
+  const end = new Date(start);
+  end.setDate(end.getDate() + 1);
+  return { from: start.toISOString(), to: end.toISOString() };
+}
+
+/** Date locale `AAAA-MM-JJ`. */
+export function localDay(date = new Date()) {
+  const value = new Date(date);
+  return `${value.getFullYear()}-${String(value.getMonth() + 1).padStart(2, "0")}-${String(value.getDate()).padStart(2, "0")}`;
 }
 
 /**
@@ -284,6 +309,53 @@ export class LibraryDatabase {
     );
     for (const subscriber of withoutCard)
       assignCard.run(generateCardEpc(), subscriber.id);
+
+    // Personnel (badge « BCM » 3) et activité des portails antivol. Le
+    // matricule n'est pas unique en base : deux postes peuvent l'avoir saisi
+    // avant de se synchroniser, l'identifiant est le server_id.
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS staff (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        server_id TEXT NOT NULL UNIQUE,
+        staff_number TEXT NOT NULL COLLATE NOCASE,
+        name TEXT NOT NULL,
+        position TEXT NOT NULL DEFAULT '',
+        email TEXT NOT NULL DEFAULT '',
+        phone TEXT NOT NULL DEFAULT '',
+        active INTEGER NOT NULL DEFAULT 1,
+        badge_epc TEXT UNIQUE,
+        badge_tid TEXT UNIQUE,
+        badge_tagged_at TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        sync_state TEXT NOT NULL DEFAULT 'pending'
+      );
+      CREATE INDEX IF NOT EXISTS idx_staff_name ON staff(name);
+      CREATE INDEX IF NOT EXISTS idx_staff_number ON staff(staff_number);
+      CREATE TABLE IF NOT EXISTS gate_days (
+        server_id TEXT PRIMARY KEY,
+        gate_id TEXT NOT NULL,
+        gate_name TEXT NOT NULL DEFAULT '',
+        day TEXT NOT NULL,
+        entries INTEGER NOT NULL DEFAULT 0,
+        exits INTEGER NOT NULL DEFAULT 0,
+        alarms INTEGER NOT NULL DEFAULT 0,
+        updated_at TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_gate_days_day ON gate_days(day);
+      CREATE TABLE IF NOT EXISTS staff_passages (
+        server_id TEXT PRIMARY KEY,
+        staff_server_id TEXT NOT NULL,
+        staff_number TEXT NOT NULL DEFAULT '',
+        staff_name TEXT NOT NULL DEFAULT '',
+        direction TEXT NOT NULL CHECK(direction IN ('in', 'out')),
+        passed_at TEXT NOT NULL,
+        gate_id TEXT NOT NULL DEFAULT '',
+        gate_name TEXT NOT NULL DEFAULT ''
+      );
+      CREATE INDEX IF NOT EXISTS idx_staff_passages_at ON staff_passages(passed_at);
+      CREATE INDEX IF NOT EXISTS idx_staff_passages_staff ON staff_passages(staff_server_id, passed_at);
+    `);
   }
 
   listBooks({ search = "", status = "tous", limit = null, offset = 0 } = {}) {
@@ -995,6 +1067,10 @@ export class LibraryDatabase {
       .prepare("SELECT name FROM subscribers WHERE card_tid=? AND id<>?")
       .get(normalizedTid, subscriber.id);
     if (other) throw new Error(`Ce tag est déjà la carte de ${other.name}.`);
+    const badge = this.db
+      .prepare("SELECT name FROM staff WHERE badge_tid=?")
+      .get(normalizedTid);
+    if (badge) throw new Error(`Ce tag est déjà le badge de ${badge.name}.`);
     const now = new Date().toISOString();
     this.db
       .prepare(
@@ -1012,6 +1088,341 @@ export class LibraryDatabase {
       now,
     );
     return this.getSubscriber(subscriber.id);
+  }
+
+  // --- Personnel -------------------------------------------------------
+
+  /** Personnel, avec son dernier passage au portail. */
+  listStaff(search = "") {
+    const term = `%${cleanText(search, 120)}%`;
+    return this.db
+      .prepare(
+        `SELECT st.*,
+          (SELECT direction FROM staff_passages WHERE staff_server_id=st.server_id ORDER BY passed_at DESC LIMIT 1) AS last_direction,
+          (SELECT passed_at FROM staff_passages WHERE staff_server_id=st.server_id ORDER BY passed_at DESC LIMIT 1) AS last_passed_at
+         FROM staff st
+         WHERE st.staff_number LIKE ? OR st.name LIKE ? OR st.position LIKE ? OR st.email LIKE ? OR st.phone LIKE ?
+         ORDER BY st.name COLLATE NOCASE LIMIT 500`,
+      )
+      .all(term, term, term, term, term);
+  }
+
+  getStaff(id) {
+    return (
+      this.db.prepare("SELECT * FROM staff WHERE id=?").get(Number(id)) || null
+    );
+  }
+
+  /** Fiche d'un membre du personnel et ses derniers passages. */
+  getStaffDetails(id) {
+    const staff = this.getStaff(id);
+    if (!staff) return null;
+    const passages = this.db
+      .prepare(
+        "SELECT * FROM staff_passages WHERE staff_server_id=? ORDER BY passed_at DESC LIMIT 200",
+      )
+      .all(staff.server_id);
+    return { staff, passages };
+  }
+
+  staffValues(input, current = {}) {
+    const staffNumber = cleanText(
+      input.staff_number ?? current.staff_number,
+      80,
+    ).toUpperCase();
+    const name = cleanText(input.name ?? current.name, 240);
+    if (!staffNumber) throw new Error("Le matricule est obligatoire.");
+    if (!name) throw new Error("Le nom est obligatoire.");
+    const duplicate = this.db
+      .prepare("SELECT name FROM staff WHERE staff_number=? AND id<>?")
+      .get(staffNumber, Number(current.id) || -1);
+    if (duplicate)
+      throw new Error(
+        `Le matricule ${staffNumber} est déjà attribué à ${duplicate.name}.`,
+      );
+    return {
+      staffNumber,
+      name,
+      position: cleanText(input.position ?? current.position, 120),
+      email: cleanText(input.email ?? current.email, 240),
+      phone: cleanText(input.phone ?? current.phone, 80),
+      active:
+        input.active === undefined
+          ? (current.active ?? 1)
+          : input.active
+            ? 1
+            : 0,
+    };
+  }
+
+  createStaff(input) {
+    const values = this.staffValues(input);
+    const now = new Date().toISOString();
+    const result = this.db
+      .prepare(
+        `INSERT INTO staff (server_id, staff_number, name, position, email, phone, active,
+           badge_epc, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        randomUUID(),
+        values.staffNumber,
+        values.name,
+        values.position,
+        values.email,
+        values.phone,
+        values.active,
+        generateBadgeEpc(),
+        now,
+        now,
+      );
+    const staff = this.getStaff(Number(result.lastInsertRowid));
+    this.queueStaffMutation(staff);
+    this.addActivity(
+      "personnel",
+      "succes",
+      null,
+      `Personnel ajouté : ${staff.name} (${staff.staff_number})`,
+    );
+    return staff;
+  }
+
+  updateStaff(id, input) {
+    const current = this.getStaff(id);
+    if (!current) return null;
+    const values = this.staffValues(input, current);
+    this.db
+      .prepare(
+        `UPDATE staff SET staff_number=?, name=?, position=?, email=?, phone=?, active=?, updated_at=?
+         WHERE id=?`,
+      )
+      .run(
+        values.staffNumber,
+        values.name,
+        values.position,
+        values.email,
+        values.phone,
+        values.active,
+        new Date().toISOString(),
+        current.id,
+      );
+    const updated = this.getStaff(current.id);
+    this.queueStaffMutation(updated);
+    this.addActivity(
+      "personnel",
+      "succes",
+      null,
+      `Personnel modifié : ${updated.name} (${updated.staff_number})${
+        current.active && !values.active ? " — désactivé" : ""
+      }`,
+    );
+    return updated;
+  }
+
+  /** Les passages déjà enregistrés gardent le nom de la personne. */
+  deleteStaff(id) {
+    const staff = this.getStaff(id);
+    if (!staff) return false;
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      this.db.prepare("DELETE FROM staff WHERE id=?").run(staff.id);
+      this.queueEntityDelete("staff", staff.server_id);
+      this.addActivity(
+        "personnel",
+        "succes",
+        null,
+        `Personnel supprimé : ${staff.name} (${staff.staff_number})`,
+        staff.badge_epc,
+        staff.badge_tid,
+      );
+      this.db.exec("COMMIT");
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
+    return true;
+  }
+
+  /** Membre actif du personnel correspondant au badge lu. */
+  recognizeBadge(epc, tid) {
+    const normalizedEpc = cleanText(epc, 128).toUpperCase();
+    const normalizedTid = cleanText(tid, 128).toUpperCase();
+    if (!isBadgeEpc(normalizedEpc)) return null;
+    const staff = this.db
+      .prepare(
+        "SELECT * FROM staff WHERE badge_epc=? AND badge_tid IS NOT NULL AND active=1",
+      )
+      .get(normalizedEpc);
+    // Un EPC recopié sur un autre tag ne suffit pas : le TID doit correspondre.
+    if (!staff || (normalizedTid && staff.badge_tid !== normalizedTid))
+      return null;
+    return staff;
+  }
+
+  /** Ce que désigne déjà ce TID (livre, carte ou badge), pour refuser un doublon. */
+  tidOwner(tid, { staffId = null, subscriberId = null } = {}) {
+    const book = this.db
+      .prepare("SELECT accession FROM books WHERE tid=?")
+      .get(tid);
+    if (book) return `le livre ${book.accession}`;
+    const card = this.db
+      .prepare("SELECT name FROM subscribers WHERE card_tid=? AND id<>?")
+      .get(tid, Number(subscriberId) || -1);
+    if (card) return `la carte d'abonné de ${card.name}`;
+    const badge = this.db
+      .prepare("SELECT name FROM staff WHERE badge_tid=? AND id<>?")
+      .get(tid, Number(staffId) || -1);
+    if (badge) return `le badge de ${badge.name}`;
+    return null;
+  }
+
+  markBadgeTagged(staffId, tid) {
+    const staff = this.getStaff(staffId);
+    if (!staff) throw new Error("Membre du personnel introuvable.");
+    const normalizedTid = cleanText(tid, 128).toUpperCase();
+    if (!normalizedTid) throw new Error("Le TID du badge est obligatoire.");
+    const owner = this.tidOwner(normalizedTid, { staffId: staff.id });
+    if (owner) throw new Error(`Ce tag est déjà ${owner}.`);
+    const now = new Date().toISOString();
+    this.db
+      .prepare(
+        "UPDATE staff SET badge_tid=?, badge_tagged_at=?, updated_at=? WHERE id=?",
+      )
+      .run(normalizedTid, now, now, staff.id);
+    this.queueStaffMutation(this.getStaff(staff.id));
+    this.addActivity(
+      "badge",
+      "succes",
+      null,
+      `Badge encodé pour ${staff.name} (${staff.staff_number})`,
+      staff.badge_epc,
+      normalizedTid,
+      now,
+    );
+    return this.getStaff(staff.id);
+  }
+
+  toSyncStaff(staff) {
+    return {
+      serverId: staff.server_id,
+      staffNumber: staff.staff_number,
+      name: staff.name,
+      position: staff.position || "",
+      email: staff.email || "",
+      phone: staff.phone || "",
+      active: Boolean(staff.active),
+      badgeEpc: staff.badge_epc || null,
+      badgeTid: staff.badge_tid || null,
+      badgeTaggedAt: staff.badge_tagged_at || null,
+      createdAt: staff.created_at,
+      updatedAt: staff.updated_at,
+    };
+  }
+
+  queueStaffMutation(staff) {
+    if (!staff?.server_id) return;
+    this.queueEntity(
+      "staff",
+      staff.id,
+      "staff",
+      staff.server_id,
+      this.toSyncStaff(staff),
+    );
+  }
+
+  /** Passages du personnel d'une journée locale (aujourd'hui par défaut). */
+  listStaffPassages({ day = "", search = "" } = {}) {
+    const { from, to } = localDayRange(day);
+    const term = `%${cleanText(search, 120)}%`;
+    return this.db
+      .prepare(
+        `SELECT p.*, st.id AS staff_id, st.position
+         FROM staff_passages p LEFT JOIN staff st ON st.server_id=p.staff_server_id
+         WHERE p.passed_at >= ? AND p.passed_at < ?
+           AND (p.staff_name LIKE ? OR p.staff_number LIKE ? OR p.gate_name LIKE ?)
+         ORDER BY p.passed_at DESC LIMIT 1000`,
+      )
+      .all(from, to, term, term, term);
+  }
+
+  /**
+   * Présence du jour : pour chaque membre passé au portail, premier passage,
+   * dernier passage et dernier sens (entré = présent).
+   */
+  staffPresence(day = "") {
+    const { from, to } = localDayRange(day);
+    return this.db
+      .prepare(
+        `SELECT p.staff_server_id, MAX(p.staff_name) AS staff_name, MAX(p.staff_number) AS staff_number,
+           MIN(p.passed_at) AS first_passed_at, MAX(p.passed_at) AS last_passed_at,
+           SUM(CASE WHEN p.direction='in' THEN 1 ELSE 0 END) AS entries,
+           SUM(CASE WHEN p.direction='out' THEN 1 ELSE 0 END) AS exits,
+           (SELECT direction FROM staff_passages last
+            WHERE last.staff_server_id=p.staff_server_id AND last.passed_at >= ? AND last.passed_at < ?
+            ORDER BY last.passed_at DESC LIMIT 1) AS last_direction
+         FROM staff_passages p
+         WHERE p.passed_at >= ? AND p.passed_at < ?
+         GROUP BY p.staff_server_id
+         ORDER BY staff_name COLLATE NOCASE`,
+      )
+      .all(from, to, from, to);
+  }
+
+  /** Fréquentation par jour (tous portails confondus) et détail par portail. */
+  gateStats({ from = "", to = "" } = {}) {
+    const end = /^\d{4}-\d{2}-\d{2}$/.test(to) ? to : localDay();
+    const start = /^\d{4}-\d{2}-\d{2}$/.test(from)
+      ? from
+      : localDay(new Date(Date.now() - 29 * 24 * 3600 * 1000));
+    const rows = this.db
+      .prepare(
+        "SELECT * FROM gate_days WHERE day >= ? AND day <= ? ORDER BY day DESC, gate_name",
+      )
+      .all(start, end);
+    const days = new Map();
+    for (const row of rows) {
+      const entry = days.get(row.day) || {
+        day: row.day,
+        entries: 0,
+        exits: 0,
+        alarms: 0,
+        gates: [],
+      };
+      entry.entries += row.entries;
+      entry.exits += row.exits;
+      entry.alarms += row.alarms;
+      entry.gates.push({
+        gateId: row.gate_id,
+        gateName: row.gate_name || "Portail",
+        entries: row.entries,
+        exits: row.exits,
+        alarms: row.alarms,
+        updatedAt: row.updated_at,
+      });
+      days.set(row.day, entry);
+    }
+    const list = [...days.values()];
+    const today = days.get(localDay()) || {
+      day: localDay(),
+      entries: 0,
+      exits: 0,
+      alarms: 0,
+      gates: [],
+    };
+    return {
+      from: start,
+      to: end,
+      today,
+      days: list,
+      totals: list.reduce(
+        (sum, day) => ({
+          entries: sum.entries + day.entries,
+          exits: sum.exits + day.exits,
+          alarms: sum.alarms + day.alarms,
+        }),
+        { entries: 0, exits: 0, alarms: 0 },
+      ),
+    };
   }
 
   activeLoanForBook(bookId) {
@@ -1170,6 +1581,13 @@ export class LibraryDatabase {
     if (card)
       throw new Error(
         `Ce tag est la carte de l'abonné ${card.name} (${card.member_number}).`,
+      );
+    const badge = this.db
+      .prepare("SELECT name, staff_number FROM staff WHERE badge_tid=?")
+      .get(normalizedTid);
+    if (badge)
+      throw new Error(
+        `Ce tag est le badge de ${badge.name} (${badge.staff_number}).`,
       );
     const now = new Date().toISOString();
     this.db
@@ -1401,11 +1819,15 @@ export class LibraryDatabase {
     const loans = this.db
       .prepare("SELECT id FROM loans WHERE sync_state <> 'synced' ORDER BY id")
       .all();
+    const staff = this.db
+      .prepare("SELECT * FROM staff WHERE sync_state <> 'synced'")
+      .all();
     if (
       !books.length &&
       !subscribers.length &&
       !subscriptions.length &&
-      !loans.length
+      !loans.length &&
+      !staff.length
     )
       return;
     const markPending = this.db.prepare(
@@ -1435,6 +1857,7 @@ export class LibraryDatabase {
       for (const subscription of subscriptions)
         this.queueSubscriptionMutation(subscription.id);
       for (const loan of loans) this.queueLoanMutation(loan.id);
+      for (const member of staff) this.queueStaffMutation(member);
       this.db.exec("COMMIT");
     } catch (error) {
       this.db.exec("ROLLBACK");
@@ -1472,6 +1895,9 @@ export class LibraryDatabase {
       ),
       loan: this.db.prepare(
         "UPDATE loans SET sync_state='synced' WHERE server_id=?",
+      ),
+      staff: this.db.prepare(
+        "UPDATE staff SET sync_state='synced' WHERE server_id=?",
       ),
     };
     const remove = this.db.prepare(
@@ -1558,6 +1984,18 @@ export class LibraryDatabase {
         }
         if (entityType === "subscription" || entityType === "loan") {
           this.applyLendingChange(change);
+          continue;
+        }
+        if (entityType === "staff") {
+          this.applyRemoteStaff(change, serverId);
+          continue;
+        }
+        if (entityType === "gate_day") {
+          this.applyRemoteGateDay(change, serverId);
+          continue;
+        }
+        if (entityType === "staff_passage") {
+          this.applyRemoteStaffPassage(change, serverId);
           continue;
         }
         if (entityType !== "book") continue;
@@ -1794,6 +2232,115 @@ export class LibraryDatabase {
         cleanText(remote.cardTaggedAt, 100) || null,
         cleanText(remote.createdAt, 100) || now,
         cleanText(remote.updatedAt, 100) || now,
+      );
+  }
+
+  applyRemoteStaff(change, serverId) {
+    if (change.operation === "delete") {
+      this.db.prepare("DELETE FROM staff WHERE server_id=?").run(serverId);
+      return;
+    }
+    const remote = change.staff;
+    if (!remote) return;
+    const badgeEpc = cleanText(remote.badgeEpc, 128).toUpperCase() || null;
+    const badgeTid = cleanText(remote.badgeTid, 128).toUpperCase() || null;
+    // Un badge réencodé ailleurs pour une autre personne quitte l'ancienne.
+    if (badgeTid)
+      this.db
+        .prepare(
+          "UPDATE staff SET badge_tid=NULL, badge_tagged_at=NULL WHERE badge_tid=? AND server_id<>?",
+        )
+        .run(badgeTid, serverId);
+    if (badgeEpc)
+      this.db
+        .prepare(
+          "UPDATE staff SET badge_epc=NULL WHERE badge_epc=? AND server_id<>?",
+        )
+        .run(badgeEpc, serverId);
+    const now = new Date().toISOString();
+    this.db
+      .prepare(
+        `INSERT INTO staff (server_id, staff_number, name, position, email, phone, active,
+           badge_epc, badge_tid, badge_tagged_at, created_at, updated_at, sync_state)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'synced')
+         ON CONFLICT(server_id) DO UPDATE SET staff_number=excluded.staff_number,
+           name=excluded.name, position=excluded.position, email=excluded.email,
+           phone=excluded.phone, active=excluded.active,
+           badge_epc=COALESCE(excluded.badge_epc, staff.badge_epc),
+           badge_tid=excluded.badge_tid, badge_tagged_at=excluded.badge_tagged_at,
+           updated_at=excluded.updated_at, sync_state='synced'`,
+      )
+      .run(
+        serverId,
+        cleanText(remote.staffNumber, 80).toUpperCase() || serverId.slice(0, 8),
+        cleanText(remote.name || remote.staffNumber, 240),
+        cleanText(remote.position, 120),
+        cleanText(remote.email, 240),
+        cleanText(remote.phone, 80),
+        remote.active === false ? 0 : 1,
+        badgeEpc ?? generateBadgeEpc(),
+        badgeTid,
+        cleanText(remote.badgeTaggedAt, 100) || null,
+        cleanText(remote.createdAt, 100) || now,
+        cleanText(remote.updatedAt, 100) || now,
+      );
+  }
+
+  applyRemoteGateDay(change, serverId) {
+    if (change.operation === "delete") {
+      this.db.prepare("DELETE FROM gate_days WHERE server_id=?").run(serverId);
+      return;
+    }
+    const remote = change.gateDay;
+    if (!remote || !/^\d{4}-\d{2}-\d{2}$/.test(remote.day || "")) return;
+    this.db
+      .prepare(
+        `INSERT INTO gate_days (server_id, gate_id, gate_name, day, entries, exits, alarms, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(server_id) DO UPDATE SET gate_name=excluded.gate_name,
+           entries=excluded.entries, exits=excluded.exits, alarms=excluded.alarms,
+           updated_at=excluded.updated_at`,
+      )
+      .run(
+        serverId,
+        cleanText(remote.gateId, 120),
+        cleanText(remote.gateName, 120),
+        remote.day,
+        Math.max(0, Number(remote.entries) || 0),
+        Math.max(0, Number(remote.exits) || 0),
+        Math.max(0, Number(remote.alarms) || 0),
+        cleanText(remote.updatedAt, 100) || new Date().toISOString(),
+      );
+  }
+
+  applyRemoteStaffPassage(change, serverId) {
+    if (change.operation === "delete") {
+      this.db
+        .prepare("DELETE FROM staff_passages WHERE server_id=?")
+        .run(serverId);
+      return;
+    }
+    const remote = change.staffPassage;
+    if (!remote || !["in", "out"].includes(remote.direction)) return;
+    this.db
+      .prepare(
+        `INSERT INTO staff_passages (server_id, staff_server_id, staff_number, staff_name,
+           direction, passed_at, gate_id, gate_name)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(server_id) DO UPDATE SET staff_server_id=excluded.staff_server_id,
+           staff_number=excluded.staff_number, staff_name=excluded.staff_name,
+           direction=excluded.direction, passed_at=excluded.passed_at,
+           gate_id=excluded.gate_id, gate_name=excluded.gate_name`,
+      )
+      .run(
+        serverId,
+        cleanText(remote.staffServerId, 120),
+        cleanText(remote.staffNumber, 80),
+        cleanText(remote.staffName, 240),
+        remote.direction,
+        cleanText(remote.passedAt, 100) || new Date().toISOString(),
+        cleanText(remote.gateId, 120),
+        cleanText(remote.gateName, 120),
       );
   }
 

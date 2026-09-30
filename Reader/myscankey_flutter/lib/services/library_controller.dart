@@ -8,6 +8,8 @@ import '../models/book.dart';
 import '../models/lending.dart';
 import '../models/user.dart';
 import 'desk_reader_service.dart';
+import 'gate_controller.dart';
+import 'gate_reader_service.dart';
 import 'kiosk_controller.dart';
 import 'locator_signal.dart';
 import 'reader_service.dart';
@@ -18,10 +20,12 @@ class LibraryController extends ChangeNotifier {
     LibraryDatabase? database,
     ReaderService? reader,
     DeskReaderService? deskReader,
+    GateReaderService? gateReader,
   }) : database = database ?? LibraryDatabase.instance,
        reader = reader ?? ReaderService() {
     sync = SyncService(this.database);
     kiosk = KioskController(this, reader: deskReader);
+    gate = GateController(this, reader: gateReader);
     sync.addListener(_onSyncChanged);
     _tagSubscription = this.reader.tags.listen(_onTag, onError: _onReaderError);
     _nativeKeySubscription = this.reader.nativeRfidKeyEvents.listen(
@@ -34,6 +38,7 @@ class LibraryController extends ChangeNotifier {
   final ReaderService reader;
   late final SyncService sync;
   late final KioskController kiosk;
+  late final GateController gate;
   final Map<String, ReaderTag> _observed = {};
   final Map<String, ReaderTag> _stationSessionTags = {};
   final Map<String, Book?> _recognized = {};
@@ -54,8 +59,8 @@ class LibraryController extends ChangeNotifier {
   final LocatorSignalTracker locatorSignal = LocatorSignalTracker();
 
   /// Rôle de l'appareil choisi à la première ouverture : `kiosk` (poste
-  /// d'emprunt) ou `mobile` (lecteur mobile). `null` tant qu'il n'est pas
-  /// choisi.
+  /// d'emprunt), `mobile` (lecteur mobile) ou `gate` (portail antivol).
+  /// `null` tant qu'il n'est pas choisi.
   String? deviceRole;
   bool initialized = false;
 
@@ -147,13 +152,14 @@ class LibraryController extends ChangeNotifier {
     inventoryPower = settings.getInt('rfid_inventory_power') ?? 20;
     await sync.initialize();
     await kiosk.initialize();
+    await gate.initialize();
     hasAccounts = await database.countUsers() > 0;
     await Future.wait([refreshDashboard(), loadBooks(), loadActivity()]);
     initialized = true;
     notifyListeners();
   }
 
-  static const deviceRoles = ['kiosk', 'mobile'];
+  static const deviceRoles = ['kiosk', 'mobile', 'gate'];
   static const _maxFailedSignIns = 5;
   static const _signInLockDuration = Duration(seconds: 30);
 
@@ -239,13 +245,11 @@ class LibraryController extends ChangeNotifier {
       await settings.remove('device_role');
     } else {
       await settings.setString('device_role', role);
-      await database.addActivity(
-        'connexion',
-        'succes',
-        role == 'kiosk'
-            ? 'Appareil configuré en poste d’emprunt'
-            : 'Appareil configuré en lecteur mobile',
-      );
+      await database.addActivity('connexion', 'succes', switch (role) {
+        'kiosk' => 'Appareil configuré en poste d’emprunt',
+        'gate' => 'Appareil configuré en portail antivol',
+        _ => 'Appareil configuré en lecteur mobile',
+      });
     }
     deviceRole = role;
     notifyListeners();
@@ -1067,6 +1071,7 @@ class LibraryController extends ChangeNotifier {
     sync.removeListener(_onSyncChanged);
     sync.dispose();
     kiosk.dispose();
+    gate.dispose();
     unawaited(reader.dispose());
     super.dispose();
   }

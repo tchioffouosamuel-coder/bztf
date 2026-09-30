@@ -37,9 +37,8 @@ class _SyncSettingsCardState extends State<SyncSettingsCard> {
     super.dispose();
   }
 
-  void _message(String text) => ScaffoldMessenger.of(
-    context,
-  ).showSnackBar(SnackBar(content: Text(text)));
+  void _message(String text) =>
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(text)));
 
   Future<void> _saveSync() async {
     setState(() => _saving = true);

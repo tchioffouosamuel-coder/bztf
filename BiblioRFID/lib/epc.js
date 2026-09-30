@@ -2,6 +2,7 @@ import { randomBytes } from "node:crypto";
 
 const PREFIX_HEX = "42434D01"; // ASCII "BCM" + format version 1
 const CARD_PREFIX_HEX = "42434D02"; // ASCII "BCM" + format 2 : carte d'abonné
+const BADGE_PREFIX_HEX = "42434D03"; // ASCII "BCM" + format 3 : badge du personnel
 
 export function crc16Ccitt(buffer) {
   let crc = 0xffff;
@@ -35,9 +36,18 @@ export function generateEpc(year, sequence) {
  * un identifiant local) évite les collisions entre postes synchronisés.
  */
 export function generateCardEpc(random = randomBytes(6)) {
+  return randomEpc(CARD_PREFIX_HEX, random);
+}
+
+/** EPC de badge du personnel : même construction, préfixe « BCM » 3. */
+export function generateBadgeEpc(random = randomBytes(6)) {
+  return randomEpc(BADGE_PREFIX_HEX, random);
+}
+
+function randomEpc(prefix, random) {
   if (!Buffer.isBuffer(random) || random.length !== 6)
     throw new Error("Aléa de carte invalide");
-  const payload = Buffer.concat([Buffer.from(CARD_PREFIX_HEX, "hex"), random]);
+  const payload = Buffer.concat([Buffer.from(prefix, "hex"), random]);
   const crc = crc16Ccitt(payload);
   return `${payload.toString("hex")}${crc.toString(16).padStart(4, "0")}`.toUpperCase();
 }
@@ -59,4 +69,8 @@ export function isValidEpc(value) {
 
 export function isCardEpc(value) {
   return hasPrefixAndCrc(value, CARD_PREFIX_HEX);
+}
+
+export function isBadgeEpc(value) {
+  return hasPrefixAndCrc(value, BADGE_PREFIX_HEX);
 }

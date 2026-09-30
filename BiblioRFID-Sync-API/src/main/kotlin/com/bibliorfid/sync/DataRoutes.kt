@@ -120,6 +120,43 @@ fun Route.dataRoutes(data: DataQueries, keys: ApiKeys, defaultLimit: Int = 100) 
         )
     }
 
+    get("/staff") {
+        if (!call.readable()) return@get
+        val q = call.query()
+        call.respondPage(
+            data.staff(q.text("search"), q.bool("active"), q.bool("hasBadge"), q.text("updatedSince"), q.paging(null)),
+        )
+    }
+    get("/staff/{serverId}") {
+        if (!call.readable()) return@get
+        call.respondFound(data.staffMember(call.parameters["serverId"].orEmpty()), "Membre du personnel")
+    }
+    get("/staff/{serverId}/passages") {
+        if (!call.readable()) return@get
+        val q = call.query()
+        call.respondPage(
+            data.staffPassages(
+                call.parameters["serverId"], q.text("gateId"), q.text("direction"),
+                q.text("from"), q.text("to"), q.paging(defaultLimit),
+            ),
+        )
+    }
+    get("/staff-passages") {
+        if (!call.readable()) return@get
+        val q = call.query()
+        call.respondPage(
+            data.staffPassages(
+                q.text("staffServerId"), q.text("gateId"), q.text("direction"),
+                q.text("from"), q.text("to"), q.paging(defaultLimit),
+            ),
+        )
+    }
+    get("/gate-days") {
+        if (!call.readable()) return@get
+        val q = call.query()
+        call.respondPage(data.gateDays(q.text("gateId"), q.text("from"), q.text("to"), q.paging(null)))
+    }
+
     get("/devices") {
         if (!call.readable()) return@get
         call.respondPage(data.devices(call.query().paging(null)))

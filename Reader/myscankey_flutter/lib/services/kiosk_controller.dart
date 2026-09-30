@@ -73,12 +73,9 @@ class KioskController extends ChangeNotifier {
   static const sessionTimeout = Duration(seconds: 90);
   static const receiptDuration = Duration(seconds: 20);
 
-  /// Anti-rebond, mêmes valeurs que le poste Windows : un tag est absent
-  /// après 700 ms sans lecture, puis retiré après 1,5 s de confirmation.
-  /// Une disparition plus brève ne relance ni session, ni bip.
-  static const presenceTimeout = Duration(milliseconds: 700);
-  static const releaseDelay = Duration(milliseconds: 1500);
-  static const _releaseAfter = Duration(milliseconds: 2200);
+  /// Anti-rebond par défaut, mêmes valeurs que le poste Windows.
+  static const defaultPresenceMs = 700;
+  static const defaultReleaseMs = 1500;
 
   /// Les tags détectés dans cet intervalle sont annoncés par un seul bip.
   static const _beepGrouping = Duration(milliseconds: 140);
@@ -101,6 +98,14 @@ class KioskController extends ChangeNotifier {
 
   /// Délai après le retrait d'un tag avant qu'il puisse bipper de nouveau.
   int beepRearmSeconds = 5;
+
+  /// Anti-rebond : un tag est absent après [presenceMs] sans lecture, puis
+  /// retiré après [releaseMs] de confirmation. Une disparition plus brève
+  /// ne relance ni session, ni bip.
+  int presenceMs = defaultPresenceMs;
+  int releaseMs = defaultReleaseMs;
+
+  Duration get _releaseAfter => Duration(milliseconds: presenceMs + releaseMs);
   String _pinHash = _hash(defaultPin);
 
   // État du poste.
@@ -206,6 +211,8 @@ class KioskController extends ChangeNotifier {
     final source = settings.getString('kiosk_beep_source');
     beepSource = beepSources.contains(source) ? source! : 'reader';
     beepRearmSeconds = settings.getInt('kiosk_beep_rearm') ?? 5;
+    presenceMs = settings.getInt('kiosk_presence_ms') ?? defaultPresenceMs;
+    releaseMs = settings.getInt('kiosk_release_ms') ?? defaultReleaseMs;
     _pinHash = settings.getString('kiosk_pin_hash') ?? _hash(defaultPin);
     notifyListeners();
   }
@@ -275,6 +282,8 @@ class KioskController extends ChangeNotifier {
   Future<void> configureFeedback({
     required String nextSource,
     required int nextRearmSeconds,
+    int? nextPresenceMs,
+    int? nextReleaseMs,
   }) async {
     if (!beepSources.contains(nextSource)) {
       throw ArgumentError('Source de bip inconnue.');
@@ -282,11 +291,23 @@ class KioskController extends ChangeNotifier {
     if (nextRearmSeconds < 1 || nextRearmSeconds > 600) {
       throw RangeError.range(nextRearmSeconds, 1, 600, 'secondes');
     }
+    final presence = nextPresenceMs ?? presenceMs;
+    final release = nextReleaseMs ?? releaseMs;
+    if (presence < 100 || presence > 5000) {
+      throw RangeError.range(presence, 100, 5000, 'délai d’absence (ms)');
+    }
+    if (release < 0 || release > 10000) {
+      throw RangeError.range(release, 0, 10000, 'confirmation du retrait (ms)');
+    }
     beepSource = nextSource;
     beepRearmSeconds = nextRearmSeconds;
+    presenceMs = presence;
+    releaseMs = release;
     final settings = await SharedPreferences.getInstance();
     await settings.setString('kiosk_beep_source', beepSource);
     await settings.setInt('kiosk_beep_rearm', beepRearmSeconds);
+    await settings.setInt('kiosk_presence_ms', presenceMs);
+    await settings.setInt('kiosk_release_ms', releaseMs);
     notifyListeners();
   }
 
@@ -367,6 +388,11 @@ class KioskController extends ChangeNotifier {
         throw StateError('Ce tag est déjà la carte de ${owner.name}.');
       }
       // Encodé sur un autre appareil et pas encore synchronisé ici.
+      if (isBadgeEpc(tag.epc)) {
+        throw StateError(
+          'Ce tag est un badge du personnel. Utilisez une carte vierge.',
+        );
+      }
       if (isValidEpc(tag.epc)) {
         throw StateError(
           'Ce tag est un livre encodé sur un autre appareil. '
@@ -473,6 +499,8 @@ class KioskController extends ChangeNotifier {
   Future<void> _onTag(ReaderTag tag) async {
     final epc = tag.epc.trim().toUpperCase();
     if (epc.isEmpty || epc == ReaderService.emptyEpc) return;
+    // Badge du personnel : ni carte ni livre, ignoré par le poste.
+    if (isBadgeEpc(epc)) return;
     final now = DateTime.now();
     // La présence est suivie même pendant un reçu ou un traitement : c'est
     // elle qui mesure le retrait réel du tag.
@@ -491,8 +519,13 @@ class KioskController extends ChangeNotifier {
     if (_seen.contains(epc) || _pending.contains(epc)) return;
     _pending.add(epc);
     var session = _session;
+    final timer = Stopwatch()..start();
     try {
-      final card = await library.database.cardForTag(epc, tag.tid);
+      // Le format de l'EPC dit s'il s'agit d'une carte : un livre évite la
+      // recherche d'abonné.
+      final card = isCardEpc(epc)
+          ? await library.database.cardForTag(epc, tag.tid)
+          : null;
       if (session != _session) return;
       if (card != null) {
         if (_idle) {
@@ -528,6 +561,10 @@ class KioskController extends ChangeNotifier {
       _seen.add(epc);
       _restartIdleTimer();
       _announce(epc);
+      debugPrint(
+        'Poste : livre ${book.accession} pris en compte en '
+        '${timer.elapsedMilliseconds} ms (RSSI ${tag.rssi}).',
+      );
     } catch (error) {
       notice = _describe(error);
     } finally {

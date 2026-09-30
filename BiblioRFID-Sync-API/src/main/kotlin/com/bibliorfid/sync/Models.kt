@@ -72,18 +72,75 @@ data class SyncLoan(
     val revision: Long = 0,
 )
 
+/**
+ * Membre du personnel (identifiant global UUID). Son badge RFID (EPC
+ * « BCM » 3) est distinct des livres et des cartes d'abonné.
+ */
+@Serializable
+data class SyncStaff(
+    val serverId: String,
+    val staffNumber: String,
+    val name: String,
+    val position: String = "",
+    val email: String = "",
+    val phone: String = "",
+    val active: Boolean = true,
+    val badgeEpc: String? = null,
+    val badgeTid: String? = null,
+    val badgeTaggedAt: String? = null,
+    val createdAt: String,
+    val updatedAt: String,
+    val revision: Long = 0,
+)
+
+/**
+ * Compteurs d'un portail antivol pour un jour (date locale du portail).
+ * Identifiant : `<gateId>:<AAAA-MM-JJ>`. Seul le portail les écrit.
+ */
+@Serializable
+data class SyncGateDay(
+    val serverId: String,
+    val gateId: String,
+    val gateName: String = "",
+    val day: String,
+    val entries: Int = 0,
+    val exits: Int = 0,
+    val alarms: Int = 0,
+    val updatedAt: String,
+    val revision: Long = 0,
+)
+
+/** Passage d'un membre du personnel au portail (identifiant global UUID). */
+@Serializable
+data class SyncStaffPassage(
+    val serverId: String,
+    val staffServerId: String,
+    val staffNumber: String = "",
+    val staffName: String = "",
+    /** `in` (entrée) ou `out` (sortie). */
+    val direction: String,
+    val passedAt: String,
+    val gateId: String = "",
+    val gateName: String = "",
+    val createdAt: String,
+    val revision: Long = 0,
+)
+
 object EntityType {
     const val BOOK = "book"
     const val SUBSCRIBER = "subscriber"
     const val SUBSCRIPTION = "subscription"
     const val LOAN = "loan"
+    const val STAFF = "staff"
+    const val GATE_DAY = "gate_day"
+    const val STAFF_PASSAGE = "staff_passage"
 
     /** Ordre d'application : les références avant ce qui les utilise. */
     fun priority(type: String): Int = when (type) {
         BOOK -> 0
-        SUBSCRIBER -> 1
+        SUBSCRIBER, STAFF -> 1
         SUBSCRIPTION -> 2
-        LOAN -> 3
+        LOAN, STAFF_PASSAGE, GATE_DAY -> 3
         else -> 4
     }
 }
@@ -98,6 +155,9 @@ data class Mutation(
     val subscriber: SyncSubscriber? = null,
     val subscription: SyncSubscription? = null,
     val loan: SyncLoan? = null,
+    val staff: SyncStaff? = null,
+    val gateDay: SyncGateDay? = null,
+    val staffPassage: SyncStaffPassage? = null,
 )
 
 @Serializable
@@ -119,6 +179,9 @@ data class Change(
     val subscriber: SyncSubscriber? = null,
     val subscription: SyncSubscription? = null,
     val loan: SyncLoan? = null,
+    val staff: SyncStaff? = null,
+    val gateDay: SyncGateDay? = null,
+    val staffPassage: SyncStaffPassage? = null,
     val deviceId: String,
     val createdAt: String,
 )

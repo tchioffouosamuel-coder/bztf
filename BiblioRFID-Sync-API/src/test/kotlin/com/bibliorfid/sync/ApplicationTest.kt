@@ -184,6 +184,72 @@ class ApplicationTest {
     }
 
     @Test
+    fun `staff badges and gate activity are synchronized`() = testApplication {
+        val store = SyncStore("jdbc:sqlite::memory:", wireJsonForTests)
+        application { module(store, "secret") }
+        val client = createClient { install(ContentNegotiation) { json(wireJsonForTests) } }
+        val now = "2026-09-30T07:00:00Z"
+        suspend fun push(device: String, vararg mutations: Mutation) =
+            client.post("/api/v1/sync/push") {
+                header("X-Device-Key", "secret")
+                header(HttpHeaders.ContentType, ContentType.Application.Json)
+                setBody(PushRequest(device, mutations.toList()))
+            }
+        val alice = SyncStaff(
+            serverId = "staff-1",
+            staffNumber = "p-01",
+            name = "Alice",
+            position = "Bibliothécaire",
+            badgeEpc = "42434D03A1B2C3D4E5F60000",
+            badgeTid = "e2800000badge",
+            badgeTaggedAt = now,
+            createdAt = now,
+            updatedAt = now,
+        )
+        assertEquals(
+            HttpStatusCode.OK,
+            push("desk", Mutation("s-1", "upsert", "staff-1", entityType = EntityType.STAFF, staff = alice)).status,
+        )
+        // Le même badge est réencodé pour Bruno : Alice le perd.
+        val bruno = alice.copy(serverId = "staff-2", staffNumber = "P-02", name = "Bruno", badgeEpc = "42434D03FFEEDDCCBBAA0000")
+        push("desk", Mutation("s-2", "upsert", "staff-2", entityType = EntityType.STAFF, staff = bruno))
+        val staff = client.get("/api/v1/staff") { header("X-Device-Key", "secret") }.body<List<SyncStaff>>()
+        assertEquals(listOf("Alice" to null, "Bruno" to "E2800000BADGE"), staff.map { it.name to it.badgeTid })
+        assertEquals("P-01", staff.first().staffNumber)
+
+        val day = SyncGateDay(serverId = "", gateId = "gate-1", gateName = "Entrée", day = "2026-09-30", entries = 12, exits = 9, alarms = 1, updatedAt = now)
+        push("gate-1", Mutation("g-1", "upsert", "gate-1:2026-09-30", entityType = EntityType.GATE_DAY, gateDay = day))
+        // Un portail réinstallé repart de zéro : les compteurs déjà reçus restent.
+        push("gate-1", Mutation("g-2", "upsert", "gate-1:2026-09-30", entityType = EntityType.GATE_DAY, gateDay = day.copy(entries = 2, exits = 10, alarms = 0)))
+        val days = client.get("/api/v1/gate-days?from=2026-09-01") { header("X-Device-Key", "secret") }.body<List<SyncGateDay>>()
+        assertEquals(listOf(Triple(12, 10, 1)), days.map { Triple(it.entries, it.exits, it.alarms) })
+        assertEquals("gate-1:2026-09-30", days.single().serverId)
+
+        val passage = SyncStaffPassage(
+            serverId = "pass-1", staffServerId = "staff-2", staffNumber = "P-02", staffName = "Bruno",
+            direction = "in", passedAt = now, gateId = "gate-1", gateName = "Entrée", createdAt = now,
+        )
+        push("gate-1", Mutation("p-1", "upsert", "pass-1", entityType = EntityType.STAFF_PASSAGE, staffPassage = passage))
+        assertEquals(
+            HttpStatusCode.BadRequest,
+            push("gate-1", Mutation("p-2", "upsert", "pass-2", entityType = EntityType.STAFF_PASSAGE, staffPassage = passage.copy(serverId = "pass-2", direction = "sideways"))).status,
+        )
+        val passages = client.get("/api/v1/staff/staff-2/passages") { header("X-Device-Key", "secret") }.body<List<SyncStaffPassage>>()
+        assertEquals(listOf("in"), passages.map { it.direction })
+
+        val pull = client.get("/api/v1/sync?since=0") { header("X-Device-Key", "secret") }.body<PullResponse>()
+        assertEquals(
+            listOf(EntityType.STAFF, EntityType.STAFF, EntityType.STAFF, EntityType.GATE_DAY, EntityType.GATE_DAY, EntityType.STAFF_PASSAGE),
+            pull.changes.map { it.entityType },
+        )
+        assertEquals("Bruno", pull.changes.last().staffPassage?.staffName)
+        assertEquals(12, pull.changes[4].gateDay?.entries)
+        val history = client.get("/api/v1/history?entityType=staff_passage") { header("X-Device-Key", "secret") }
+            .body<List<HistoryEntry>>()
+        assertEquals("pass-1", history.single().change.staffPassage?.serverId)
+    }
+
+    @Test
     fun `private routes reject invalid keys`() = testApplication {
         val store = SyncStore("jdbc:sqlite::memory:", wireJsonForTests)
         application { module(store, "secret") }

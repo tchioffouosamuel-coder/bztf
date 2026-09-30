@@ -123,14 +123,11 @@ class DeskReaderService {
     int? power,
   }) async {
     final seen = <String, ReaderTag>{};
-    final subscription = tags.listen(
-      (tag) {
-        final known = seen[tag.epc];
-        // Garde la remontée qui fournit un TID.
-        if (known == null || known.tid.isEmpty) seen[tag.epc] = tag;
-      },
-      onError: (_) {},
-    );
+    final subscription = tags.listen((tag) {
+      final known = seen[tag.epc];
+      // Garde la remontée qui fournit un TID.
+      if (known == null || known.tid.isEmpty) seen[tag.epc] = tag;
+    }, onError: (_) {});
     try {
       if (!reading) await startInventory(power: power);
       await Future<void>.delayed(duration);

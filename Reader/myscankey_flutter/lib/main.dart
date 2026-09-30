@@ -5,6 +5,7 @@ import 'package:intl/date_symbol_data_local.dart';
 
 import 'app.dart';
 import 'screens/device_role_screen.dart';
+import 'screens/gate_screen.dart';
 import 'screens/kiosk_screen.dart';
 import 'screens/login_screen.dart';
 import 'services/library_controller.dart';
@@ -105,6 +106,7 @@ class _BiblioRfidAppState extends State<BiblioRfidApp> {
                 controller: widget.controller,
                 asHome: true,
               ),
+              'gate' => GateScreen(controller: widget.controller, asHome: true),
               _ => BiblioShell(controller: widget.controller),
             },
     ),

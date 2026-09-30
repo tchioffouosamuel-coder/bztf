@@ -51,6 +51,7 @@ class MainActivity : FlutterActivity() {
 	private val tidAttemptAt = ConcurrentHashMap<String, Long>()
 	private val tagEventAt = ConcurrentHashMap<String, Long>()
 	private var deskReader: DeskReaderBridge? = null
+	private var gate: GateBridge? = null
 
 	override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
 		super.configureFlutterEngine(flutterEngine)
@@ -68,6 +69,20 @@ class MainActivity : FlutterActivity() {
 			}
 		} catch (error: Throwable) {
 			Log.e("BiblioRFID", "Desk reader bridge unavailable", error)
+			null
+		}
+		// Portail antivol N01 : même garde, son SDK ne doit jamais bloquer le
+		// démarrage de l'application.
+		gate = try {
+			GateBridge(flutterEngine.dartExecutor.binaryMessenger, applicationContext, mainHandler) { enabled ->
+				if (enabled) {
+					window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+				} else {
+					window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+				}
+			}
+		} catch (error: Throwable) {
+			Log.e("BiblioRFID", "Gate bridge unavailable", error)
 			null
 		}
 		MethodChannel(flutterEngine.dartExecutor.binaryMessenger, methodChannelName)
@@ -563,6 +578,8 @@ class MainActivity : FlutterActivity() {
 		closeReader()
 		runCatching { deskReader?.dispose() }
 		deskReader = null
+		runCatching { gate?.dispose() }
+		gate = null
 		executor.shutdownNow()
 		soundPool?.release()
 		soundPool = null

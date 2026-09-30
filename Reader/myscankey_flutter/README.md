@@ -43,8 +43,27 @@ Après la première connexion, l’application demande le rôle de l’appareil 
 
 - **Poste d’emprunt** : tablette fixe reliée au lecteur RFID de bureau. L’application s’ouvre directement sur le poste en libre-service ; seul le code administrateur permet d’en sortir.
 - **Lecteur mobile** : terminal du personnel (catalogue, station, inventaire, localisation, prêts au comptoir).
+- **Portail antivol** : tablette reliée au portail RFID N01 de la sortie. L’application s’ouvre en plein écran sur la surveillance ; seul le code administrateur permet d’en sortir.
 
-Le rôle se change ensuite dans le terminal admin (onglet *Poste*).
+Le rôle se change ensuite dans le terminal admin (onglet *Poste*, bouton *Changer*).
+
+## Portail antivol
+
+Le portail utilise le SDK « N01RFID » (`android/app/libs/N01_1.3.1.6.jar`) via `GateBridge.kt` :
+
+- **TCP/IP** : adresse IP seule, le SDK impose le port **8080** ;
+- **Série RS232** : `dev/ttyS5` (115 200 bauds imposés par le SDK) ;
+- **Simulation** : barre de test (entrée, sortie, livre, badge du personnel).
+
+Fonctions :
+
+- **Alarme antivol** : un livre signé « BCM » qui passe sans emprunt en cours déclenche le message vocal *« Attention ! Ne sortez pas avec un livre non emprunté. Redirigez-vous vers le poste d’emprunt. Si vous avez des difficultés, allez au poste d’emprunt assisté. »* sur fond de sirène douce, joué par la tablette (flux « alarme », volume réglable), et allume le voyant rouge du portail (GPO1). **Le buzzer du portail n’est jamais utilisé** : à la connexion, l’application le retire des sorties que le portail déclenche seul (indicateur de lecture et GPO après lecture). L’écran affiche le livre en cause ; l’alarme s’arrête seule ou avec le code administrateur. Un livre resté près du portail ne réalarme qu’après un délai d’absence réglable. Livres empruntés, cartes d’abonné et badges ne déclenchent rien.
+- **Entrées et sorties du jour** : comptées d’après l’ordre de coupure des deux barrières infrarouges (entrées GPI) : extérieure puis intérieure = entrée. Le terminal admin affiche l’état des barrières en direct et permet d’inverser le sens. Les compteurs (entrées, sorties, alarmes) sont synchronisés par jour et par portail.
+- **Personnel** : un badge du personnel (EPC « BCM » 3, encodé sur le poste Windows, module *Personnel*) enregistre une entrée ou une sortie. Le sens vient des barrières quand une coupure est mesurée autour de la lecture ; sans barrière, les passages alternent (premier passage du jour = entrée). Les passages sont synchronisés vers Windows.
+
+Le message d’alarme (`android/app/src/main/res/raw/gate_alarm.wav`) se régénère avec `tool/gate_alarm/generate.ps1` (voix Windows fr-FR, Python et numpy).
+
+À valider sur site avec le portail réel : sens des barrières (bouton *Inverser*), puissance des antennes (ne pas lire les livres rangés à proximité) et coupure effective du buzzer (un avertissement s’affiche si le portail la refuse).
 
 ## Poste d’emprunt
 

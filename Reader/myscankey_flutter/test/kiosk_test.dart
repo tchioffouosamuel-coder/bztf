@@ -621,6 +621,57 @@ void main() {
     }
   });
 
+  test('délais d’anti-rebond réglables et enregistrés', () async {
+    final database = LibraryDatabase.instance;
+    final member = await _subscriberWithCard(database, 'ab-1', 'A001');
+    await database.renewSubscription(
+      member.id,
+      DateTime.now().add(const Duration(days: 365)),
+    );
+    final book = await _taggedBook(database, 'Premier', 'B001');
+    final desk = _FakeDeskReader();
+    final controller = LibraryController(
+      database: database,
+      reader: _SilentReader(),
+      deskReader: desk,
+    );
+    final kiosk = controller.kiosk..transport = 'simulation';
+    try {
+      expect(kiosk.presenceMs, KioskController.defaultPresenceMs);
+      expect(kiosk.releaseMs, KioskController.defaultReleaseMs);
+      await expectLater(
+        kiosk.configureFeedback(
+          nextSource: 'reader',
+          nextRearmSeconds: 1,
+          nextPresenceMs: 50,
+        ),
+        throwsRangeError,
+      );
+      await kiosk.configureFeedback(
+        nextSource: 'reader',
+        nextRearmSeconds: 1,
+        nextPresenceMs: 200,
+        nextReleaseMs: 0,
+      );
+      final settings = await SharedPreferences.getInstance();
+      expect(settings.getInt('kiosk_presence_ms'), 200);
+      expect(settings.getInt('kiosk_release_ms'), 0);
+
+      // Avec 200 ms d'absence, un livre retiré puis reposé après 400 ms
+      // ouvre une nouvelle session (au lieu d'attendre 2,2 s).
+      await kiosk.enter();
+      desk.emit(_bookTag(book));
+      await _until(() => kiosk.items.length == 1);
+      kiosk.cancelSession();
+      await Future<void>.delayed(const Duration(milliseconds: 400));
+      desk.emit(_bookTag(book));
+      await _until(() => kiosk.items.length == 1);
+      expect(kiosk.stage, KioskStage.borrow);
+    } finally {
+      controller.dispose();
+    }
+  });
+
   test('le type d’appareil est mémorisé', () async {
     final controller = LibraryController(
       database: LibraryDatabase.instance,

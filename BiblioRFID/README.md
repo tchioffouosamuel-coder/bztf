@@ -31,6 +31,18 @@ npm run build:desktop
 
 L’exécutable portable est produit dans `dist-desktop`.
 
+## Personnel et portail antivol
+
+- **Personnel** : fiche (matricule, nom, fonction, contact) et **encodage du badge** RFID
+  comme pour une carte d’abonné (un seul tag posé, écriture vérifiée par relecture du
+  TID). Le badge a son propre format EPC « BCM » 3 : il n’est jamais pris pour un livre
+  ni pour une carte, et un tag déjà livre, carte ou badge d’un autre est refusé. Un
+  membre désactivé n’est plus reconnu au portail.
+- **Portail antivol** : entrées, sorties et alarmes du jour (ou d’un jour choisi),
+  passages du personnel, présence (arrivée, dernier passage, présent/parti) et
+  fréquentation des 30 derniers jours. Ces données viennent des portails (application
+  Android, rôle « Portail antivol ») par la synchronisation.
+
 ## Synchronisation distante
 
 La version desktop partage désormais son catalogue avec l’application mobile par

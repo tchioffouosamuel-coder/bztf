@@ -179,6 +179,49 @@ class SyncStore(databaseUrl: String, private val json: Json) : Closeable {
                 """.trimIndent(),
             )
             statement.executeUpdate("CREATE INDEX IF NOT EXISTS idx_activity_created ON activity(created_at)")
+            // Personnel et portails antivol : charge utile JSON, comme les
+            // abonnements et les emprunts.
+            statement.executeUpdate(
+                """
+                CREATE TABLE IF NOT EXISTS staff (
+                    server_id TEXT PRIMARY KEY,
+                    badge_tid TEXT,
+                    payload TEXT NOT NULL,
+                    revision INTEGER NOT NULL,
+                    deleted INTEGER NOT NULL DEFAULT 0
+                )
+                """.trimIndent(),
+            )
+            statement.executeUpdate("CREATE INDEX IF NOT EXISTS idx_staff_badge_tid ON staff(badge_tid)")
+            statement.executeUpdate(
+                """
+                CREATE TABLE IF NOT EXISTS gate_days (
+                    server_id TEXT PRIMARY KEY,
+                    gate_id TEXT NOT NULL,
+                    day TEXT NOT NULL,
+                    payload TEXT NOT NULL,
+                    revision INTEGER NOT NULL,
+                    deleted INTEGER NOT NULL DEFAULT 0
+                )
+                """.trimIndent(),
+            )
+            statement.executeUpdate("CREATE INDEX IF NOT EXISTS idx_gate_days_day ON gate_days(day)")
+            statement.executeUpdate(
+                """
+                CREATE TABLE IF NOT EXISTS staff_passages (
+                    server_id TEXT PRIMARY KEY,
+                    staff_server_id TEXT NOT NULL,
+                    passed_at TEXT NOT NULL,
+                    payload TEXT NOT NULL,
+                    revision INTEGER NOT NULL,
+                    deleted INTEGER NOT NULL DEFAULT 0
+                )
+                """.trimIndent(),
+            )
+            statement.executeUpdate(
+                "CREATE INDEX IF NOT EXISTS idx_staff_passages_staff ON staff_passages(staff_server_id, passed_at)",
+            )
+            statement.executeUpdate("CREATE INDEX IF NOT EXISTS idx_staff_passages_at ON staff_passages(passed_at)")
         }
     }
 
@@ -265,6 +308,25 @@ class SyncStore(databaseUrl: String, private val json: Json) : Closeable {
                         request.deviceId,
                     )
                     EntityType.LOAN to "delete" -> deleteRecord("loans", mutation.entityId, request.deviceId, EntityType.LOAN)
+                    EntityType.STAFF to "upsert" -> upsertStaff(
+                        requireNotNull(mutation.staff) { "Le membre du personnel est obligatoire pour un upsert." },
+                        request.deviceId,
+                    )
+                    EntityType.STAFF to "delete" -> deleteRecord("staff", mutation.entityId, request.deviceId, EntityType.STAFF)
+                    EntityType.GATE_DAY to "upsert" -> upsertGateDay(
+                        requireNotNull(mutation.gateDay) { "Les compteurs du portail sont obligatoires pour un upsert." },
+                        request.deviceId,
+                    )
+                    EntityType.STAFF_PASSAGE to "upsert" -> upsertStaffPassage(
+                        requireNotNull(mutation.staffPassage) { "Le passage est obligatoire pour un upsert." },
+                        request.deviceId,
+                    )
+                    EntityType.STAFF_PASSAGE to "delete" -> deleteRecord(
+                        "staff_passages",
+                        mutation.entityId,
+                        request.deviceId,
+                        EntityType.STAFF_PASSAGE,
+                    )
                     else -> throw IllegalArgumentException(
                         "Opération inconnue : ${mutation.entityType}/${mutation.operation}",
                     )
@@ -298,31 +360,35 @@ class SyncStore(databaseUrl: String, private val json: Json) : Closeable {
             statement.setLong(1, since.coerceAtLeast(0))
             statement.setInt(2, limit.coerceIn(1, 1000) + 1)
             statement.executeQuery().use { rows ->
-                while (rows.next()) {
-                    val payload = rows.getString("payload")
-                    val entityType = rows.getString("entity_type")
-                    changes += Change(
-                        sequence = rows.getLong("sequence"),
-                        operation = rows.getString("operation"),
-                        entityId = rows.getString("entity_id"),
-                        entityType = entityType,
-                        book = payload?.takeIf { entityType == EntityType.BOOK }
-                            ?.let { json.decodeFromString<SyncBook>(it) },
-                        subscriber = payload?.takeIf { entityType == EntityType.SUBSCRIBER }
-                            ?.let { json.decodeFromString<SyncSubscriber>(it) },
-                        subscription = payload?.takeIf { entityType == EntityType.SUBSCRIPTION }
-                            ?.let { json.decodeFromString<SyncSubscription>(it) },
-                        loan = payload?.takeIf { entityType == EntityType.LOAN }
-                            ?.let { json.decodeFromString<SyncLoan>(it) },
-                        deviceId = rows.getString("device_id"),
-                        createdAt = rows.getString("created_at"),
-                    )
-                }
+                while (rows.next()) changes += readChange(rows)
             }
         }
         val hasMore = changes.size > limit
         val page = if (hasMore) changes.take(limit) else changes
         return PullResponse(page.lastOrNull()?.sequence ?: since, page, hasMore)
+    }
+
+    /** Changement d'une ligne de `events`, charge utile décodée selon son type. */
+    internal fun readChange(rows: java.sql.ResultSet): Change {
+        val payload = rows.getString("payload")
+        val type = rows.getString("entity_type")
+        fun <T> decode(expected: String, read: (String) -> T): T? =
+            payload?.takeIf { type == expected }?.let(read)
+        return Change(
+            sequence = rows.getLong("sequence"),
+            operation = rows.getString("operation"),
+            entityId = rows.getString("entity_id"),
+            entityType = type,
+            book = decode(EntityType.BOOK) { json.decodeFromString<SyncBook>(it) },
+            subscriber = decode(EntityType.SUBSCRIBER) { json.decodeFromString<SyncSubscriber>(it) },
+            subscription = decode(EntityType.SUBSCRIPTION) { json.decodeFromString<SyncSubscription>(it) },
+            loan = decode(EntityType.LOAN) { json.decodeFromString<SyncLoan>(it) },
+            staff = decode(EntityType.STAFF) { json.decodeFromString<SyncStaff>(it) },
+            gateDay = decode(EntityType.GATE_DAY) { json.decodeFromString<SyncGateDay>(it) },
+            staffPassage = decode(EntityType.STAFF_PASSAGE) { json.decodeFromString<SyncStaffPassage>(it) },
+            deviceId = rows.getString("device_id"),
+            createdAt = rows.getString("created_at"),
+        )
     }
 
     @Synchronized
@@ -584,6 +650,133 @@ class SyncStore(databaseUrl: String, private val json: Json) : Closeable {
             }
         }
 
+    private fun upsertStaff(input: SyncStaff, deviceId: String) {
+        val staffNumber = input.staffNumber.trim().uppercase()
+        require(input.serverId.isNotBlank() && staffNumber.isNotBlank() && input.name.isNotBlank()) {
+            "serverId, staffNumber et name sont obligatoires."
+        }
+        val badgeTid = input.badgeTid?.trim()?.uppercase()?.ifBlank { null }
+        val existing = findPayload("staff", input.serverId) { json.decodeFromString<SyncStaff>(it) }
+        val canonical = input.copy(
+            staffNumber = staffNumber,
+            badgeEpc = input.badgeEpc?.trim()?.uppercase()?.ifBlank { null },
+            badgeTid = badgeTid,
+            createdAt = existing?.createdAt ?: input.createdAt,
+            revision = (existing?.revision ?: 0) + 1,
+        )
+        // Un badge physique n'appartient qu'à une personne : réencodé pour
+        // quelqu'un d'autre, l'ancien titulaire le perd.
+        if (badgeTid != null) {
+            previousBadgeHolders(badgeTid, canonical.serverId).forEach { holder ->
+                writeStaff(
+                    holder.copy(
+                        badgeTid = null,
+                        badgeTaggedAt = null,
+                        updatedAt = Instant.now().toString(),
+                        revision = holder.revision + 1,
+                    ),
+                    deviceId,
+                )
+            }
+        }
+        writeStaff(canonical, deviceId)
+    }
+
+    private fun writeStaff(staff: SyncStaff, deviceId: String) {
+        val payload = json.encodeToString(staff)
+        connection.prepareStatement(
+            """
+            INSERT INTO staff(server_id, badge_tid, payload, revision, deleted) VALUES (?, ?, ?, ?, 0)
+            ON CONFLICT(server_id) DO UPDATE SET badge_tid=excluded.badge_tid,
+                payload=excluded.payload, revision=excluded.revision, deleted=0
+            """.trimIndent(),
+        ).use {
+            it.setString(1, staff.serverId)
+            it.setString(2, staff.badgeTid)
+            it.setString(3, payload)
+            it.setLong(4, staff.revision)
+            it.executeUpdate()
+        }
+        addEvent("upsert", staff.serverId, payload, deviceId, EntityType.STAFF)
+    }
+
+    private fun previousBadgeHolders(badgeTid: String, serverId: String): List<SyncStaff> =
+        connection.prepareStatement(
+            "SELECT payload FROM staff WHERE badge_tid=? AND server_id<>? AND deleted=0",
+        ).use {
+            it.setString(1, badgeTid)
+            it.setString(2, serverId)
+            it.executeQuery().use { rows ->
+                buildList { while (rows.next()) add(json.decodeFromString<SyncStaff>(rows.getString(1))) }
+            }
+        }
+
+    /**
+     * Les compteurs d'une journée ne font que croître : un portail
+     * réinstallé qui repart de zéro n'efface pas ce qui a déjà été compté.
+     */
+    private fun upsertGateDay(input: SyncGateDay, deviceId: String) {
+        require(input.gateId.isNotBlank() && DAY.matches(input.day)) {
+            "gateId et day (AAAA-MM-JJ) sont obligatoires."
+        }
+        require(input.entries >= 0 && input.exits >= 0 && input.alarms >= 0) {
+            "Les compteurs du portail ne peuvent pas être négatifs."
+        }
+        val serverId = "${input.gateId}:${input.day}"
+        val existing = findPayload("gate_days", serverId) { json.decodeFromString<SyncGateDay>(it) }
+        val canonical = input.copy(
+            serverId = serverId,
+            entries = maxOf(input.entries, existing?.entries ?: 0),
+            exits = maxOf(input.exits, existing?.exits ?: 0),
+            alarms = maxOf(input.alarms, existing?.alarms ?: 0),
+            revision = (existing?.revision ?: 0) + 1,
+        )
+        val payload = json.encodeToString(canonical)
+        connection.prepareStatement(
+            """
+            INSERT INTO gate_days(server_id, gate_id, day, payload, revision, deleted) VALUES (?, ?, ?, ?, ?, 0)
+            ON CONFLICT(server_id) DO UPDATE SET payload=excluded.payload, revision=excluded.revision, deleted=0
+            """.trimIndent(),
+        ).use {
+            it.setString(1, serverId)
+            it.setString(2, canonical.gateId)
+            it.setString(3, canonical.day)
+            it.setString(4, payload)
+            it.setLong(5, canonical.revision)
+            it.executeUpdate()
+        }
+        addEvent("upsert", serverId, payload, deviceId, EntityType.GATE_DAY)
+    }
+
+    private fun upsertStaffPassage(input: SyncStaffPassage, deviceId: String) {
+        require(input.serverId.isNotBlank() && input.staffServerId.isNotBlank()) {
+            "serverId et staffServerId sont obligatoires."
+        }
+        require(input.direction in PASSAGE_DIRECTIONS) { "Sens de passage inconnu : ${input.direction}" }
+        val existing = findPayload("staff_passages", input.serverId) { json.decodeFromString<SyncStaffPassage>(it) }
+        val canonical = input.copy(
+            createdAt = existing?.createdAt ?: input.createdAt,
+            revision = (existing?.revision ?: 0) + 1,
+        )
+        val payload = json.encodeToString(canonical)
+        connection.prepareStatement(
+            """
+            INSERT INTO staff_passages(server_id, staff_server_id, passed_at, payload, revision, deleted)
+            VALUES (?, ?, ?, ?, ?, 0)
+            ON CONFLICT(server_id) DO UPDATE SET staff_server_id=excluded.staff_server_id,
+                passed_at=excluded.passed_at, payload=excluded.payload, revision=excluded.revision, deleted=0
+            """.trimIndent(),
+        ).use {
+            it.setString(1, canonical.serverId)
+            it.setString(2, canonical.staffServerId)
+            it.setString(3, canonical.passedAt)
+            it.setString(4, payload)
+            it.setLong(5, canonical.revision)
+            it.executeUpdate()
+        }
+        addEvent("upsert", canonical.serverId, payload, deviceId, EntityType.STAFF_PASSAGE)
+    }
+
     private fun <T> findPayload(table: String, serverId: String, decode: (String) -> T): T? =
         connection.prepareStatement("SELECT payload FROM $table WHERE server_id=?").use {
             it.setString(1, serverId)
@@ -687,5 +880,7 @@ class SyncStore(databaseUrl: String, private val json: Json) : Closeable {
 
     private companion object {
         val SUBSCRIPTION_STATUSES = setOf("active", "expired", "suspended")
+        val PASSAGE_DIRECTIONS = setOf("in", "out")
+        val DAY = Regex("^\\d{4}-\\d{2}-\\d{2}$")
     }
 }

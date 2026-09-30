@@ -96,6 +96,12 @@
           <button class="nav-item" data-view="loans">
             <i data-lucide="hand-helping"></i><span>Emprunts</span>
           </button>
+          <button class="nav-item" data-view="staff">
+            <i data-lucide="id-card-lanyard"></i><span>Personnel</span>
+          </button>
+          <button class="nav-item" data-view="gate">
+            <i data-lucide="door-open"></i><span>Portail antivol</span>
+          </button>
           <button class="nav-item" data-view="station">
             <i data-lucide="radio-tower"></i><span>Station RFID</span>
           </button>
@@ -475,6 +481,156 @@
                 <p>Modifiez le filtre ou la recherche.</p>
               </div>
             </div>
+          </section>
+
+          <section class="view" id="view-staff">
+            <div class="section-heading">
+              <div>
+                <h2>Personnel</h2>
+                <p id="staff-count">0 membre</p>
+              </div>
+              <div class="heading-actions">
+                <button class="button primary" id="new-staff" type="button">
+                  <i data-lucide="user-plus"></i><span>Nouveau membre</span>
+                </button>
+              </div>
+            </div>
+            <div class="table-toolbar">
+              <label class="search-box"
+                ><i data-lucide="search"></i
+                ><input
+                  id="staff-search"
+                  type="search"
+                  placeholder="Nom, matricule, fonction, téléphone…"
+              /></label>
+              <div class="segmented" id="staff-filter" aria-label="Filtrer le personnel">
+                <button class="active" data-filter="tous">Tous</button>
+                <button data-filter="presents">Présents</button>
+                <button data-filter="sans-badge">Sans badge</button>
+                <button data-filter="inactifs">Désactivés</button>
+              </div>
+            </div>
+            <div class="table-wrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th>Membre</th>
+                    <th>Fonction</th>
+                    <th>Contact</th>
+                    <th>Badge</th>
+                    <th>Dernier passage</th>
+                    <th class="actions-column">Actions</th>
+                  </tr>
+                </thead>
+                <tbody id="staff-table"></tbody>
+              </table>
+              <div class="empty-state hidden" id="staff-empty">
+                <i data-lucide="id-card-lanyard"></i>
+                <h3>Aucun membre du personnel</h3>
+                <p>Ajoutez un membre puis encodez son badge : il sera reconnu au portail antivol.</p>
+              </div>
+            </div>
+          </section>
+
+          <section class="view" id="view-gate">
+            <div class="section-heading">
+              <div>
+                <h2>Portail antivol</h2>
+                <p id="gate-subtitle">Fréquentation et passages du personnel</p>
+              </div>
+              <div class="heading-actions">
+                <label class="field inline-field"
+                  ><span>Jour</span><input id="gate-day" type="date"
+                /></label>
+                <button class="button secondary" id="refresh-gate" type="button">
+                  <i data-lucide="refresh-cw"></i><span>Actualiser</span>
+                </button>
+              </div>
+            </div>
+            <div class="stats-grid">
+              <article class="stat-card">
+                <span class="stat-icon green"><i data-lucide="log-in"></i></span>
+                <div><small>Entrées</small><strong id="gate-entries">0</strong></div>
+              </article>
+              <article class="stat-card">
+                <span class="stat-icon cyan"><i data-lucide="log-out"></i></span>
+                <div><small>Sorties</small><strong id="gate-exits">0</strong></div>
+              </article>
+              <article class="stat-card">
+                <span class="stat-icon coral"><i data-lucide="siren"></i></span>
+                <div><small>Alarmes antivol</small><strong id="gate-alarms">0</strong></div>
+              </article>
+              <article class="stat-card">
+                <span class="stat-icon amber"><i data-lucide="users-round"></i></span>
+                <div><small>Personnel présent</small><strong id="gate-staff-present">0</strong></div>
+              </article>
+            </div>
+            <div class="dashboard-grid gate-grid">
+              <section class="data-section">
+                <div class="panel-heading">
+                  <div>
+                    <h3>Passages du personnel</h3>
+                    <p id="gate-passages-caption">Badges détectés au portail</p>
+                  </div>
+                </div>
+                <div class="table-wrap compact-table">
+                  <table>
+                    <thead>
+                      <tr>
+                        <th>Heure</th>
+                        <th>Membre</th>
+                        <th>Sens</th>
+                        <th>Portail</th>
+                      </tr>
+                    </thead>
+                    <tbody id="gate-passages-table"></tbody>
+                  </table>
+                </div>
+              </section>
+              <section class="data-section">
+                <div class="panel-heading">
+                  <div>
+                    <h3>Présence du personnel</h3>
+                    <p>Arrivée, départ et dernier sens de passage</p>
+                  </div>
+                </div>
+                <div class="table-wrap compact-table">
+                  <table>
+                    <thead>
+                      <tr>
+                        <th>Membre</th>
+                        <th>Arrivée</th>
+                        <th>Dernier passage</th>
+                        <th>État</th>
+                      </tr>
+                    </thead>
+                    <tbody id="gate-presence-table"></tbody>
+                  </table>
+                </div>
+              </section>
+            </div>
+            <section class="data-section gate-history">
+              <div class="panel-heading">
+                <div>
+                  <h3>Fréquentation des 30 derniers jours</h3>
+                  <p id="gate-history-caption">Tous portails confondus</p>
+                </div>
+              </div>
+              <div class="table-wrap compact-table">
+                <table>
+                  <thead>
+                    <tr>
+                      <th>Jour</th>
+                      <th>Entrées</th>
+                      <th>Sorties</th>
+                      <th>Alarmes</th>
+                      <th>Portails</th>
+                    </tr>
+                  </thead>
+                  <tbody id="gate-history-table"></tbody>
+                </table>
+              </div>
+            </section>
           </section>
 
           <section class="view" id="view-station">
@@ -1212,6 +1368,110 @@
       </form>
     </dialog>
 
+    <dialog id="staff-dialog">
+      <form method="dialog" class="dialog-shell" id="staff-form">
+        <div class="dialog-heading">
+          <div>
+            <p class="eyebrow">Personnel</p>
+            <h2 id="staff-dialog-title">Nouveau membre</h2>
+          </div>
+          <button
+            class="icon-button"
+            value="cancel"
+            formnovalidate
+            title="Fermer"
+            aria-label="Fermer"
+          >
+            <i data-lucide="x"></i>
+          </button>
+        </div>
+        <input type="hidden" name="id" />
+        <div class="form-grid">
+          <label class="field"
+            ><span>Matricule *</span
+            ><input name="staff_number" required maxlength="80" autocomplete="off"
+          /></label>
+          <label class="field"
+            ><span>Nom complet *</span
+            ><input name="name" required maxlength="240" autocomplete="off"
+          /></label>
+          <label class="field"
+            ><span>Fonction</span
+            ><input name="position" maxlength="120" placeholder="Bibliothécaire, agent d’accueil…"
+          /></label>
+          <label class="field"
+            ><span>Téléphone</span
+            ><input name="phone" maxlength="80" inputmode="tel"
+          /></label>
+          <label class="field wide"
+            ><span>E-mail</span><input name="email" type="email" maxlength="240"
+          /></label>
+          <label class="field wide checkbox-field hidden" id="staff-active-field"
+            ><input name="active" type="checkbox" />
+            <span>Actif (décoché : le badge n’est plus reconnu au portail)</span></label
+          >
+          <p class="field wide cell-subtle">
+            Le badge du personnel a son propre format : il n’est jamais pris
+            pour un livre ni pour une carte d’abonné, et ne déclenche pas
+            l’alarme du portail.
+          </p>
+        </div>
+        <div class="dialog-actions">
+          <button class="button secondary" value="cancel" formnovalidate>
+            Annuler</button
+          ><button class="button primary" type="submit" value="default">
+            <i data-lucide="save"></i><span>Enregistrer</span>
+          </button>
+        </div>
+      </form>
+    </dialog>
+
+    <dialog id="staff-detail-dialog">
+      <form method="dialog" class="dialog-shell subscriber-detail-shell">
+        <div class="dialog-heading">
+          <div>
+            <p class="eyebrow">Fiche du personnel</p>
+            <h2 id="staff-detail-title">Membre</h2>
+          </div>
+          <button
+            class="icon-button"
+            value="cancel"
+            formnovalidate
+            title="Fermer"
+            aria-label="Fermer"
+          >
+            <i data-lucide="x"></i>
+          </button>
+        </div>
+        <div class="subscriber-detail-summary" id="staff-detail-summary"></div>
+        <div class="subscriber-section-heading"><h3>Passages au portail</h3></div>
+        <div class="table-wrap compact-table">
+          <table>
+            <thead>
+              <tr>
+                <th>Date</th>
+                <th>Sens</th>
+                <th>Portail</th>
+              </tr>
+            </thead>
+            <tbody id="staff-passages-table"></tbody>
+          </table>
+        </div>
+        <div class="dialog-actions">
+          <button class="button danger" id="detail-delete-staff" type="button">
+            <i data-lucide="trash-2"></i><span>Supprimer</span>
+          </button>
+          <span class="action-spacer"></span>
+          <button class="button secondary" id="detail-encode-badge" type="button">
+            <i data-lucide="id-card-lanyard"></i><span>Encoder le badge</span>
+          </button>
+          <button class="button primary" id="detail-edit-staff" type="button">
+            <i data-lucide="user-pen"></i><span>Modifier</span>
+          </button>
+        </div>
+      </form>
+    </dialog>
+
     <dialog id="subscription-dialog">
       <form method="dialog" class="dialog-shell" id="subscription-form">
         <div class="dialog-heading">
@@ -1258,6 +1518,6 @@
 
     <div class="toast-region" id="toast-region" aria-live="polite"></div>
     <script src="/vendor/sweetalert2/sweetalert2.all.min.js"></script>
-    <script type="module" src="/app.js?v=24"></script>
+    <script type="module" src="/app.js?v=25"></script>
   </body>
 </html>

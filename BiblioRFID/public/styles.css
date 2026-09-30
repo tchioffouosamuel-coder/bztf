@@ -2326,3 +2326,45 @@ dialog::backdrop {
   color: var(--danger);
   font-weight: 700;
 }
+
+/* Portail antivol : sélecteur de jour dans l'en-tête, historique pleine largeur. */
+.inline-field {
+  grid-auto-flow: column;
+  align-items: center;
+  gap: 9px;
+}
+.inline-field input {
+  height: 38px;
+  width: auto;
+}
+.gate-history {
+  margin-top: 18px;
+}
+.direction-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-weight: 650;
+}
+.direction-badge svg {
+  width: 15px;
+  height: 15px;
+}
+.direction-badge.in {
+  color: var(--success);
+}
+.direction-badge.out {
+  color: var(--muted);
+}
+@media (min-width: 1081px) {
+  .dashboard-grid.gate-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+.gate-grid .compact-table,
+.gate-history .compact-table {
+  max-height: 420px;
+}
+.gate-grid table {
+  min-width: 0;
+}

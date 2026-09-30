@@ -220,6 +220,70 @@ class DataQueries(private val store: SyncStore, private val json: Json) {
         }
     }
 
+    // --- Personnel et portails antivol ------------------------------------
+
+    fun staff(
+        search: String?,
+        active: Boolean?,
+        hasBadge: Boolean?,
+        updatedSince: String?,
+        paging: Paging,
+        serverId: String? = null,
+    ): Page<SyncStaff> {
+        val where = Conditions("deleted=0")
+        serverId?.let { where.add("server_id=?", it) }
+        search.like()?.let {
+            where.add(
+                "(json_extract(payload,'$.staffNumber') LIKE ? OR json_extract(payload,'$.name') LIKE ? " +
+                    "OR json_extract(payload,'$.position') LIKE ? OR json_extract(payload,'$.email') LIKE ?)",
+                it, it, it, it,
+            )
+        }
+        active?.let { where.add("json_extract(payload,'$.active')=?", if (it) 1 else 0) }
+        hasBadge?.let { where.add(if (it) "badge_tid IS NOT NULL" else "badge_tid IS NULL") }
+        updatedSince?.let { where.add("json_extract(payload,'$.updatedAt')>=?", it) }
+        return page("staff", where, "json_extract(payload,'$.name') COLLATE NOCASE", paging, "payload") {
+            json.decodeFromString<SyncStaff>(it.getString("payload"))
+        }
+    }
+
+    fun staffMember(serverId: String): SyncStaff? =
+        staff(null, null, null, null, Paging(1), serverId).items.firstOrNull()
+
+    /** Passages du personnel au portail ; `from`/`to` bornent l'heure de passage. */
+    fun staffPassages(
+        staffServerId: String?,
+        gateId: String?,
+        direction: String?,
+        from: String?,
+        to: String?,
+        paging: Paging,
+    ): Page<SyncStaffPassage> {
+        val where = Conditions("deleted=0")
+        staffServerId?.let { where.add("staff_server_id=?", it) }
+        gateId?.let { where.add("json_extract(payload,'$.gateId')=?", it) }
+        direction?.let {
+            require(it == "in" || it == "out") { "direction doit valoir in ou out." }
+            where.add("json_extract(payload,'$.direction')=?", it)
+        }
+        from?.let { where.add("passed_at>=?", it) }
+        to?.let { where.add("passed_at<=?", it) }
+        return page("staff_passages", where, "passed_at DESC", paging, "payload") {
+            json.decodeFromString<SyncStaffPassage>(it.getString("payload"))
+        }
+    }
+
+    /** Entrées, sorties et alarmes par portail et par jour (`from`/`to` : AAAA-MM-JJ). */
+    fun gateDays(gateId: String?, from: String?, to: String?, paging: Paging): Page<SyncGateDay> {
+        val where = Conditions("deleted=0")
+        gateId?.let { where.add("gate_id=?", it) }
+        from?.let { where.add("day>=?", it) }
+        to?.let { where.add("day<=?", it) }
+        return page("gate_days", where, "day DESC, gate_id", paging, "payload") {
+            json.decodeFromString<SyncGateDay>(it.getString("payload"))
+        }
+    }
+
     // --- Appareils, comptes et activité -----------------------------------
 
     fun devices(paging: Paging, deviceId: String? = null): Page<DeviceView> = page(
@@ -348,20 +412,8 @@ class DataQueries(private val store: SyncStore, private val json: Json) {
             paging,
             "e.*, d.name AS device_name",
         ) { rows ->
-            val type = rows.getString("entity_type")
-            val payload = rows.getString("payload")
-            val change = Change(
-                sequence = rows.getLong("sequence"),
-                operation = rows.getString("operation"),
-                entityId = rows.getString("entity_id"),
-                entityType = type,
-                book = payload?.takeIf { type == EntityType.BOOK }?.let { json.decodeFromString<SyncBook>(it) },
-                subscriber = payload?.takeIf { type == EntityType.SUBSCRIBER }?.let { json.decodeFromString<SyncSubscriber>(it) },
-                subscription = payload?.takeIf { type == EntityType.SUBSCRIPTION }?.let { json.decodeFromString<SyncSubscription>(it) },
-                loan = payload?.takeIf { type == EntityType.LOAN }?.let { json.decodeFromString<SyncLoan>(it) },
-                deviceId = rows.getString("device_id"),
-                createdAt = rows.getString("created_at"),
-            )
+            val change = store.readChange(rows)
+            val type = change.entityType
             HistoryEntry(
                 sequence = change.sequence,
                 entityType = type,

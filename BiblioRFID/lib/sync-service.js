@@ -175,6 +175,9 @@ export class SyncService {
           subscriber: entityType === "subscriber" ? payload : null,
           subscription: entityType === "subscription" ? payload : null,
           loan: entityType === "loan" ? payload : null,
+          staff: entityType === "staff" ? payload : null,
+          gateDay: entityType === "gate_day" ? payload : null,
+          staffPassage: entityType === "staff_passage" ? payload : null,
         };
       });
       const result = await this.request("/api/v1/sync/push", {

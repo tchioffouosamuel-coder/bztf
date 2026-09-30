@@ -155,6 +155,8 @@ class SyncService extends ChangeNotifier {
           'subscriber': entityType == 'subscriber' ? payload : null,
           'subscription': entityType == 'subscription' ? payload : null,
           'loan': entityType == 'loan' ? payload : null,
+          'gateDay': entityType == 'gate_day' ? payload : null,
+          'staffPassage': entityType == 'staff_passage' ? payload : null,
         };
       }).toList();
       final response = await _client

@@ -16,7 +16,7 @@ import {
   storedRearmDelayMs,
 } from "./lib/reader-timing.js";
 import { parseCatalogWorkbook } from "./lib/xlsx-import.js";
-import { isCardEpc, isValidEpc } from "./lib/epc.js";
+import { isBadgeEpc, isCardEpc, isValidEpc } from "./lib/epc.js";
 
 const execFileAsync = promisify(execFile);
 const root = path.dirname(fileURLToPath(import.meta.url));
@@ -101,11 +101,13 @@ function presenceKey(tag) {
 
 /**
  * Nature d'un tag d'après son EPC, même inconnu de ce poste (encodé sur un
- * autre appareil, pas encore synchronisé) : livre, carte d'abonné ou vierge.
+ * autre appareil, pas encore synchronisé) : livre, carte d'abonné, badge du
+ * personnel ou vierge.
  */
-function tagKind(epc, book, subscriber) {
+function tagKind(epc, book, subscriber, staff = null) {
   if (book) return "book";
   if (subscriber || isCardEpc(epc)) return "card";
+  if (staff || isBadgeEpc(epc)) return "badge";
   return isValidEpc(epc) ? "book" : "blank";
 }
 
@@ -117,11 +119,16 @@ function currentSnapshot({ raw = false } = {}) {
     const subscriber = book
       ? null
       : publicSubscriber(db.recognizeCard(normalized.epc, normalized.tid));
+    const staff =
+      book || subscriber
+        ? null
+        : publicStaff(db.recognizeBadge(normalized.epc, normalized.tid));
     return {
       ...normalized,
       book,
       subscriber,
-      kind: tagKind(normalized.epc, book, subscriber),
+      staff,
+      kind: tagKind(normalized.epc, book, subscriber, staff),
     };
   });
   const books = [
@@ -135,8 +142,11 @@ function currentSnapshot({ raw = false } = {}) {
     tags,
     book: tags.length === 1 ? tags[0].book : null,
     subscriber: tags.length === 1 ? tags[0].subscriber : null,
+    staff: tags.length === 1 ? tags[0].staff : null,
     books,
-    unknownCount: tags.filter((tag) => !tag.book && !tag.subscriber).length,
+    unknownCount: tags.filter(
+      (tag) => !tag.book && !tag.subscriber && !tag.staff,
+    ).length,
     presenceSessionId,
     reader: readerStatus,
     mode: "continuous",
@@ -151,6 +161,16 @@ function publicSubscriber(subscriber) {
     name: subscriber.name,
     email: subscriber.email,
     phone: subscriber.phone,
+  };
+}
+
+function publicStaff(staff) {
+  if (!staff) return null;
+  return {
+    id: staff.id,
+    staff_number: staff.staff_number,
+    name: staff.name,
+    position: staff.position,
   };
 }
 
@@ -170,6 +190,17 @@ function recordPresenceChange(snapshot, signature) {
         "succes",
         null,
         `Carte d'abonné reconnue : ${tag.subscriber.name} (${tag.subscriber.member_number})`,
+        tag.epc,
+        tag.tid,
+      );
+      continue;
+    }
+    if (tag.staff) {
+      db.addActivity(
+        "lecture",
+        "succes",
+        null,
+        `Badge du personnel reconnu : ${tag.staff.name} (${tag.staff.staff_number})`,
         tag.epc,
         tag.tid,
       );
@@ -747,6 +778,52 @@ async function api(request, response, url) {
         throw new Error("Abonnement introuvable.");
       return { ok: true };
     });
+  // Personnel, badges et portails antivol.
+  if (request.method === "GET" && pathname === "/api/staff")
+    return json(response, 200, db.listStaff(url.searchParams.get("search") || ""));
+  if (request.method === "POST" && pathname === "/api/staff")
+    return lending(201, async () => db.createStaff(await readBody(request)));
+  const staffMatch = pathname.match(/^\/api\/staff\/(\d+)$/);
+  if (staffMatch && request.method === "GET") {
+    const details = db.getStaffDetails(staffMatch[1]);
+    return details
+      ? json(response, 200, details)
+      : json(response, 404, { error: "Membre du personnel introuvable." });
+  }
+  if (staffMatch && request.method === "PUT") {
+    const input = await readBody(request);
+    return lending(200, () => {
+      const updated = db.updateStaff(staffMatch[1], input);
+      if (!updated) throw new Error("Membre du personnel introuvable.");
+      return updated;
+    });
+  }
+  if (staffMatch && request.method === "DELETE")
+    return lending(200, () => {
+      if (!db.deleteStaff(staffMatch[1]))
+        throw new Error("Membre du personnel introuvable.");
+      return { ok: true };
+    });
+  if (request.method === "GET" && pathname === "/api/staff-passages") {
+    const day = url.searchParams.get("day") || "";
+    return json(response, 200, {
+      passages: db.listStaffPassages({
+        day,
+        search: url.searchParams.get("search") || "",
+      }),
+      presence: db.staffPresence(day),
+    });
+  }
+  if (request.method === "GET" && pathname === "/api/gate/stats")
+    return json(
+      response,
+      200,
+      db.gateStats({
+        from: url.searchParams.get("from") || "",
+        to: url.searchParams.get("to") || "",
+      }),
+    );
+
   if (request.method === "DELETE" && pathname === "/api/books") {
     const input = await readBody(request);
     if (!Array.isArray(input.ids) || !input.ids.length)
@@ -931,6 +1008,13 @@ async function api(request, response, url) {
           ok: false,
           error: `Ce tag est la carte de l'abonné ${card.name}. Utilisez un tag de livre.`,
         });
+      if (target.staff || target.kind === "badge")
+        return json(response, 409, {
+          ok: false,
+          error: target.staff
+            ? `Ce tag est le badge de ${target.staff.name}. Utilisez un tag de livre.`
+            : "Ce tag est un badge du personnel. Utilisez un tag de livre.",
+        });
       if (connection.type === "simulation") {
         simulatedTag = { ...simulatedTag, epc: book.epc, tid: target.tid };
         result = {
@@ -1074,6 +1158,13 @@ async function api(request, response, url) {
           ok: false,
           error: `Ce tag est déjà la carte de ${target.subscriber.name}.`,
         });
+      if (target.staff || target.kind === "badge")
+        return json(response, 409, {
+          ok: false,
+          error: target.staff
+            ? `Ce tag est le badge de ${target.staff.name}. Utilisez une carte vierge.`
+            : "Ce tag est un badge du personnel. Utilisez une carte vierge.",
+        });
       if (target.kind === "book")
         return json(response, 409, {
           ok: false,
@@ -1121,6 +1212,94 @@ async function api(request, response, url) {
         null,
         `Carte de ${subscriber.name} : ${error.message}`,
         subscriber.card_epc,
+        null,
+      );
+      return json(response, 503, { ok: false, error: error.message });
+    }
+  }
+
+  const badgeMatch = pathname.match(/^\/api\/staff\/(\d+)\/badge$/);
+  if (badgeMatch && request.method === "POST") {
+    const staff = db.getStaff(badgeMatch[1]);
+    if (!staff)
+      return json(response, 404, { error: "Membre du personnel introuvable." });
+    const connection = normalizeConnection(await readBody(request));
+    try {
+      await ensureReaderConnection(connection);
+      const snapshot = currentSnapshot({ raw: true });
+      if (snapshot.count === 0)
+        return json(response, 409, {
+          ok: false,
+          error: "Aucun tag détecté. Posez le badge sur le lecteur.",
+        });
+      if (snapshot.count > 1)
+        return json(response, 409, {
+          ok: false,
+          error: "Plusieurs tags détectés. Isolez le badge à encoder.",
+        });
+      const target = snapshot.tags[0];
+      if (!target.tid)
+        return json(response, 409, {
+          ok: false,
+          error:
+            "Le tag ne fournit pas de TID; l'écriture sécurisée est annulée.",
+        });
+      if (target.book || target.kind === "book")
+        return json(response, 409, {
+          ok: false,
+          error: target.book
+            ? `Ce tag appartient au livre ${target.book.accession}. Utilisez un badge vierge.`
+            : "Ce tag est un livre encodé sur un autre poste. Utilisez un badge vierge.",
+        });
+      if (target.subscriber || target.kind === "card")
+        return json(response, 409, {
+          ok: false,
+          error: target.subscriber
+            ? `Ce tag est la carte d'abonné de ${target.subscriber.name}. Utilisez un badge vierge.`
+            : "Ce tag est une carte d'abonné. Utilisez un badge vierge.",
+        });
+      if (target.staff && target.staff.id !== staff.id)
+        return json(response, 409, {
+          ok: false,
+          error: `Ce tag est déjà le badge de ${target.staff.name}.`,
+        });
+      if (!target.staff && target.kind === "badge" && target.epc !== staff.badge_epc)
+        return json(response, 409, {
+          ok: false,
+          error:
+            "Ce tag est le badge d'un autre membre du personnel, pas encore synchronisé sur ce poste.",
+        });
+      let result;
+      if (connection.type === "simulation") {
+        simulatedTag = { ...simulatedTag, epc: staff.badge_epc, tid: target.tid };
+        result = { ok: true, verified: true, tag: simulatedTag };
+      } else {
+        result = normalizeBridgePayload(
+          await reader.write(staff.badge_epc, target.tid),
+        );
+      }
+      if (
+        !result.verified ||
+        result.tag?.epc !== staff.badge_epc ||
+        result.tag?.tid !== target.tid
+      )
+        throw new Error("L'écriture du badge n'a pas pu être vérifiée.");
+      const updated = db.markBadgeTagged(staff.id, result.tag.tid);
+      const oldKey = presenceKey(target);
+      presentTags.delete(oldKey);
+      stableTags.delete(oldKey);
+      const writtenPresence = { tag: result.tag, lastSeen: Date.now() };
+      presentTags.set(presenceKey(result.tag), writtenPresence);
+      stableTags.set(presenceKey(result.tag), writtenPresence);
+      broadcastSnapshot(true);
+      return json(response, 200, { ...result, staff: updated });
+    } catch (error) {
+      db.addActivity(
+        "badge",
+        "echec",
+        null,
+        `Badge de ${staff.name} : ${error.message}`,
+        staff.badge_epc,
         null,
       );
       return json(response, 503, { ok: false, error: error.message });

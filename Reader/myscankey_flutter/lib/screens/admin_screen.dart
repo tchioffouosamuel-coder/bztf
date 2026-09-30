@@ -9,6 +9,7 @@ import '../services/desk_reader_service.dart';
 import '../services/kiosk_controller.dart';
 import '../services/library_controller.dart';
 import '../widgets/accounts_card.dart';
+import '../widgets/gate_settings_card.dart';
 import '../widgets/sync_settings_card.dart';
 import 'kiosk_screen.dart';
 
@@ -1056,6 +1057,8 @@ class _KioskSettingsTabState extends State<_KioskSettingsTab> {
   late int _loanDays;
   late String _beepSource;
   late int _beepRearm;
+  late int _presenceMs;
+  late int _releaseMs;
   bool _testing = false;
   String? _readerInfo;
 
@@ -1071,6 +1074,8 @@ class _KioskSettingsTabState extends State<_KioskSettingsTab> {
     _loanDays = kiosk.loanDays;
     _beepSource = kiosk.beepSource;
     _beepRearm = kiosk.beepRearmSeconds;
+    _presenceMs = kiosk.presenceMs;
+    _releaseMs = kiosk.releaseMs;
   }
 
   @override
@@ -1124,8 +1129,15 @@ class _KioskSettingsTabState extends State<_KioskSettingsTab> {
       await kiosk.configureFeedback(
         nextSource: _beepSource,
         nextRearmSeconds: _beepRearm,
+        nextPresenceMs: _presenceMs,
+        nextReleaseMs: _releaseMs,
       );
-      if (mounted) showMessage(context, 'Réglages du bip enregistrés.');
+      if (mounted) {
+        showMessage(
+          context,
+          'Réglages du bip et de l’anti-rebond enregistrés.',
+        );
+      }
     } catch (error) {
       if (mounted) showMessage(context, error.toString(), error: true);
     }
@@ -1217,23 +1229,20 @@ class _KioskSettingsTabState extends State<_KioskSettingsTab> {
     }
   }
 
+  /// Trois types d'appareil : le choix se refait sur l'écran d'accueil.
   Future<void> _switchRole() async {
-    final toKiosk = widget.controller.deviceRole != 'kiosk';
     final confirmed = await confirmAction(
       context,
-      title: toKiosk
-          ? 'Passer en poste d’emprunt ?'
-          : 'Passer en lecteur mobile ?',
-      message: toKiosk
-          ? 'L’application s’ouvrira directement sur le poste d’emprunt. '
-                'Le code administrateur sera nécessaire pour en sortir.'
-          : 'L’application s’ouvrira sur les écrans du personnel '
-                '(catalogue, station, inventaire).',
-      confirmLabel: 'Changer',
+      title: 'Changer le type d’appareil ?',
+      message:
+          'Vous choisirez entre poste d’emprunt, lecteur mobile et portail '
+          'antivol. Le poste d’emprunt et le portail s’ouvrent en plein écran : '
+          'le code administrateur sera nécessaire pour en sortir.',
+      confirmLabel: 'Choisir',
     );
     if (!confirmed || !mounted) return;
     Navigator.of(context).popUntil((route) => route.isFirst);
-    await widget.controller.setDeviceRole(toKiosk ? 'kiosk' : 'mobile');
+    await widget.controller.setDeviceRole(null);
   }
 
   Widget _heading(String text) => Padding(
@@ -1252,6 +1261,7 @@ class _KioskSettingsTabState extends State<_KioskSettingsTab> {
     builder: (context, _) {
       final colors = Theme.of(context).colorScheme;
       final isKiosk = widget.controller.deviceRole == 'kiosk';
+      final isGate = widget.controller.deviceRole == 'gate';
       return ListView(
         padding: const EdgeInsets.fromLTRB(16, 0, 16, 24),
         children: [
@@ -1265,12 +1275,22 @@ class _KioskSettingsTabState extends State<_KioskSettingsTab> {
               leading: Icon(
                 isKiosk
                     ? Icons.point_of_sale_outlined
+                    : isGate
+                    ? Icons.shield_outlined
                     : Icons.phone_android_outlined,
               ),
-              title: Text(isKiosk ? 'Poste d’emprunt' : 'Lecteur mobile'),
+              title: Text(
+                isKiosk
+                    ? 'Poste d’emprunt'
+                    : isGate
+                    ? 'Portail antivol'
+                    : 'Lecteur mobile',
+              ),
               subtitle: Text(
                 isKiosk
                     ? 'L’application s’ouvre sur le poste en libre-service.'
+                    : isGate
+                    ? 'L’application surveille le portail antivol.'
                     : 'L’application s’ouvre sur les écrans du personnel.',
               ),
               trailing: TextButton(
@@ -1279,7 +1299,7 @@ class _KioskSettingsTabState extends State<_KioskSettingsTab> {
               ),
             ),
           ),
-          if (!widget.insideKiosk && !isKiosk) ...[
+          if (!widget.insideKiosk && !isKiosk && !isGate) ...[
             const SizedBox(height: 8),
             FilledButton.icon(
               onPressed: () => Navigator.of(
@@ -1289,215 +1309,245 @@ class _KioskSettingsTabState extends State<_KioskSettingsTab> {
               label: const Text('Ouvrir le poste d’emprunt sur cet appareil'),
             ),
           ],
-          _heading('Lecteur RFID de bureau'),
-          Card(
-            child: Padding(
-              padding: const EdgeInsets.all(14),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.stretch,
-                children: [
-                  Row(
-                    children: [
-                      Icon(
-                        kiosk.readerConnected
-                            ? Icons.sensors
-                            : Icons.sensors_off,
-                        color: kiosk.readerConnected
-                            ? colors.primary
-                            : colors.error,
-                      ),
-                      const SizedBox(width: 10),
-                      Expanded(
-                        child: Text(
-                          _readerInfo ??
-                              kiosk.readerError ??
-                              (kiosk.readerConnected
-                                  ? 'Lecteur connecté'
-                                  : 'Lecteur non connecté'),
+          if (isGate) GateSettingsSection(gate: widget.controller.gate),
+          if (!isGate) ...[
+            _heading('Lecteur RFID de bureau'),
+            Card(
+              child: Padding(
+                padding: const EdgeInsets.all(14),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: [
+                    Row(
+                      children: [
+                        Icon(
+                          kiosk.readerConnected
+                              ? Icons.sensors
+                              : Icons.sensors_off,
+                          color: kiosk.readerConnected
+                              ? colors.primary
+                              : colors.error,
+                        ),
+                        const SizedBox(width: 10),
+                        Expanded(
+                          child: Text(
+                            _readerInfo ??
+                                kiosk.readerError ??
+                                (kiosk.readerConnected
+                                    ? 'Lecteur connecté'
+                                    : 'Lecteur non connecté'),
+                          ),
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 14),
+                    DropdownButtonFormField<String>(
+                      initialValue: _transport,
+                      decoration: const InputDecoration(labelText: 'Connexion'),
+                      items: const [
+                        DropdownMenuItem(
+                          value: 'tcp',
+                          child: Text('Réseau · TCP/IP'),
+                        ),
+                        DropdownMenuItem(
+                          value: 'serial',
+                          child: Text('Série · RS232'),
+                        ),
+                        DropdownMenuItem(
+                          value: 'simulation',
+                          child: Text('Simulation'),
+                        ),
+                      ],
+                      onChanged: (value) =>
+                          setState(() => _transport = value ?? 'tcp'),
+                    ),
+                    if (_transport != 'simulation') ...[
+                      const SizedBox(height: 12),
+                      TextField(
+                        controller: _endpoint,
+                        autocorrect: false,
+                        decoration: InputDecoration(
+                          labelText: _transport == 'tcp'
+                              ? 'Adresse IP (port ${DeskReaderService.defaultTcpPort} par défaut)'
+                              : 'Port série (débit ${DeskReaderService.defaultBaudRate} par défaut)',
+                          hintText: _transport == 'tcp'
+                              ? '192.168.1.168:8160'
+                              : '/dev/ttyS5:115200',
                         ),
                       ),
                     ],
-                  ),
-                  const SizedBox(height: 14),
-                  DropdownButtonFormField<String>(
-                    initialValue: _transport,
-                    decoration: const InputDecoration(labelText: 'Connexion'),
-                    items: const [
-                      DropdownMenuItem(
-                        value: 'tcp',
-                        child: Text('Réseau · TCP/IP'),
-                      ),
-                      DropdownMenuItem(
-                        value: 'serial',
-                        child: Text('Série · RS232'),
-                      ),
-                      DropdownMenuItem(
-                        value: 'simulation',
-                        child: Text('Simulation'),
-                      ),
-                    ],
-                    onChanged: (value) =>
-                        setState(() => _transport = value ?? 'tcp'),
-                  ),
-                  if (_transport != 'simulation') ...[
                     const SizedBox(height: 12),
-                    TextField(
-                      controller: _endpoint,
-                      autocorrect: false,
-                      decoration: InputDecoration(
-                        labelText: _transport == 'tcp'
-                            ? 'Adresse IP (port ${DeskReaderService.defaultTcpPort} par défaut)'
-                            : 'Port série (débit ${DeskReaderService.defaultBaudRate} par défaut)',
-                        hintText: _transport == 'tcp'
-                            ? '192.168.1.168:8160'
-                            : '/dev/ttyS5:115200',
-                      ),
+                    Row(
+                      children: [
+                        const Text('Puissance'),
+                        Expanded(
+                          child: Slider(
+                            min: DeskReaderService.minPower.toDouble(),
+                            max: DeskReaderService.maxPower.toDouble(),
+                            divisions:
+                                DeskReaderService.maxPower -
+                                DeskReaderService.minPower,
+                            value: _power.toDouble(),
+                            label: '$_power dBm',
+                            onChanged: (value) =>
+                                setState(() => _power = value.round()),
+                          ),
+                        ),
+                        Text('$_power dBm'),
+                      ],
+                    ),
+                    Text(
+                      'Une puissance faible évite de lire les livres posés à côté du poste.',
+                      style: Theme.of(context).textTheme.bodySmall,
+                    ),
+                    const SizedBox(height: 12),
+                    FilledButton.icon(
+                      onPressed: _testing ? null : _saveReader,
+                      icon: _testing
+                          ? const SizedBox.square(
+                              dimension: 18,
+                              child: CircularProgressIndicator(strokeWidth: 2),
+                            )
+                          : const Icon(Icons.cable),
+                      label: const Text('Enregistrer et tester'),
                     ),
                   ],
-                  const SizedBox(height: 12),
-                  Row(
-                    children: [
-                      const Text('Puissance'),
-                      Expanded(
-                        child: Slider(
-                          min: DeskReaderService.minPower.toDouble(),
-                          max: DeskReaderService.maxPower.toDouble(),
-                          divisions:
-                              DeskReaderService.maxPower -
-                              DeskReaderService.minPower,
-                          value: _power.toDouble(),
-                          label: '$_power dBm',
-                          onChanged: (value) =>
-                              setState(() => _power = value.round()),
-                        ),
-                      ),
-                      Text('$_power dBm'),
-                    ],
-                  ),
-                  Text(
-                    'Une puissance faible évite de lire les livres posés à côté du poste.',
-                    style: Theme.of(context).textTheme.bodySmall,
-                  ),
-                  const SizedBox(height: 12),
-                  FilledButton.icon(
-                    onPressed: _testing ? null : _saveReader,
-                    icon: _testing
-                        ? const SizedBox.square(
-                            dimension: 18,
-                            child: CircularProgressIndicator(strokeWidth: 2),
-                          )
-                        : const Icon(Icons.cable),
-                    label: const Text('Enregistrer et tester'),
-                  ),
-                ],
+                ),
               ),
             ),
-          ),
-          _heading('Bip et anti-rebond'),
-          Card(
-            child: Padding(
-              padding: const EdgeInsets.all(14),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.stretch,
-                children: [
-                  DropdownButtonFormField<String>(
-                    initialValue: _beepSource,
-                    decoration: const InputDecoration(
-                      labelText: 'Bip quand un livre ou une carte est posé',
+            _heading('Bip et anti-rebond'),
+            Card(
+              child: Padding(
+                padding: const EdgeInsets.all(14),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: [
+                    DropdownButtonFormField<String>(
+                      initialValue: _beepSource,
+                      decoration: const InputDecoration(
+                        labelText: 'Bip quand un livre ou une carte est posé',
+                      ),
+                      items: const [
+                        DropdownMenuItem(
+                          value: 'reader',
+                          child: Text('Buzzer du lecteur RFID'),
+                        ),
+                        DropdownMenuItem(
+                          value: 'tablet',
+                          child: Text('Haut-parleur de la tablette'),
+                        ),
+                        DropdownMenuItem(
+                          value: 'both',
+                          child: Text('Les deux'),
+                        ),
+                        DropdownMenuItem(
+                          value: 'off',
+                          child: Text('Aucun bip'),
+                        ),
+                      ],
+                      onChanged: (value) =>
+                          setState(() => _beepSource = value ?? 'reader'),
                     ),
-                    items: const [
-                      DropdownMenuItem(
-                        value: 'reader',
-                        child: Text('Buzzer du lecteur RFID'),
-                      ),
-                      DropdownMenuItem(
-                        value: 'tablet',
-                        child: Text('Haut-parleur de la tablette'),
-                      ),
-                      DropdownMenuItem(value: 'both', child: Text('Les deux')),
-                      DropdownMenuItem(value: 'off', child: Text('Aucun bip')),
-                    ],
-                    onChanged: (value) =>
-                        setState(() => _beepSource = value ?? 'reader'),
-                  ),
-                  const SizedBox(height: 8),
-                  _Stepper(
-                    label: 'Réarmement du bip (secondes)',
-                    value: _beepRearm,
-                    min: 1,
-                    max: 120,
-                    onChanged: (value) => setState(() => _beepRearm = value),
-                  ),
-                  Text(
-                    'Un tag n’est considéré retiré qu’après '
-                    '${KioskController.presenceTimeout.inMilliseconds} ms sans '
-                    'lecture puis ${KioskController.releaseDelay.inMilliseconds} ms '
-                    'de confirmation : un livre mal lu ne rebipe pas et ne '
-                    'relance pas de session. Il bipe de nouveau une fois retiré '
-                    'depuis ce délai. Si le buzzer du lecteur ne répond pas, la '
-                    'tablette bipe à sa place.',
-                    style: Theme.of(context).textTheme.bodySmall,
-                  ),
-                  const SizedBox(height: 10),
-                  Row(
-                    children: [
-                      Expanded(
-                        child: OutlinedButton.icon(
-                          onPressed: kiosk.testBeep,
-                          icon: const Icon(Icons.volume_up_outlined),
-                          label: const Text('Essayer'),
+                    const SizedBox(height: 8),
+                    _Stepper(
+                      label: 'Réarmement du bip (secondes)',
+                      value: _beepRearm,
+                      min: 1,
+                      max: 120,
+                      onChanged: (value) => setState(() => _beepRearm = value),
+                    ),
+                    _MillisecondsSlider(
+                      label: 'Absence d’un tag',
+                      help:
+                          'Temps sans lecture avant de considérer le tag absent.',
+                      value: _presenceMs,
+                      min: 100,
+                      max: 5000,
+                      step: 100,
+                      onChanged: (value) => setState(() => _presenceMs = value),
+                    ),
+                    _MillisecondsSlider(
+                      label: 'Confirmation du retrait',
+                      help:
+                          'Temps supplémentaire avant de le considérer retiré.',
+                      value: _releaseMs,
+                      min: 0,
+                      max: 10000,
+                      step: 100,
+                      onChanged: (value) => setState(() => _releaseMs = value),
+                    ),
+                    Text(
+                      'Un livre mal lu qui réapparaît avant '
+                      '${((_presenceMs + _releaseMs) / 1000).toStringAsFixed(1)} s '
+                      'ne rebipe pas et ne relance pas de session. Plus court : '
+                      'retraits reconnus plus vite, mais plus de rebonds. '
+                      'Valeurs du poste Windows : '
+                      '${KioskController.defaultPresenceMs} ms et '
+                      '${KioskController.defaultReleaseMs} ms. Si le buzzer du '
+                      'lecteur ne répond pas, la tablette bipe à sa place.',
+                      style: Theme.of(context).textTheme.bodySmall,
+                    ),
+                    const SizedBox(height: 10),
+                    Row(
+                      children: [
+                        Expanded(
+                          child: OutlinedButton.icon(
+                            onPressed: kiosk.testBeep,
+                            icon: const Icon(Icons.volume_up_outlined),
+                            label: const Text('Essayer'),
+                          ),
                         ),
-                      ),
-                      const SizedBox(width: 10),
-                      Expanded(
-                        child: FilledButton.icon(
-                          onPressed: _saveFeedback,
-                          icon: const Icon(Icons.save_outlined),
-                          label: const Text('Enregistrer'),
+                        const SizedBox(width: 10),
+                        Expanded(
+                          child: FilledButton.icon(
+                            onPressed: _saveFeedback,
+                            icon: const Icon(Icons.save_outlined),
+                            label: const Text('Enregistrer'),
+                          ),
                         ),
-                      ),
-                    ],
-                  ),
-                ],
+                      ],
+                    ),
+                  ],
+                ),
               ),
             ),
-          ),
-          _heading('Règles de prêt'),
-          Card(
-            child: Padding(
-              padding: const EdgeInsets.all(14),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.stretch,
-                children: [
-                  _Stepper(
-                    label: 'Livres empruntés à la fois',
-                    value: _maxLoans,
-                    min: 1,
-                    max: 50,
-                    onChanged: (value) => setState(() => _maxLoans = value),
-                  ),
-                  _Stepper(
-                    label: 'Durée du prêt (jours)',
-                    value: _loanDays,
-                    min: 1,
-                    max: 365,
-                    onChanged: (value) => setState(() => _loanDays = value),
-                  ),
-                  Text(
-                    'Pour emprunter, l’abonné doit avoir un compte actif, un '
-                    'abonnement valide et aucun livre en retard.',
-                    style: Theme.of(context).textTheme.bodySmall,
-                  ),
-                  const SizedBox(height: 10),
-                  OutlinedButton.icon(
-                    onPressed: _savePolicy,
-                    icon: const Icon(Icons.save_outlined),
-                    label: const Text('Enregistrer les règles'),
-                  ),
-                ],
+            _heading('Règles de prêt'),
+            Card(
+              child: Padding(
+                padding: const EdgeInsets.all(14),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: [
+                    _Stepper(
+                      label: 'Livres empruntés à la fois',
+                      value: _maxLoans,
+                      min: 1,
+                      max: 50,
+                      onChanged: (value) => setState(() => _maxLoans = value),
+                    ),
+                    _Stepper(
+                      label: 'Durée du prêt (jours)',
+                      value: _loanDays,
+                      min: 1,
+                      max: 365,
+                      onChanged: (value) => setState(() => _loanDays = value),
+                    ),
+                    Text(
+                      'Pour emprunter, l’abonné doit avoir un compte actif, un '
+                      'abonnement valide et aucun livre en retard.',
+                      style: Theme.of(context).textTheme.bodySmall,
+                    ),
+                    const SizedBox(height: 10),
+                    OutlinedButton.icon(
+                      onPressed: _savePolicy,
+                      icon: const Icon(Icons.save_outlined),
+                      label: const Text('Enregistrer les règles'),
+                    ),
+                  ],
+                ),
               ),
             ),
-          ),
+          ],
           _heading('Sécurité'),
           Card(
             child: ListTile(
@@ -1522,6 +1572,52 @@ class _KioskSettingsTabState extends State<_KioskSettingsTab> {
         ],
       );
     },
+  );
+}
+
+class _MillisecondsSlider extends StatelessWidget {
+  const _MillisecondsSlider({
+    required this.label,
+    required this.help,
+    required this.value,
+    required this.min,
+    required this.max,
+    required this.step,
+    required this.onChanged,
+  });
+
+  final String label;
+  final String help;
+  final int value;
+  final int min;
+  final int max;
+  final int step;
+  final ValueChanged<int> onChanged;
+
+  @override
+  Widget build(BuildContext context) => Column(
+    crossAxisAlignment: CrossAxisAlignment.start,
+    children: [
+      Row(
+        children: [
+          Expanded(child: Text(label)),
+          Text(
+            '$value ms',
+            style: const TextStyle(fontWeight: FontWeight.w800),
+          ),
+        ],
+      ),
+      Slider(
+        min: min.toDouble(),
+        max: max.toDouble(),
+        divisions: (max - min) ~/ step,
+        value: value.clamp(min, max).toDouble(),
+        label: '$value ms',
+        onChanged: (next) => onChanged((next / step).round() * step),
+      ),
+      Text(help, style: Theme.of(context).textTheme.bodySmall),
+      const SizedBox(height: 8),
+    ],
   );
 }
 

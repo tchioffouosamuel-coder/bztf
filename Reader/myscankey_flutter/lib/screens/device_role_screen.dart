@@ -5,7 +5,7 @@ import '../services/kiosk_controller.dart';
 import '../services/library_controller.dart';
 
 /// Première ouverture : l'appareil devient un poste d'emprunt en
-/// libre-service ou un lecteur mobile pour le personnel.
+/// libre-service, un lecteur mobile pour le personnel ou le portail antivol.
 class DeviceRoleScreen extends StatefulWidget {
   const DeviceRoleScreen({required this.controller, super.key});
 
@@ -36,7 +36,7 @@ class _DeviceRoleScreenState extends State<DeviceRoleScreen> {
       body: SafeArea(
         child: Center(
           child: ConstrainedBox(
-            constraints: const BoxConstraints(maxWidth: 720),
+            constraints: const BoxConstraints(maxWidth: 1060),
             child: ListView(
               shrinkWrap: true,
               padding: const EdgeInsets.all(24),
@@ -84,6 +84,16 @@ class _DeviceRoleScreenState extends State<DeviceRoleScreen> {
                           'catalogue, encodage des tags, inventaire, '
                           'localisation et prêts au comptoir.',
                       onTap: _saving ? null : () => _choose('mobile'),
+                    ),
+                    _RoleCard(
+                      icon: Icons.shield_outlined,
+                      title: 'Portail antivol',
+                      description:
+                          'Tablette reliée au portail RFID N01 de la sortie : '
+                          'alarme vocale si un livre non emprunté passe, '
+                          'comptage des entrées et sorties, passages du '
+                          'personnel par badge.',
+                      onTap: _saving ? null : () => _choose('gate'),
                     ),
                   ],
                 ),

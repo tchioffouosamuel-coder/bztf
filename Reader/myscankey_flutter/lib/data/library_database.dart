@@ -8,6 +8,7 @@ import '../core/epc.dart';
 import '../core/password.dart';
 import '../models/book.dart';
 import '../models/lending.dart';
+import '../models/staff.dart';
 import '../models/user.dart';
 
 class LibraryDatabase {
@@ -21,7 +22,7 @@ class LibraryDatabase {
     final directory = await getDatabasesPath();
     _database = await openDatabase(
       path.join(directory, 'biblio_rfid.db'),
-      version: 7,
+      version: 8,
       onConfigure: (database) => database.execute('PRAGMA foreign_keys = ON'),
       onCreate: (database, version) async {
         await database.execute('''
@@ -68,6 +69,7 @@ class LibraryDatabase {
         await _addSubscriberSync(database);
         await _addLendingSync(database);
         await _createUsers(database);
+        await _createGateTables(database);
       },
       onUpgrade: (database, oldVersion, newVersion) async {
         if (oldVersion < 2) {
@@ -97,6 +99,7 @@ class LibraryDatabase {
         if (oldVersion < 5) await _addSubscriberSync(database);
         if (oldVersion < 6) await _addLendingSync(database);
         if (oldVersion < 7) await _createUsers(database);
+        if (oldVersion < 8) await _createGateTables(database);
       },
     );
     return _database!;
@@ -660,6 +663,10 @@ class LibraryDatabase {
     );
     if (other.isNotEmpty) {
       throw StateError('Ce tag est déjà la carte de ${other.first['name']}.');
+    }
+    final badge = await _badgeOwner(db, normalizedTid);
+    if (badge != null) {
+      throw StateError('Ce tag est déjà le badge de $badge.');
     }
     final now = DateTime.now().toUtc().toIso8601String();
     await db.transaction((transaction) async {
@@ -1280,6 +1287,10 @@ class LibraryDatabase {
         'Ce tag est la carte de l’abonné ${card.first['name']} (${card.first['member_number']}).',
       );
     }
+    final badge = await _badgeOwner(db, normalizedTid);
+    if (badge != null) {
+      throw StateError('Ce tag est le badge de $badge.');
+    }
     final now = DateTime.now().toUtc().toIso8601String();
     return db.transaction((transaction) async {
       await transaction.update(
@@ -1529,6 +1540,18 @@ class LibraryDatabase {
       )) {
         await _queueLoan(transaction, row['id'] as int);
       }
+      for (final row in await transaction.query(
+        'gate_days',
+        where: "sync_state <> 'synced'",
+      )) {
+        await _queueGateDay(transaction, row);
+      }
+      for (final row in await transaction.query(
+        'staff_passages',
+        where: "sync_state <> 'synced'",
+      )) {
+        await _queueStaffPassage(transaction, StaffPassage.fromMap(row));
+      }
     });
   }
 
@@ -1562,6 +1585,8 @@ class LibraryDatabase {
             'subscriber' => ('subscribers', 'member_number'),
             'subscription' => ('subscriptions', 'server_id'),
             'loan' => ('loans', 'server_id'),
+            'gate_day' => ('gate_days', 'server_id'),
+            'staff_passage' => ('staff_passages', 'server_id'),
             _ => ('books', 'server_id'),
           };
           await transaction.update(
@@ -1612,6 +1637,15 @@ class LibraryDatabase {
             continue;
           case 'subscription' || 'loan':
             await _applyLendingChange(transaction, change);
+            continue;
+          case 'staff':
+            await _applyRemoteStaff(transaction, serverId, change);
+            continue;
+          case 'gate_day':
+            await _applyRemoteGateDay(transaction, serverId, change);
+            continue;
+          case 'staff_passage':
+            await _applyRemoteStaffPassage(transaction, serverId, change);
             continue;
           case 'book':
             break;
@@ -1683,9 +1717,9 @@ class LibraryDatabase {
   static int _priority(Map<String, Object?> change) =>
       switch (change['entityType'] ?? 'book') {
         'book' => 0,
-        'subscriber' => 1,
+        'subscriber' || 'staff' => 1,
         'subscription' => 2,
-        'loan' => 3,
+        'loan' || 'staff_passage' || 'gate_day' => 3,
         _ => 4,
       };
 
@@ -1932,6 +1966,438 @@ class LibraryDatabase {
       ''',
         [bookId],
       );
+    }
+  }
+
+  // --- Personnel et portail antivol -------------------------------------
+
+  /// Membre actif du personnel dont le badge est lu. Le TID est obligatoire :
+  /// un EPC recopié sur un autre tag ne suffit pas.
+  Future<StaffMember?> staffForBadge(String epc, String tid) async {
+    final normalizedEpc = epc.trim().toUpperCase();
+    if (!isBadgeEpc(normalizedEpc) || tid.trim().isEmpty) return null;
+    final rows = await (await database).query(
+      'staff',
+      where: 'badge_epc = ? AND badge_tid IS NOT NULL AND active = 1',
+      whereArgs: [normalizedEpc],
+      limit: 1,
+    );
+    if (rows.isEmpty) return null;
+    final staff = StaffMember.fromMap(rows.first);
+    return tidMatches(staff.badgeTid, tid) ? staff : null;
+  }
+
+  /// Livre du catalogue portant cet EPC, encodé ou non : au portail, tout
+  /// livre signé « BCM » appartient à la bibliothèque.
+  Future<Book?> bookForEpc(String epc) async {
+    final rows = await (await database).query(
+      'books',
+      where: 'epc = ?',
+      whereArgs: [epc.trim().toUpperCase()],
+      limit: 1,
+    );
+    return rows.isEmpty ? null : Book.fromMap(rows.first);
+  }
+
+  Future<List<StaffMember>> listStaff({bool activeOnly = false}) async {
+    final rows = await (await database).query(
+      'staff',
+      where: activeOnly ? 'active = 1' : null,
+      orderBy: 'name COLLATE NOCASE',
+    );
+    return rows.map(StaffMember.fromMap).toList();
+  }
+
+  /// Compteurs d'un portail pour un jour local.
+  Future<GateDayCounts> gateDay(String gateId, String day) async {
+    final rows = await (await database).query(
+      'gate_days',
+      where: 'server_id = ?',
+      whereArgs: ['$gateId:$day'],
+      limit: 1,
+    );
+    return rows.isEmpty
+        ? GateDayCounts(day: day)
+        : GateDayCounts.fromMap(rows.first);
+  }
+
+  /// Ajoute aux compteurs du jour de [at] et met la journée en file de
+  /// synchronisation (une seule mutation en attente par jour).
+  Future<GateDayCounts> addGateCounts({
+    required String gateId,
+    required String gateName,
+    required DateTime at,
+    int entries = 0,
+    int exits = 0,
+    int alarms = 0,
+  }) async {
+    final day = GateDayCounts.dayOf(at);
+    final serverId = '$gateId:$day';
+    final now = DateTime.now().toUtc().toIso8601String();
+    return (await database).transaction((transaction) async {
+      final current = await transaction.query(
+        'gate_days',
+        where: 'server_id = ?',
+        whereArgs: [serverId],
+        limit: 1,
+      );
+      final values = {
+        'gate_id': gateId,
+        'gate_name': gateName,
+        'day': day,
+        'entries': (current.firstOrNull?['entries'] as int? ?? 0) + entries,
+        'exits': (current.firstOrNull?['exits'] as int? ?? 0) + exits,
+        'alarms': (current.firstOrNull?['alarms'] as int? ?? 0) + alarms,
+        'updated_at': now,
+        'sync_state': 'pending',
+      };
+      if (current.isEmpty) {
+        await transaction.insert('gate_days', {
+          ...values,
+          'server_id': serverId,
+        });
+      } else {
+        await transaction.update(
+          'gate_days',
+          values,
+          where: 'server_id = ?',
+          whereArgs: [serverId],
+        );
+      }
+      await _queueGateDay(transaction, {...values, 'server_id': serverId});
+      return GateDayCounts.fromMap(values);
+    });
+  }
+
+  /// Enregistre le passage d'un membre du personnel et le synchronise.
+  Future<StaffPassage> recordStaffPassage({
+    required StaffMember staff,
+    required PassageDirection direction,
+    required DateTime at,
+    required String gateId,
+    required String gateName,
+  }) async {
+    final passage = StaffPassage(
+      serverId: _newId(),
+      staffServerId: staff.serverId,
+      staffNumber: staff.staffNumber,
+      staffName: staff.name,
+      direction: direction,
+      passedAt: at,
+      gateId: gateId,
+      gateName: gateName,
+    );
+    await (await database).transaction((transaction) async {
+      await transaction.insert('staff_passages', {
+        'server_id': passage.serverId,
+        'staff_server_id': passage.staffServerId,
+        'staff_number': passage.staffNumber,
+        'staff_name': passage.staffName,
+        'direction': direction.code,
+        'passed_at': at.toUtc().toIso8601String(),
+        'gate_id': gateId,
+        'gate_name': gateName,
+        'sync_state': 'pending',
+      });
+      await _queueStaffPassage(transaction, passage);
+    });
+    return passage;
+  }
+
+  /// Dernier passage du membre depuis [since] (tous portails synchronisés).
+  Future<StaffPassage?> lastStaffPassage(
+    String staffServerId, {
+    required DateTime since,
+  }) async {
+    final rows = await (await database).query(
+      'staff_passages',
+      where: 'staff_server_id = ? AND passed_at >= ?',
+      whereArgs: [staffServerId, since.toUtc().toIso8601String()],
+      orderBy: 'passed_at DESC',
+      limit: 1,
+    );
+    return rows.isEmpty ? null : StaffPassage.fromMap(rows.first);
+  }
+
+  /// Passages du personnel d'une journée locale, du plus récent au plus ancien.
+  Future<List<StaffPassage>> staffPassagesOn(
+    DateTime day, {
+    int limit = 200,
+  }) async {
+    final start = DateTime(day.year, day.month, day.day);
+    final end = DateTime(day.year, day.month, day.day + 1);
+    final rows = await (await database).query(
+      'staff_passages',
+      where: 'passed_at >= ? AND passed_at < ?',
+      whereArgs: [
+        start.toUtc().toIso8601String(),
+        end.toUtc().toIso8601String(),
+      ],
+      orderBy: 'passed_at DESC',
+      limit: limit,
+    );
+    return rows.map(StaffPassage.fromMap).toList();
+  }
+
+  static Future<String?> _badgeOwner(DatabaseExecutor db, String tid) async {
+    final rows = await db.query(
+      'staff',
+      columns: ['name'],
+      where: 'badge_tid = ?',
+      whereArgs: [tid],
+      limit: 1,
+    );
+    return rows.isEmpty ? null : rows.first['name'] as String;
+  }
+
+  static Future<void> _queueGateDay(
+    DatabaseExecutor database,
+    Map<String, Object?> row,
+  ) async {
+    final serverId = row['server_id'] as String;
+    await database.insert('sync_outbox', {
+      'mutation_id': _newId(),
+      'operation': 'upsert',
+      'entity_id': serverId,
+      'entity_type': 'gate_day',
+      'payload': jsonEncode({
+        'serverId': serverId,
+        'gateId': row['gate_id'],
+        'gateName': row['gate_name'],
+        'day': row['day'],
+        'entries': row['entries'],
+        'exits': row['exits'],
+        'alarms': row['alarms'],
+        'updatedAt': row['updated_at'],
+      }),
+      'created_at': DateTime.now().toUtc().toIso8601String(),
+    }, conflictAlgorithm: ConflictAlgorithm.replace);
+  }
+
+  static Future<void> _queueStaffPassage(
+    DatabaseExecutor database,
+    StaffPassage passage,
+  ) async {
+    await database.insert('sync_outbox', {
+      'mutation_id': _newId(),
+      'operation': 'upsert',
+      'entity_id': passage.serverId,
+      'entity_type': 'staff_passage',
+      'payload': jsonEncode(passage.toSyncJson()),
+      'created_at': DateTime.now().toUtc().toIso8601String(),
+    }, conflictAlgorithm: ConflictAlgorithm.replace);
+  }
+
+  static Future<void> _applyRemoteStaff(
+    Transaction transaction,
+    String serverId,
+    Map<String, Object?> change,
+  ) async {
+    if (change['operation'] == 'delete') {
+      await transaction.delete(
+        'staff',
+        where: 'server_id = ?',
+        whereArgs: [serverId],
+      );
+      return;
+    }
+    final rawStaff = change['staff'];
+    if (rawStaff is! Map) return;
+    final remote = rawStaff.cast<String, Object?>();
+    String? upper(Object? value) {
+      final text = value?.toString().trim().toUpperCase() ?? '';
+      return text.isEmpty ? null : text;
+    }
+
+    final badgeEpc = upper(remote['badgeEpc']);
+    final badgeTid = upper(remote['badgeTid']);
+    // Un badge réencodé pour une autre personne quitte l'ancienne.
+    if (badgeTid != null) {
+      await transaction.update(
+        'staff',
+        {'badge_tid': null, 'badge_tagged_at': null},
+        where: 'badge_tid = ? AND server_id <> ?',
+        whereArgs: [badgeTid, serverId],
+      );
+    }
+    if (badgeEpc != null) {
+      await transaction.update(
+        'staff',
+        {'badge_epc': null},
+        where: 'badge_epc = ? AND server_id <> ?',
+        whereArgs: [badgeEpc, serverId],
+      );
+    }
+    final now = DateTime.now().toUtc().toIso8601String();
+    final values = <String, Object?>{
+      'staff_number': _clean(remote['staffNumber'], 80).toUpperCase(),
+      'name': _clean(remote['name'] ?? remote['staffNumber'], 240),
+      'position': _clean(remote['position'], 120),
+      'email': _clean(remote['email'], 240),
+      'phone': _clean(remote['phone'], 80),
+      'active': remote['active'] == false ? 0 : 1,
+      'badge_epc': badgeEpc,
+      'badge_tid': badgeTid,
+      'badge_tagged_at': remote['badgeTaggedAt'],
+      'updated_at': remote['updatedAt'] ?? now,
+    };
+    final updated = await transaction.update(
+      'staff',
+      values,
+      where: 'server_id = ?',
+      whereArgs: [serverId],
+    );
+    if (updated == 0) {
+      await transaction.insert('staff', {
+        ...values,
+        'server_id': serverId,
+        'created_at': remote['createdAt'] ?? now,
+      });
+    }
+  }
+
+  /// Compteurs d'un portail : on garde le maximum de chaque valeur, un
+  /// compteur local plus avancé et pas encore envoyé n'est jamais écrasé.
+  static Future<void> _applyRemoteGateDay(
+    Transaction transaction,
+    String serverId,
+    Map<String, Object?> change,
+  ) async {
+    if (await _hasPending(transaction, serverId)) return;
+    if (change['operation'] == 'delete') {
+      await transaction.delete(
+        'gate_days',
+        where: 'server_id = ?',
+        whereArgs: [serverId],
+      );
+      return;
+    }
+    final rawDay = change['gateDay'];
+    if (rawDay is! Map) return;
+    final remote = rawDay.cast<String, Object?>();
+    final day = remote['day']?.toString() ?? '';
+    if (!RegExp(r'^\d{4}-\d{2}-\d{2}$').hasMatch(day)) return;
+    final current = (await transaction.query(
+      'gate_days',
+      where: 'server_id = ?',
+      whereArgs: [serverId],
+      limit: 1,
+    )).firstOrNull;
+    int count(String key) {
+      final incoming = (remote[key] as num?)?.toInt() ?? 0;
+      final local = (current?[key] as num?)?.toInt() ?? 0;
+      return max(incoming, local);
+    }
+
+    final values = {
+      'gate_id': remote['gateId']?.toString() ?? '',
+      'gate_name': _clean(remote['gateName'], 120),
+      'day': day,
+      'entries': count('entries'),
+      'exits': count('exits'),
+      'alarms': count('alarms'),
+      'updated_at':
+          remote['updatedAt'] ?? DateTime.now().toUtc().toIso8601String(),
+      'sync_state': 'synced',
+    };
+    if (current == null) {
+      await transaction.insert('gate_days', {...values, 'server_id': serverId});
+    } else {
+      await transaction.update(
+        'gate_days',
+        values,
+        where: 'server_id = ?',
+        whereArgs: [serverId],
+      );
+    }
+  }
+
+  static Future<void> _applyRemoteStaffPassage(
+    Transaction transaction,
+    String serverId,
+    Map<String, Object?> change,
+  ) async {
+    if (await _hasPending(transaction, serverId)) return;
+    if (change['operation'] == 'delete') {
+      await transaction.delete(
+        'staff_passages',
+        where: 'server_id = ?',
+        whereArgs: [serverId],
+      );
+      return;
+    }
+    final rawPassage = change['staffPassage'];
+    if (rawPassage is! Map) return;
+    final remote = rawPassage.cast<String, Object?>();
+    final direction = remote['direction']?.toString();
+    if (direction != 'in' && direction != 'out') return;
+    await transaction.insert('staff_passages', {
+      'server_id': serverId,
+      'staff_server_id': remote['staffServerId']?.toString() ?? '',
+      'staff_number': _clean(remote['staffNumber'], 80),
+      'staff_name': _clean(remote['staffName'], 240),
+      'direction': direction,
+      'passed_at':
+          remote['passedAt'] ?? DateTime.now().toUtc().toIso8601String(),
+      'gate_id': remote['gateId']?.toString() ?? '',
+      'gate_name': _clean(remote['gateName'], 120),
+      'sync_state': 'synced',
+    }, conflictAlgorithm: ConflictAlgorithm.replace);
+  }
+
+  /// Personnel (reçu de Windows) et activité du portail antivol.
+  static Future<void> _createGateTables(DatabaseExecutor database) async {
+    await database.execute('''
+      CREATE TABLE IF NOT EXISTS staff (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        server_id TEXT NOT NULL UNIQUE,
+        staff_number TEXT NOT NULL DEFAULT '',
+        name TEXT NOT NULL,
+        position TEXT NOT NULL DEFAULT '',
+        email TEXT NOT NULL DEFAULT '',
+        phone TEXT NOT NULL DEFAULT '',
+        active INTEGER NOT NULL DEFAULT 1,
+        badge_epc TEXT,
+        badge_tid TEXT,
+        badge_tagged_at TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      )
+    ''');
+    await database.execute('''
+      CREATE TABLE IF NOT EXISTS gate_days (
+        server_id TEXT PRIMARY KEY,
+        gate_id TEXT NOT NULL,
+        gate_name TEXT NOT NULL DEFAULT '',
+        day TEXT NOT NULL,
+        entries INTEGER NOT NULL DEFAULT 0,
+        exits INTEGER NOT NULL DEFAULT 0,
+        alarms INTEGER NOT NULL DEFAULT 0,
+        updated_at TEXT NOT NULL,
+        sync_state TEXT NOT NULL DEFAULT 'pending'
+      )
+    ''');
+    await database.execute('''
+      CREATE TABLE IF NOT EXISTS staff_passages (
+        server_id TEXT PRIMARY KEY,
+        staff_server_id TEXT NOT NULL,
+        staff_number TEXT NOT NULL DEFAULT '',
+        staff_name TEXT NOT NULL DEFAULT '',
+        direction TEXT NOT NULL CHECK(direction IN ('in', 'out')),
+        passed_at TEXT NOT NULL,
+        gate_id TEXT NOT NULL DEFAULT '',
+        gate_name TEXT NOT NULL DEFAULT '',
+        sync_state TEXT NOT NULL DEFAULT 'pending'
+      )
+    ''');
+    for (final statement in const [
+      'CREATE INDEX IF NOT EXISTS idx_staff_badge_epc ON staff(badge_epc)',
+      'CREATE INDEX IF NOT EXISTS idx_staff_badge_tid ON staff(badge_tid)',
+      'CREATE INDEX IF NOT EXISTS idx_gate_days_day ON gate_days(day)',
+      'CREATE INDEX IF NOT EXISTS idx_staff_passages_staff ON staff_passages(staff_server_id, passed_at)',
+      'CREATE INDEX IF NOT EXISTS idx_staff_passages_at ON staff_passages(passed_at)',
+    ]) {
+      await database.execute(statement);
     }
   }
 

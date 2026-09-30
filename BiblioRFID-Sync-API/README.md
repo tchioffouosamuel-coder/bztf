@@ -72,12 +72,17 @@ de rapport. La clé d'appareil (`X-Device-Key`) fonctionne aussi en lecture.
 | `GET /api/v1/loans` | `status` (`active`, `overdue`, `returned`), `memberNumber`, `bookServerId`, `from`/`to` (date d'emprunt), `updatedSince` | Emprunts, avec titre et cote du livre, nom de l'abonné, `overdue`, `returnedLate` |
 | `GET /api/v1/loans/{serverId}` | — | Un emprunt |
 | `GET /api/v1/returns` | `memberNumber`, `bookServerId`, `from`/`to` (date de retour), `late` | Remises de livres (emprunts rendus), du plus récent au plus ancien |
+| `GET /api/v1/staff` | `search` (matricule, nom, fonction, e-mail), `active`, `hasBadge`, `updatedSince` | Personnel et badge RFID |
+| `GET /api/v1/staff/{serverId}` | — | Un membre du personnel |
+| `GET /api/v1/staff/{serverId}/passages` | `gateId`, `direction` (`in`, `out`), `from`/`to` | Passages de cette personne au portail |
+| `GET /api/v1/staff-passages` | `staffServerId`, `gateId`, `direction`, `from`/`to` (heure de passage) | Entrées et sorties du personnel, de la plus récente à la plus ancienne |
+| `GET /api/v1/gate-days` | `gateId`, `from`/`to` (`AAAA-MM-JJ`) | Fréquentation : entrées, sorties et alarmes par portail et par jour |
 | `GET /api/v1/devices` | — | Appareils : nom, plateforme, version, dernière activité, nombres de comptes, d'entrées d'activité et de modifications |
 | `GET /api/v1/devices/{deviceId}` | — | Un appareil |
 | `GET /api/v1/devices/{deviceId}/users` | `search`, `role`, `active` | Comptes d'un appareil |
 | `GET /api/v1/users` | `deviceId`, `search`, `role` (`admin`, `operateur`), `active` | Comptes utilisateurs de tous les postes, **sans mot de passe** |
 | `GET /api/v1/activity` | `deviceId`, `type`, `result`, `bookServerId`, `from`/`to` | Journal d'activité des postes (lectures, encodages, prêts, connexions…) |
-| `GET /api/v1/history` | `entityType` (`book`, `subscriber`, `subscription`, `loan`), `entityId`, `deviceId`, `from`/`to`, `since` | Historique des modifications synchronisées, avec l'état complet de l'entité |
+| `GET /api/v1/history` | `entityType` (`book`, `subscriber`, `subscription`, `loan`, `staff`, `gate_day`, `staff_passage`), `entityId`, `deviceId`, `from`/`to`, `since` | Historique des modifications synchronisées, avec l'état complet de l'entité |
 
 `/history` est trié du plus récent au plus ancien. Avec `since=<séquence>`, il est trié
 dans l'ordre croissant à partir de cette séquence : un système externe peut ainsi
@@ -123,11 +128,25 @@ Chaque mutation et chaque changement portent un `entityType` :
   ancienne ; si deux emprunts d'un même livre sont en cours, le plus récent reste
   actif et l'autre est clôturé à sa date d'emprunt (un changement est émis).
 
-Dans un lot, le serveur applique les livres, puis les abonnés, les abonnements et
-enfin les emprunts, pour que les clients reçoivent les références avant leur usage.
+- `staff` : champ `staff`, identifiant UUID `serverId`, matricule `staffNumber` en
+  majuscules. Le membre du personnel transporte son badge RFID (`badgeEpc` au format
+  « BCM » 3, `badgeTid`, `badgeTaggedAt`), distinct des livres et des cartes
+  d'abonné. Un badge physique réencodé pour quelqu'un d'autre quitte son ancien
+  titulaire (un changement est émis pour lui).
+- `gate_day` : champ `gateDay`, identifiant `<gateId>:<AAAA-MM-JJ>` (jour local du
+  portail). Entrées, sorties et alarmes d'un portail antivol pour une journée. Seul le
+  portail les écrit ; le serveur garde le maximum de chaque compteur, si bien qu'un
+  portail réinstallé qui repart de zéro n'efface rien.
+- `staff_passage` : champ `staffPassage`, identifiant UUID `serverId`. Passage d'un
+  membre du personnel (`staffServerId`) au portail, sens `in` ou `out`, heure
+  `passedAt`, portail `gateId`/`gateName`.
+
+Dans un lot, le serveur applique les livres, puis les abonnés et le personnel, les
+abonnements et enfin les emprunts et l'activité des portails, pour que les clients
+reçoivent les références avant leur usage.
 
 Les bases existantes sont migrées au démarrage (colonne `events.entity_type`, tables
-`subscriptions` et `loans`).
+`subscriptions`, `loans`, `staff`, `gate_days` et `staff_passages`).
 
 ## Compiler
 

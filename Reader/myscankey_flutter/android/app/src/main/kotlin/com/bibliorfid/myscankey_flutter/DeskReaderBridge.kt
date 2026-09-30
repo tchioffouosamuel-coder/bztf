@@ -12,6 +12,9 @@ import com.gg.reader.api.protocol.gx.Message
 import com.gg.reader.api.protocol.gx.MsgAppGetReaderInfo
 import com.gg.reader.api.protocol.gx.MsgAppSetBeep
 import com.gg.reader.api.protocol.gx.MsgAppSetBeepOnOff
+import com.gg.reader.api.protocol.gx.MsgBaseGetBaseband
+import com.gg.reader.api.protocol.gx.MsgBaseGetPower
+import com.gg.reader.api.protocol.gx.MsgBaseGetTagLog
 import com.gg.reader.api.protocol.gx.MsgBaseInventoryEpc
 import com.gg.reader.api.protocol.gx.MsgBaseSetPower
 import com.gg.reader.api.protocol.gx.MsgBaseStop
@@ -41,6 +44,10 @@ class DeskReaderBridge(
 	private val tagEventAt = ConcurrentHashMap<String, Long>()
 	@Volatile private var client: GClient? = null
 	@Volatile private var eventSink: EventChannel.EventSink? = null
+
+	/** Début de la lecture continue et dernière lecture de chaque EPC (diagnostic). */
+	@Volatile private var inventoryStartedAt = 0L
+	private val lastReadAt = ConcurrentHashMap<String, Long>()
 
 	/** Relecture de contrôle en cours : TID → EPC lus, non transmis à Flutter. */
 	@Volatile private var verification: ConcurrentHashMap<String, String>? = null
@@ -111,6 +118,7 @@ class DeskReaderBridge(
 				}
 				val info = MsgAppGetReaderInfo()
 				candidate.sendSynMsg(info)
+				logReaderSettings(candidate)
 				client = candidate
 				tagEventAt.clear()
 				mainHandler.post {
@@ -159,7 +167,10 @@ class DeskReaderBridge(
 					len = TID_WORDS
 				}
 				tagEventAt.clear()
+				lastReadAt.clear()
+				inventoryStartedAt = SystemClock.elapsedRealtime()
 				current.sendSynMsg(inventory)
+				Log.i(TAG, "Inventory started: power=${power ?: "reader"} dBm, antenna 1, TID ${TID_WORDS} words, rt=${inventory.rtCode}")
 				if (!inventory.succeeded()) {
 					postError(result, "INVENTORY_START", "Le lecteur de bureau a refusé le démarrage de la lecture${inventory.detail()}.")
 					return@execute
@@ -276,6 +287,19 @@ class DeskReaderBridge(
 		}
 	}
 
+	/** Réglages stockés dans le lecteur : puissance, bande de base, filtre des tags. */
+	private fun logReaderSettings(client: GClient) = runCatching {
+		val power = MsgBaseGetPower().also { client.sendSynMsg(it) }
+		val baseband = MsgBaseGetBaseband().also { client.sendSynMsg(it) }
+		val tagLog = MsgBaseGetTagLog().also { client.sendSynMsg(it) }
+		Log.i(
+			TAG,
+			"Reader settings: power=${power.dicPower} " +
+				"baseband(speed=${baseband.baseSpeed}, q=${baseband.getqValue()}, session=${baseband.session}, flag=${baseband.inventoryFlag}) " +
+				"tagFilter(repeat=${tagLog.repeatedTime}x10ms, rssiThreshold=${tagLog.rssiTV})",
+		)
+	}.onFailure { Log.w(TAG, "Reader settings unavailable", it) }
+
 	private fun tidFilter(tid: String) = ParamEpcFilter().apply {
 		area = EnumG.ParamFilterArea_TID
 		bitStart = 0
@@ -299,6 +323,12 @@ class DeskReaderBridge(
 			return@runCatching
 		}
 		val now = SystemClock.elapsedRealtime()
+		// Diagnostic : première lecture d'un tag (ou après une absence).
+		val previousRead = lastReadAt.put(epc, now)
+		if (previousRead == null || now - previousRead > FIRST_READ_GAP_MS) {
+			Log.i(TAG, "Tag seen: epc=$epc rssi=${info.rssi} tid=${if (info.tid.isNullOrEmpty()) "none" else "yes"} " +
+				"sinceInventory=${now - inventoryStartedAt}ms gap=${previousRead?.let { now - it } ?: -1}ms")
+		}
 		val last = tagEventAt[epc]
 		if (last != null && now - last < TAG_EVENT_DEBOUNCE_MS) return@runCatching
 		tagEventAt[epc] = now
@@ -351,6 +381,7 @@ class DeskReaderBridge(
 		const val MAX_POWER = 33
 		const val TID_WORDS = 6
 		const val TAG_EVENT_DEBOUNCE_MS = 300L
+		const val FIRST_READ_GAP_MS = 2000L
 		const val VERIFY_SETTLE_MS = 180L
 		const val VERIFY_TIMEOUT_MS = 1800L
 		const val HEX = "0123456789ABCDEF"

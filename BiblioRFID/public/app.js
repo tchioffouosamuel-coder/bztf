@@ -17,11 +17,14 @@ import Download from "/vendor/lucide/icons/download.js";
 import FlaskConical from "/vendor/lucide/icons/flask-conical.js";
 import HandHelping from "/vendor/lucide/icons/hand-helping.js";
 import HistoryIcon from "/vendor/lucide/icons/history.js";
+import DoorOpen from "/vendor/lucide/icons/door-open.js";
 import IdCard from "/vendor/lucide/icons/id-card.js";
+import IdCardLanyard from "/vendor/lucide/icons/id-card-lanyard.js";
 import Inbox from "/vendor/lucide/icons/inbox.js";
 import LayoutDashboard from "/vendor/lucide/icons/layout-dashboard.js";
 import Library from "/vendor/lucide/icons/library.js";
 import LibraryBig from "/vendor/lucide/icons/library-big.js";
+import LogIn from "/vendor/lucide/icons/log-in.js";
 import LogOut from "/vendor/lucide/icons/log-out.js";
 import Menu from "/vendor/lucide/icons/menu.js";
 import Moon from "/vendor/lucide/icons/moon.js";
@@ -38,6 +41,7 @@ import ScanLine from "/vendor/lucide/icons/scan-line.js";
 import Search from "/vendor/lucide/icons/search.js";
 import Settings2 from "/vendor/lucide/icons/settings-2.js";
 import ShieldCheck from "/vendor/lucide/icons/shield-check.js";
+import Siren from "/vendor/lucide/icons/siren.js";
 import Sun from "/vendor/lucide/icons/sun.js";
 import Trash2 from "/vendor/lucide/icons/trash-2.js";
 import TriangleAlert from "/vendor/lucide/icons/triangle-alert.js";
@@ -48,6 +52,7 @@ import UserPen from "/vendor/lucide/icons/user-pen.js";
 import UserPlus from "/vendor/lucide/icons/user-plus.js";
 import UserRound from "/vendor/lucide/icons/user-round.js";
 import Users from "/vendor/lucide/icons/users.js";
+import UsersRound from "/vendor/lucide/icons/users-round.js";
 import X from "/vendor/lucide/icons/x.js";
 
 const lucideIcons = {
@@ -65,15 +70,18 @@ const lucideIcons = {
   "circle-alert": CircleAlert,
   "circle-check": CircleCheck,
   "clock-3": Clock3,
+  "door-open": DoorOpen,
   download: Download,
   "flask-conical": FlaskConical,
   "hand-helping": HandHelping,
   history: HistoryIcon,
   "id-card": IdCard,
+  "id-card-lanyard": IdCardLanyard,
   inbox: Inbox,
   "layout-dashboard": LayoutDashboard,
   library: Library,
   "library-big": LibraryBig,
+  "log-in": LogIn,
   "log-out": LogOut,
   menu: Menu,
   moon: Moon,
@@ -90,6 +98,7 @@ const lucideIcons = {
   search: Search,
   "settings-2": Settings2,
   "shield-check": ShieldCheck,
+  siren: Siren,
   sun: Sun,
   "trash-2": Trash2,
   "triangle-alert": TriangleAlert,
@@ -100,6 +109,7 @@ const lucideIcons = {
   "user-plus": UserPlus,
   "user-round": UserRound,
   users: Users,
+  "users-round": UsersRound,
   x: X,
 };
 
@@ -131,6 +141,10 @@ const state = {
   subscriptionRows: [],
   subscriptionFilter: "tous",
   subscriptionSearch: "",
+  staffRows: [],
+  staffFilter: "tous",
+  staffSearch: "",
+  detailStaff: null,
   cardScanActive: false,
   cardScanTimer: null,
   cardTagKey: null,
@@ -162,6 +176,8 @@ const viewMeta = {
   subscribers: ["Lecteurs inscrits", "Abonnés"],
   subscriptions: ["Lecteurs inscrits", "Abonnements"],
   loans: ["Circulation", "Emprunts"],
+  staff: ["Équipe", "Personnel"],
+  gate: ["Sécurité et fréquentation", "Portail antivol"],
   station: ["Opérations RFID", "Station RFID"],
   history: ["Traçabilité", "Historique"],
   settings: ["Configuration", "Paramètres"],
@@ -339,6 +355,9 @@ function operationIcon(type) {
       lecture: "scan-line",
       connexion: "plug-zap",
       catalogue: "book-plus",
+      personnel: "id-card-lanyard",
+      badge: "id-card-lanyard",
+      portail: "siren",
     }[type] || "activity"
   );
 }
@@ -363,6 +382,8 @@ function setView(name) {
   if (name === "subscribers") loadSubscribers();
   if (name === "subscriptions") loadSubscriptionRegister();
   if (name === "loans") loadLoans();
+  if (name === "staff") loadStaff();
+  if (name === "gate") loadGate();
   if (name === "station") startAutoReading();
   if (name === "history") loadHistory();
   if (name === "settings") loadSyncStatus(false);
@@ -1097,6 +1118,297 @@ async function encodeCardFor(subscriber, dialog = null) {
   if (dialog) await openSubscriberDetails(subscriber.id);
 }
 
+// --- Personnel et portail antivol ----------------------------------------
+
+function isToday(value) {
+  return Boolean(value) && new Date(value).toDateString() === new Date().toDateString();
+}
+
+function localDayValue(date = new Date()) {
+  return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
+}
+
+function directionBadge(direction) {
+  return direction === "in"
+    ? `<span class="direction-badge in"><i data-lucide="log-in"></i>Entrée</span>`
+    : `<span class="direction-badge out"><i data-lucide="log-out"></i>Sortie</span>`;
+}
+
+function formatTime(value) {
+  return new Intl.DateTimeFormat("fr-FR", {
+    hour: "2-digit",
+    minute: "2-digit",
+  }).format(new Date(value));
+}
+
+function staffIsPresent(staff) {
+  return staff.last_direction === "in" && isToday(staff.last_passed_at);
+}
+
+function staffMatchesFilter(staff) {
+  switch (state.staffFilter) {
+    case "presents":
+      return Boolean(staff.active) && staffIsPresent(staff);
+    case "sans-badge":
+      return !staff.badge_tid;
+    case "inactifs":
+      return !staff.active;
+    default:
+      return true;
+  }
+}
+
+async function loadStaff() {
+  try {
+    state.staffRows = await api(
+      `/api/staff?search=${encodeURIComponent(state.staffSearch)}`,
+    );
+    renderStaff();
+  } catch (error) {
+    toast(error.message, "error");
+  }
+}
+
+function renderStaff() {
+  const rows = state.staffRows.filter(staffMatchesFilter);
+  $("#staff-count").textContent =
+    `${rows.length} membre${rows.length > 1 ? "s" : ""}`;
+  $("#staff-empty").classList.toggle("hidden", rows.length > 0);
+  $("#staff-table").innerHTML = rows
+    .map(
+      (staff) => `<tr data-staff-id="${staff.id}">
+    <td><div class="table-book"><span class="book-glyph"><i data-lucide="user-round"></i></span><div><strong>${escapeHtml(staff.name)}</strong><small class="mono">${escapeHtml(staff.staff_number)}</small></div></div>${staff.active ? "" : `<div class="cell-subtle danger-text">Désactivé</div>`}</td>
+    <td>${escapeHtml(staff.position || "—")}</td>
+    <td>${escapeHtml(staff.phone || "—")}<div class="cell-subtle">${escapeHtml(staff.email || "")}</div></td>
+    <td>${staff.badge_tid ? `<span class="status-badge encode">Encodé</span>` : `<span class="cell-subtle">Non encodé</span>`}</td>
+    <td>${staff.last_passed_at ? `${directionBadge(staff.last_direction)}<div class="cell-subtle">${formatDate(staff.last_passed_at)}</div>` : `<span class="cell-subtle">Aucun</span>`}</td>
+    <td><div class="table-actions">
+      <button class="icon-button" data-staff-action="badge" data-id="${staff.id}" title="Encoder le badge" aria-label="Encoder le badge"><i data-lucide="id-card-lanyard"></i></button>
+      <button class="icon-button" data-staff-action="edit" data-id="${staff.id}" title="Modifier" aria-label="Modifier"><i data-lucide="pencil"></i></button>
+      <button class="icon-button danger" data-staff-action="delete" data-id="${staff.id}" title="Supprimer" aria-label="Supprimer"><i data-lucide="trash-2"></i></button>
+    </div></td>
+  </tr>`,
+    )
+    .join("");
+  icons();
+}
+
+function openStaffDialog(staff = null) {
+  const form = $("#staff-form");
+  form.reset();
+  form.elements.id.value = staff?.id || "";
+  form.elements.staff_number.value = staff?.staff_number || "";
+  form.elements.name.value = staff?.name || "";
+  form.elements.position.value = staff?.position || "";
+  form.elements.phone.value = staff?.phone || "";
+  form.elements.email.value = staff?.email || "";
+  form.elements.active.checked = staff ? Boolean(staff.active) : true;
+  $("#staff-active-field").classList.toggle("hidden", !staff);
+  $("#staff-dialog-title").textContent = staff
+    ? `Modifier ${staff.name}`
+    : "Nouveau membre";
+  $("#staff-dialog").showModal();
+  setTimeout(
+    () => (staff ? form.elements.name : form.elements.staff_number).focus(),
+    50,
+  );
+}
+
+async function saveStaff(event) {
+  if (event.submitter?.value === "cancel") return;
+  event.preventDefault();
+  const form = event.currentTarget;
+  const id = form.elements.id.value;
+  const input = {
+    staff_number: form.elements.staff_number.value,
+    name: form.elements.name.value,
+    position: form.elements.position.value,
+    phone: form.elements.phone.value,
+    email: form.elements.email.value,
+  };
+  if (id) input.active = form.elements.active.checked;
+  try {
+    const saved = await api(id ? `/api/staff/${id}` : "/api/staff", {
+      method: id ? "PUT" : "POST",
+      body: JSON.stringify(input),
+    });
+    $("#staff-dialog").close();
+    toast(id ? "Fiche mise à jour." : `${saved.name} ajouté(e) au personnel.`);
+    await loadStaff();
+    if (state.detailStaff?.staff.id === saved.id)
+      await openStaffDetails(saved.id);
+  } catch (error) {
+    toast(error.message, "error");
+  }
+}
+
+async function openStaffDetails(id) {
+  try {
+    state.detailStaff = await api(`/api/staff/${id}`);
+    renderStaffDetails();
+    const dialog = $("#staff-detail-dialog");
+    if (!dialog.open) dialog.showModal();
+  } catch (error) {
+    toast(error.message, "error");
+  }
+}
+
+function renderStaffDetails() {
+  const { staff, passages } = state.detailStaff;
+  $("#staff-detail-title").textContent = staff.name;
+  $("#staff-detail-summary").innerHTML = `
+    <div><small>Matricule</small><strong class="mono">${escapeHtml(staff.staff_number)}</strong></div>
+    <div><small>Fonction</small><strong>${escapeHtml(staff.position || "—")}</strong>${staff.active ? "" : `<span class="danger-text">Désactivé</span>`}</div>
+    <div><small>Contact</small><strong>${escapeHtml(staff.phone || "—")}</strong><span>${escapeHtml(staff.email || "")}</span></div>
+    <div><small>Badge RFID</small><strong>${staff.badge_tid ? `Encodé le ${formatDate(staff.badge_tagged_at, false)}` : "Non encodé"}</strong></div>`;
+  $("#staff-passages-table").innerHTML = passages.length
+    ? passages
+        .map(
+          (passage) => `<tr>
+      <td>${formatDate(passage.passed_at)}</td>
+      <td>${directionBadge(passage.direction)}</td>
+      <td>${escapeHtml(passage.gate_name || "Portail")}</td>
+    </tr>`,
+        )
+        .join("")
+    : `<tr><td colspan="3">Aucun passage enregistré au portail.</td></tr>`;
+  $("#detail-encode-badge span").textContent = staff.badge_tid
+    ? "Réencoder le badge"
+    : "Encoder le badge";
+  icons();
+}
+
+async function deleteStaff(staff, dialog = null) {
+  const options = {
+    title: "Supprimer ce membre ?",
+    text: `${staff.name} (${staff.staff_number}) sera retiré du personnel. Son badge ne sera plus reconnu ; ses passages déjà enregistrés restent dans l’historique.`,
+    confirmButtonText: "Supprimer",
+    confirmButtonClass: "button danger",
+  };
+  const confirmed = dialog
+    ? await confirmOverDialog(dialog, options)
+    : await confirmAction(options);
+  if (!confirmed) return;
+  try {
+    await api(`/api/staff/${staff.id}`, { method: "DELETE" });
+    state.detailStaff = null;
+    toast("Membre du personnel supprimé.");
+    await loadStaff();
+  } catch (error) {
+    toast(error.message, "error");
+    if (dialog) dialog.showModal();
+  }
+}
+
+/**
+ * Encode le badge d'un membre du personnel : le serveur exige un seul tag,
+ * refuse un livre, une carte d'abonné ou le badge d'un autre, puis vérifie
+ * l'écriture par relecture.
+ */
+async function encodeBadgeFor(staff, dialog = null) {
+  const replacing = Boolean(staff.badge_tid);
+  const options = {
+    title: replacing ? "Réencoder le badge ?" : "Encoder le badge ?",
+    text: `Posez ${replacing ? "le nouveau badge" : "un badge vierge"} de ${staff.name}, seul, sur le lecteur, puis confirmez.${replacing ? " L’ancien badge ne sera plus reconnu au portail." : ""}`,
+    confirmButtonText: "Encoder",
+  };
+  const confirmed = dialog
+    ? await confirmOverDialog(dialog, options)
+    : await confirmAction(options);
+  if (!confirmed) return;
+  try {
+    const result = await api(`/api/staff/${staff.id}/badge`, {
+      method: "POST",
+      body: JSON.stringify(getConnection()),
+    });
+    toast(`Badge encodé pour ${result.staff.name}.`);
+    await loadStaff();
+  } catch (error) {
+    toast(error.message, "error");
+  }
+  if (dialog) await openStaffDetails(staff.id);
+}
+
+async function handleStaffTable(event) {
+  const button = event.target.closest("button[data-staff-action]");
+  const id = Number(
+    button?.dataset.id || event.target.closest("tr[data-staff-id]")?.dataset.staffId,
+  );
+  if (!id) return;
+  const staff = state.staffRows.find((row) => row.id === id);
+  if (button?.dataset.staffAction === "edit") openStaffDialog(staff);
+  else if (button?.dataset.staffAction === "badge") encodeBadgeFor(staff);
+  else if (button?.dataset.staffAction === "delete") deleteStaff(staff);
+  else openStaffDetails(id);
+}
+
+async function loadGate() {
+  const input = $("#gate-day");
+  if (!input.value) input.value = localDayValue();
+  const day = input.value;
+  try {
+    const [stats, dayStats, passages] = await Promise.all([
+      api("/api/gate/stats"),
+      api(`/api/gate/stats?from=${day}&to=${day}`),
+      api(`/api/staff-passages?day=${day}`),
+    ]);
+    const selected = dayStats.days[0] || { entries: 0, exits: 0, alarms: 0, gates: [] };
+    const present = passages.presence.filter((row) => row.last_direction === "in");
+    $("#gate-entries").textContent = selected.entries;
+    $("#gate-exits").textContent = selected.exits;
+    $("#gate-alarms").textContent = selected.alarms;
+    $("#gate-staff-present").textContent = present.length;
+    const today = day === localDayValue();
+    $("#gate-subtitle").textContent = today
+      ? "Aujourd’hui · synchronisé depuis les portails"
+      : `Journée du ${formatDate(`${day}T12:00:00`, false)}`;
+    $("#gate-passages-caption").textContent =
+      `${passages.passages.length} passage${passages.passages.length > 1 ? "s" : ""} de badge`;
+    $("#gate-passages-table").innerHTML = passages.passages.length
+      ? passages.passages
+          .map(
+            (passage) => `<tr${passage.staff_id ? ` data-staff-id="${passage.staff_id}"` : ""}>
+        <td class="mono">${formatTime(passage.passed_at)}</td>
+        <td><strong>${escapeHtml(passage.staff_name || "Membre supprimé")}</strong><div class="cell-subtle mono">${escapeHtml(passage.staff_number)}</div></td>
+        <td>${directionBadge(passage.direction)}</td>
+        <td>${escapeHtml(passage.gate_name || "Portail")}</td>
+      </tr>`,
+          )
+          .join("")
+      : `<tr><td colspan="4">Aucun badge du personnel détecté ce jour-là.</td></tr>`;
+    $("#gate-presence-table").innerHTML = passages.presence.length
+      ? passages.presence
+          .map(
+            (row) => `<tr>
+        <td><strong>${escapeHtml(row.staff_name || "—")}</strong><div class="cell-subtle mono">${escapeHtml(row.staff_number)}</div></td>
+        <td class="mono">${formatTime(row.first_passed_at)}</td>
+        <td class="mono">${formatTime(row.last_passed_at)}</td>
+        <td>${row.last_direction === "in" ? `<span class="status-badge encode">Présent</span>` : `<span class="status-badge a_encoder">Parti</span>`}</td>
+      </tr>`,
+          )
+          .join("")
+      : `<tr><td colspan="4">Aucun passage.</td></tr>`;
+    $("#gate-history-caption").textContent =
+      `Du ${formatDate(`${stats.from}T12:00:00`, false)} au ${formatDate(`${stats.to}T12:00:00`, false)} · ${stats.totals.entries} entrées, ${stats.totals.exits} sorties, ${stats.totals.alarms} alarmes`;
+    $("#gate-history-table").innerHTML = stats.days.length
+      ? stats.days
+          .map(
+            (row) => `<tr>
+        <td>${formatDate(`${row.day}T12:00:00`, false)}</td>
+        <td>${row.entries}</td>
+        <td>${row.exits}</td>
+        <td>${row.alarms ? `<span class="danger-text">${row.alarms}</span>` : "0"}</td>
+        <td class="cell-subtle">${row.gates.map((gate) => escapeHtml(gate.gateName)).join(", ")}</td>
+      </tr>`,
+          )
+          .join("")
+      : `<tr><td colspan="5">Aucune donnée : configurez un portail antivol (application Android, rôle « Portail antivol ») et la synchronisation.</td></tr>`;
+    icons();
+  } catch (error) {
+    toast(error.message, "error");
+  }
+}
+
 function loanStatusBadge(loan) {
   if (loan.returned_at)
     return new Date(loan.returned_at) > new Date(loan.due_at)
@@ -1439,6 +1751,16 @@ function applyCardSnapshot(snapshot) {
       "Carte reconnue",
       `${subscriber.name} · ${subscriber.member_number}`,
       "success",
+    );
+    return;
+  }
+  if (tag.staff || tag.kind === "badge") {
+    setCardStatus(
+      "Ce tag est un badge du personnel",
+      tag.staff
+        ? `${tag.staff.name} · ${tag.staff.staff_number}. Posez la carte de l’abonné.`
+        : "Posez la carte de l’abonné.",
+      "error",
     );
     return;
   }
@@ -2070,8 +2392,50 @@ function showSubscriberCard(subscriber) {
   icons();
 }
 
-/** Tag au format carte ou livre, mais inconnu de ce poste : jamais réécrit. */
+function showStaffBadge(staff) {
+  state.selectedBook = null;
+  $("#multiple-identification").classList.add("hidden");
+  $("#unknown-panel").classList.add("hidden");
+  $("#quick-register-form").classList.add("hidden");
+  const container = $("#selected-book");
+  container.classList.remove("hidden");
+  container.className = "selected-book recognized";
+  container.innerHTML = `<i data-lucide="id-card-lanyard"></i><div class="selected-book-copy">
+    <span class="selection-label">Badge du personnel</span><h3>${escapeHtml(staff.name)}</h3>
+    <p>${escapeHtml(staff.position || "Fonction non renseignée")}</p>
+    <div class="selected-identifiers"><strong>${escapeHtml(staff.staff_number)}</strong></div>
+  </div>`;
+  setWriteStatus(
+    "Badge du personnel reconnu",
+    `${staff.staff_number} · ${staff.name}`,
+    "success",
+  );
+  icons();
+}
+
+/** Tag au format carte, badge ou livre, mais inconnu de ce poste : jamais réécrit. */
 function showForeignTag(tag) {
+  if (tag.kind === "badge") {
+    state.selectedBook = null;
+    $("#multiple-identification").classList.add("hidden");
+    $("#unknown-panel").classList.add("hidden");
+    $("#quick-register-form").classList.add("hidden");
+    const container = $("#selected-book");
+    container.classList.remove("hidden");
+    container.className = "selected-book";
+    container.innerHTML = `<i data-lucide="id-card-lanyard"></i><div class="selected-book-copy">
+    <span class="selection-label">Badge du personnel non reconnu</span><h3>Badge d’un autre poste ou désactivé</h3>
+    <p>Synchronisez ce poste pour l’identifier ; il ne sera pas réécrit comme livre.</p>
+    <div class="selected-identifiers"><strong>EPC</strong><code>${escapeHtml(tag.epc || "—")}</code></div>
+  </div>`;
+    setWriteStatus("Badge non reconnu", "Synchronisation nécessaire", "warning");
+    setReaderBanner(
+      "Badge du personnel détecté",
+      "Un badge du personnel ne peut pas être encodé comme livre.",
+    );
+    icons();
+    return;
+  }
   const card = tag.kind === "card";
   state.selectedBook = null;
   $("#multiple-identification").classList.add("hidden");
@@ -2125,7 +2489,7 @@ function showMultipleIdentification(tags, changed) {
   $("#quick-register-form").classList.add("hidden");
   const panel = $("#multiple-identification");
   const recognized = tags.filter((tag) => tag.book).length;
-  const cards = tags.filter((tag) => tag.subscriber).length;
+  const cards = tags.filter((tag) => tag.subscriber || tag.staff).length;
   const unknown = tags.length - recognized - cards;
   panel.classList.remove("hidden");
   $("#multiple-count").textContent = tags.length;
@@ -2133,7 +2497,13 @@ function showMultipleIdentification(tags, changed) {
     `${recognized} livre${recognized > 1 ? "s" : ""} reconnu${recognized > 1 ? "s" : ""}${unknown ? ` · ${unknown} inconnu${unknown > 1 ? "s" : ""}` : ""}`;
   $("#multiple-book-list").innerHTML = tags
     .map((tag) =>
-      tag.subscriber
+      tag.staff
+        ? `<div class="multiple-book-item">
+        <i data-lucide="id-card-lanyard"></i>
+        <div><strong>${escapeHtml(tag.staff.name)}</strong><small>Badge du personnel · ${escapeHtml(tag.staff.staff_number)}</small><code>${escapeHtml(tag.tid || tag.epc)}</code></div>
+        <span class="multiple-signal">Signal<b>${tag.rssi ?? "—"}</b></span>
+      </div>`
+        : tag.subscriber
         ? `<div class="multiple-book-item">
         <i data-lucide="id-card"></i>
         <div><strong>${escapeHtml(tag.subscriber.name)}</strong><small>Carte d’abonné · ${escapeHtml(tag.subscriber.member_number)}</small><code>${escapeHtml(tag.tid || tag.epc)}</code></div>
@@ -2394,7 +2764,16 @@ async function renderVisualTags(notify = true) {
     return;
   }
 
-  if (tag.kind === "card" || tag.kind === "book") {
+  if (tag.staff) {
+    showStaffBadge(tag.staff);
+    setReaderBanner(
+      "Badge du personnel détecté",
+      "Un badge du personnel ne peut pas être encodé comme livre.",
+    );
+    return;
+  }
+
+  if (tag.kind === "card" || tag.kind === "book" || tag.kind === "badge") {
     showForeignTag(tag);
     return;
   }
@@ -2550,6 +2929,28 @@ function bindEvents() {
       renderSubscribers();
     }),
   );
+  $("#new-staff").addEventListener("click", () => openStaffDialog());
+  $("#staff-form").addEventListener("submit", saveStaff);
+  $("#staff-table").addEventListener("click", handleStaffTable);
+  bindRegisterControls("#staff-search", "#staff-filter", "staff", loadStaff);
+  $("#detail-edit-staff").addEventListener("click", () =>
+    openStaffDialog(state.detailStaff.staff),
+  );
+  $("#detail-encode-badge").addEventListener("click", () =>
+    encodeBadgeFor(state.detailStaff.staff, $("#staff-detail-dialog")),
+  );
+  $("#detail-delete-staff").addEventListener("click", () =>
+    deleteStaff(state.detailStaff.staff, $("#staff-detail-dialog")),
+  );
+  $("#staff-detail-dialog").addEventListener("close", () => {
+    if (state.activeView === "staff") loadStaff();
+  });
+  $("#gate-day").addEventListener("change", loadGate);
+  $("#refresh-gate").addEventListener("click", loadGate);
+  $("#gate-passages-table").addEventListener("click", (event) => {
+    const id = Number(event.target.closest("tr[data-staff-id]")?.dataset.staffId);
+    if (id) openStaffDetails(id);
+  });
   $("#new-subscription").addEventListener("click", () => openSubscriptionDialog());
   $("#subscription-form").addEventListener("submit", saveSubscription);
   $("#subscriptions-table").addEventListener("click", handleSubscriptionTable);
