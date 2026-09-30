@@ -131,6 +131,10 @@ class _KioskScreenState extends State<KioskScreen> {
                         key: const ValueKey('home'),
                         kiosk: kiosk,
                       ),
+                      KioskStage.browse => _BrowseView(
+                        key: const ValueKey('browse'),
+                        kiosk: kiosk,
+                      ),
                       KioskStage.borrow => _BorrowView(
                         key: const ValueKey('borrow'),
                         kiosk: kiosk,
@@ -254,7 +258,7 @@ class _HomeView extends StatelessWidget {
       child: SingleChildScrollView(
         padding: const EdgeInsets.all(24),
         child: ConstrainedBox(
-          constraints: const BoxConstraints(maxWidth: 760),
+          constraints: const BoxConstraints(maxWidth: 960),
           child: Column(
             children: [
               Icon(
@@ -281,6 +285,12 @@ class _HomeView extends StatelessWidget {
                 runSpacing: 16,
                 alignment: WrapAlignment.center,
                 children: [
+                  _BigAction(
+                    icon: Icons.manage_search_outlined,
+                    title: 'Consulter',
+                    subtitle: 'Titres disponibles et emplacement',
+                    onTap: kiosk.startBrowse,
+                  ),
                   _BigAction(
                     icon: Icons.outbox_outlined,
                     title: 'Emprunter',
@@ -330,7 +340,7 @@ class _BigAction extends StatelessWidget {
   Widget build(BuildContext context) {
     final colors = Theme.of(context).colorScheme;
     return SizedBox(
-      width: 300,
+      width: 280,
       child: Card(
         color: colors.primaryContainer,
         clipBehavior: Clip.antiAlias,
@@ -359,6 +369,228 @@ class _BigAction extends StatelessWidget {
               ],
             ),
           ),
+        ),
+      ),
+    );
+  }
+}
+
+/// Consultation du catalogue par les abonnés : recherche, disponibilité et
+/// emplacement de chaque exemplaire. Poser une carte ou un livre ouvre
+/// l'emprunt ou le retour.
+class _BrowseView extends StatefulWidget {
+  const _BrowseView({required this.kiosk, super.key});
+
+  final KioskController kiosk;
+
+  @override
+  State<_BrowseView> createState() => _BrowseViewState();
+}
+
+class _BrowseViewState extends State<_BrowseView> {
+  final _search = TextEditingController();
+  Timer? _debounce;
+  List<CatalogEntry> _entries = const [];
+  bool _availableOnly = true;
+  bool _loading = true;
+  int _query = 0;
+
+  @override
+  void initState() {
+    super.initState();
+    _load();
+  }
+
+  @override
+  void dispose() {
+    _debounce?.cancel();
+    _search.dispose();
+    super.dispose();
+  }
+
+  Future<void> _load() async {
+    final query = ++_query;
+    setState(() => _loading = true);
+    final entries = await widget.kiosk.library.database.browseCatalog(
+      search: _search.text,
+      availableOnly: _availableOnly,
+    );
+    if (!mounted || query != _query) return;
+    setState(() {
+      _entries = entries;
+      _loading = false;
+    });
+  }
+
+  void _onSearch(String _) {
+    widget.kiosk.touch();
+    _debounce?.cancel();
+    _debounce = Timer(const Duration(milliseconds: 250), _load);
+  }
+
+  @override
+  Widget build(BuildContext context) => Column(
+    children: [
+      Expanded(
+        child: _SessionLayout(
+          title: 'Consulter le catalogue',
+          footer: const SizedBox.shrink(),
+          children: [
+            TextField(
+              controller: _search,
+              onChanged: _onSearch,
+              textInputAction: TextInputAction.search,
+              style: const TextStyle(fontSize: 18),
+              decoration: const InputDecoration(
+                prefixIcon: Icon(Icons.search),
+                hintText: 'Titre, auteur, ISBN, catégorie ou rayon…',
+              ),
+            ),
+            const SizedBox(height: 10),
+            Row(
+              children: [
+                FilterChip(
+                  label: const Text('Disponibles seulement'),
+                  selected: _availableOnly,
+                  onSelected: (value) {
+                    widget.kiosk.touch();
+                    setState(() => _availableOnly = value);
+                    _load();
+                  },
+                ),
+                const Spacer(),
+                Text(
+                  _loading
+                      ? 'Recherche…'
+                      : '${_entries.length} exemplaire${_entries.length > 1 ? 's' : ''}',
+                ),
+              ],
+            ),
+            const SizedBox(height: 10),
+            if (!_loading && _entries.isEmpty)
+              const Padding(
+                padding: EdgeInsets.all(32),
+                child: Center(
+                  child: Text(
+                    'Aucun titre ne correspond à votre recherche.',
+                    textAlign: TextAlign.center,
+                  ),
+                ),
+              )
+            else
+              for (final entry in _entries) _CatalogTile(entry: entry),
+          ],
+        ),
+      ),
+      Material(
+        elevation: 8,
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(16, 12, 16, 12),
+          child: Row(
+            children: [
+              const Icon(Icons.contactless_outlined),
+              const SizedBox(width: 10),
+              const Expanded(
+                child: Text(
+                  'Pour emprunter, posez votre carte puis vos livres sur le lecteur.',
+                ),
+              ),
+              const SizedBox(width: 10),
+              FilledButton.tonalIcon(
+                onPressed: widget.kiosk.cancelSession,
+                icon: const Icon(Icons.home_outlined),
+                label: const Text('Accueil'),
+              ),
+            ],
+          ),
+        ),
+      ),
+    ],
+  );
+}
+
+class _CatalogTile extends StatelessWidget {
+  const _CatalogTile({required this.entry});
+
+  final CatalogEntry entry;
+
+  @override
+  Widget build(BuildContext context) {
+    final colors = Theme.of(context).colorScheme;
+    final book = entry.book;
+    final (label, color) = entry.available
+        ? ('Disponible', colors.primary)
+        : entry.onLoan
+        ? (
+            'Emprunté · retour prévu le '
+                '${DateFormat('dd/MM/yyyy').format(DateTime.parse(entry.dueAt!).toLocal())}',
+            colors.tertiary,
+          )
+        : ('Indisponible', colors.error);
+    final details = [
+      if (book.author.isNotEmpty) book.author,
+      if (book.category.isNotEmpty) book.category,
+      book.accession,
+    ].join(' · ');
+    return Card(
+      margin: const EdgeInsets.only(bottom: 8),
+      child: Padding(
+        padding: const EdgeInsets.all(14),
+        child: Row(
+          children: [
+            Icon(Icons.menu_book_outlined, size: 32, color: color),
+            const SizedBox(width: 14),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    book.title,
+                    style: const TextStyle(
+                      fontSize: 17,
+                      fontWeight: FontWeight.w800,
+                    ),
+                  ),
+                  Text(details),
+                  const SizedBox(height: 4),
+                  Text(
+                    label,
+                    style: TextStyle(color: color, fontWeight: FontWeight.w700),
+                  ),
+                ],
+              ),
+            ),
+            const SizedBox(width: 12),
+            // L'emplacement, pour trouver le livre en rayon.
+            Container(
+              constraints: const BoxConstraints(minWidth: 96),
+              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+              decoration: BoxDecoration(
+                color: colors.secondaryContainer,
+                borderRadius: BorderRadius.circular(10),
+              ),
+              child: Column(
+                children: [
+                  Text(
+                    'Rayon',
+                    style: TextStyle(
+                      fontSize: 12,
+                      color: colors.onSecondaryContainer,
+                    ),
+                  ),
+                  Text(
+                    book.shelf.isEmpty ? '—' : book.shelf,
+                    textAlign: TextAlign.center,
+                    style: TextStyle(
+                      fontSize: 18,
+                      fontWeight: FontWeight.w800,
+                      color: colors.onSecondaryContainer,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ],
         ),
       ),
     );

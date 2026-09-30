@@ -137,6 +137,66 @@ class SyncStore(databaseUrl: String, private val json: Json) : Closeable {
                     "ALTER TABLE events ADD COLUMN entity_type TEXT NOT NULL DEFAULT '${EntityType.BOOK}'",
                 )
             }
+            statement.executeUpdate("CREATE INDEX IF NOT EXISTS idx_events_entity ON events(entity_type, entity_id)")
+            val deviceColumns = columns(statement, "devices")
+            for ((column, type) in listOf("platform" to "TEXT", "app_version" to "TEXT", "last_report_at" to "TEXT")) {
+                if (column !in deviceColumns) statement.executeUpdate("ALTER TABLE devices ADD COLUMN $column $type")
+            }
+            // Comptes et journal d'activité propres à chaque poste : remontés
+            // par rapport d'appareil, hors du flux de synchronisation.
+            statement.executeUpdate(
+                """
+                CREATE TABLE IF NOT EXISTS user_accounts (
+                    device_id TEXT NOT NULL,
+                    local_id INTEGER NOT NULL,
+                    name TEXT NOT NULL,
+                    email TEXT NOT NULL,
+                    role TEXT NOT NULL,
+                    active INTEGER NOT NULL,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    reported_at TEXT NOT NULL,
+                    PRIMARY KEY(device_id, local_id)
+                )
+                """.trimIndent(),
+            )
+            statement.executeUpdate(
+                """
+                CREATE TABLE IF NOT EXISTS activity (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    device_id TEXT NOT NULL,
+                    local_id INTEGER NOT NULL,
+                    type TEXT NOT NULL,
+                    result TEXT NOT NULL,
+                    message TEXT NOT NULL,
+                    epc TEXT,
+                    tid TEXT,
+                    book_server_id TEXT,
+                    created_at TEXT NOT NULL,
+                    received_at TEXT NOT NULL,
+                    UNIQUE(device_id, local_id)
+                )
+                """.trimIndent(),
+            )
+            statement.executeUpdate("CREATE INDEX IF NOT EXISTS idx_activity_created ON activity(created_at)")
+        }
+    }
+
+    /** Lecture sous le verrou du magasin (requêtes de l'API de données). */
+    @Synchronized
+    internal fun <T> read(block: (Connection) -> T): T = block(connection)
+
+    /** Écriture transactionnelle sous le verrou du magasin. */
+    @Synchronized
+    internal fun <T> transaction(block: (Connection) -> T): T {
+        connection.autoCommit = false
+        try {
+            return block(connection).also { connection.commit() }
+        } catch (error: Throwable) {
+            connection.rollback()
+            throw error
+        } finally {
+            connection.autoCommit = true
         }
     }
 
@@ -264,45 +324,6 @@ class SyncStore(databaseUrl: String, private val json: Json) : Closeable {
         val page = if (hasMore) changes.take(limit) else changes
         return PullResponse(page.lastOrNull()?.sequence ?: since, page, hasMore)
     }
-
-    @Synchronized
-    fun listBooks(): List<SyncBook> {
-        val books = mutableListOf<SyncBook>()
-        connection.prepareStatement("SELECT * FROM books WHERE deleted=0 ORDER BY accession").use { statement ->
-            statement.executeQuery().use { rows ->
-                while (rows.next()) books += readBook(rows)
-            }
-        }
-        return books
-    }
-
-    @Synchronized
-    fun listSubscribers(): List<SyncSubscriber> {
-        val subscribers = mutableListOf<SyncSubscriber>()
-        connection.prepareStatement("SELECT * FROM subscribers WHERE deleted=0 ORDER BY name").use { statement ->
-            statement.executeQuery().use { rows ->
-                while (rows.next()) subscribers += readSubscriber(rows)
-            }
-        }
-        return subscribers
-    }
-
-    @Synchronized
-    fun listSubscriptions(): List<SyncSubscription> = listPayloads(
-        "SELECT payload FROM subscriptions WHERE deleted=0 ORDER BY member_number",
-    ) { json.decodeFromString<SyncSubscription>(it) }
-
-    @Synchronized
-    fun listLoans(): List<SyncLoan> = listPayloads(
-        "SELECT payload FROM loans WHERE deleted=0 ORDER BY borrowed_at DESC",
-    ) { json.decodeFromString<SyncLoan>(it) }
-
-    private fun <T> listPayloads(sql: String, decode: (String) -> T): List<T> =
-        connection.prepareStatement(sql).use { statement ->
-            statement.executeQuery().use { rows ->
-                buildList { while (rows.next()) add(decode(rows.getString("payload"))) }
-            }
-        }
 
     @Synchronized
     fun currentCursor(): Long = connection.createStatement().use { statement ->
@@ -628,7 +649,7 @@ class SyncStore(databaseUrl: String, private val json: Json) : Closeable {
         statement.setLong(17, book.revision)
     }
 
-    private fun readBook(rows: java.sql.ResultSet) = SyncBook(
+    internal fun readBook(rows: java.sql.ResultSet) = SyncBook(
         serverId = rows.getString("server_id"),
         accession = rows.getString("accession"),
         epc = rows.getString("epc"),
@@ -648,7 +669,7 @@ class SyncStore(databaseUrl: String, private val json: Json) : Closeable {
         revision = rows.getLong("revision"),
     )
 
-    private fun readSubscriber(rows: java.sql.ResultSet) = SyncSubscriber(
+    internal fun readSubscriber(rows: java.sql.ResultSet) = SyncSubscriber(
         memberNumber = rows.getString("member_number"),
         name = rows.getString("name"),
         email = rows.getString("email"),

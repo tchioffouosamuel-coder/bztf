@@ -51,7 +51,10 @@ fun Application.module(
         wireJson,
     ),
     apiKey: String = System.getenv("BIBLIORFID_API_KEY") ?: "change-me-in-production",
+    readApiKey: String? = System.getenv("BIBLIORFID_READ_API_KEY"),
 ) {
+    val keys = ApiKeys(apiKey, readApiKey)
+    val data = DataQueries(store, wireJson)
     val sessions = ConcurrentHashMap.newKeySet<DefaultWebSocketSession>()
     val logger = environment.log
     install(CallLogging)
@@ -68,6 +71,9 @@ fun Application.module(
         allowHeader(HttpHeaders.ContentType)
         allowHeader("X-Device-Key")
         allowHeader("X-Device-Id")
+        allowHeader("X-Api-Key")
+        allowHeader(HttpHeaders.Authorization)
+        exposeHeader("X-Total-Count")
     }
     install(StatusPages) {
         exception<IllegalArgumentException> { call, cause ->
@@ -99,22 +105,7 @@ fun Application.module(
                 if (!call.authorized(apiKey)) return@post
                 call.respond(store.registerDevice(call.receive<DeviceRegistration>()))
             }
-            get("/books") {
-                if (!call.authorized(apiKey)) return@get
-                call.respond(store.listBooks())
-            }
-            get("/subscribers") {
-                if (!call.authorized(apiKey)) return@get
-                call.respond(store.listSubscribers())
-            }
-            get("/subscriptions") {
-                if (!call.authorized(apiKey)) return@get
-                call.respond(store.listSubscriptions())
-            }
-            get("/loans") {
-                if (!call.authorized(apiKey)) return@get
-                call.respond(store.listLoans())
-            }
+            dataRoutes(data, keys)
             get("/sync") {
                 if (!call.authorized(apiKey)) return@get
                 val since = call.request.queryParameters["since"]?.toLongOrNull() ?: 0

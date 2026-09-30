@@ -173,6 +173,17 @@ class DeskReaderService {
     _connected = false;
   }
 
+  /// Bip unique du buzzer du lecteur. `false` si le lecteur ne l'a pas
+  /// accepté (ou en simulation) : l'appelant peut alors jouer un son local.
+  Future<bool> beep() async {
+    if (!connected || _transport == 'simulation') return false;
+    try {
+      return await _methods.invokeMethod<bool>('beep') ?? false;
+    } on PlatformException {
+      return false;
+    }
+  }
+
   /// Garde l'écran allumé tant que le poste est ouvert.
   Future<void> setKeepScreenOn(bool enabled) async {
     await _methods.invokeMethod<void>('keepScreenOn', {'enabled': enabled});

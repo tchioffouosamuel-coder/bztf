@@ -29,6 +29,10 @@ class SyncService extends ChangeNotifier {
   String deviceName = '';
   bool connected = false;
   String? error;
+
+  /// Échec du dernier rapport d'appareil (comptes et activité), sans effet
+  /// sur la synchronisation du catalogue.
+  String? reportError;
   DateTime? lastSyncAt;
   int pendingCount = 0;
 
@@ -97,6 +101,14 @@ class SyncService extends ChangeNotifier {
       await _registerDevice();
       await _pushPending();
       await _pullAll();
+      // Un serveur plus ancien refuse le rapport : le catalogue reste
+      // synchronisé.
+      try {
+        await _sendReport();
+        reportError = null;
+      } catch (exception) {
+        reportError = _friendlyError(exception);
+      }
       pendingCount = await database.pendingMutationCount();
       connected = true;
       lastSyncAt = DateTime.now();
@@ -166,6 +178,38 @@ class SyncService extends ChangeNotifier {
     throw StateError(
       'Trop de modifications en attente pour une seule synchronisation.',
     );
+  }
+
+  /// Rapport d'appareil pour l'API de données : comptes (sans mot de passe)
+  /// et activité nouvelle depuis le dernier envoi accepté.
+  Future<void> _sendReport() async {
+    const batchSize = 1000;
+    final preferences = await SharedPreferences.getInstance();
+    var after = preferences.getInt('sync_report_activity_id') ?? 0;
+    for (var batch = 0; batch < 20; batch++) {
+      final activity = await database.reportActivity(after, limit: batchSize);
+      final response = await _client
+          .post(
+            _httpUri('/api/v1/devices/${Uri.encodeComponent(deviceId)}/report'),
+            headers: _headers,
+            body: jsonEncode({
+              'deviceId': deviceId,
+              'name': deviceName,
+              'platform': 'android',
+              'users': batch == 0 ? await database.reportUsers() : null,
+              'activity': activity,
+            }),
+          )
+          .timeout(const Duration(seconds: 30));
+      _requireSuccess(response);
+      if (activity.isEmpty) return;
+      final body = jsonDecode(response.body) as Map;
+      after =
+          (body['activityAcknowledgedUntil'] as num?)?.toInt() ??
+          activity.last['localId'] as int;
+      await preferences.setInt('sync_report_activity_id', after);
+      if (activity.length < batchSize) return;
+    }
   }
 
   Future<void> _pullAll() async {
@@ -263,7 +307,7 @@ class SyncService extends ChangeNotifier {
 
   static String _friendlyError(Object exception) => exception
       .toString()
-      .replaceFirst(RegExp(r'^(StateError|Exception):\s*'), '');
+      .replaceFirst(RegExp(r'^(StateError|Bad state|Exception):\s*'), '');
 
   static String _newId() {
     final random = Random.secure();

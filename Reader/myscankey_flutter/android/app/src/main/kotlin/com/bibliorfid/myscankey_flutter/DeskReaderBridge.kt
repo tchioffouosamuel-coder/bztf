@@ -10,6 +10,8 @@ import com.gg.reader.api.protocol.gx.EnumG
 import com.gg.reader.api.protocol.gx.LogBaseEpcInfo
 import com.gg.reader.api.protocol.gx.Message
 import com.gg.reader.api.protocol.gx.MsgAppGetReaderInfo
+import com.gg.reader.api.protocol.gx.MsgAppSetBeep
+import com.gg.reader.api.protocol.gx.MsgAppSetBeepOnOff
 import com.gg.reader.api.protocol.gx.MsgBaseInventoryEpc
 import com.gg.reader.api.protocol.gx.MsgBaseSetPower
 import com.gg.reader.api.protocol.gx.MsgBaseStop
@@ -65,6 +67,7 @@ class DeskReaderBridge(
 			}
 			"startInventory" -> startInventory(call.argument<Int>("power"), result)
 			"stopInventory" -> stopInventory(result)
+			"beep" -> beep(result)
 			"writeEpc" -> writeEpc(call.argument<String>("epc") ?: "", call.argument<String>("tid") ?: "", result)
 			"keepScreenOn" -> {
 				keepScreenOn(call.argument<Boolean>("enabled") == true)
@@ -98,6 +101,10 @@ class DeskReaderBridge(
 					postError(result, "DESK_CONNECT", "Le lecteur de bureau n'a pas répondu à la commande d'arrêt${stop.detail()}.")
 					return@execute
 				}
+				// Buzzer piloté par l'application, comme sur le poste Windows : la
+				// plaque ne sonne plus à chaque lecture, seulement sur demande.
+				val buzzer = MsgAppSetBeepOnOff().apply { beepSwitch = 1 }
+				runCatching { candidate.sendSynMsg(buzzer) }
 				if (transport == "tcp") {
 					candidate.onDisconnected = HandlerTcpDisconnected { _ -> onDisconnected(candidate) }
 					candidate.setSendHeartBeat(true)
@@ -111,6 +118,7 @@ class DeskReaderBridge(
 						"connected" to true,
 						"readerId" to (if (info.succeeded()) info.readerSerialNumber.orEmpty() else ""),
 						"version" to (if (info.succeeded()) info.appVersions.orEmpty() else ""),
+						"buzzerControlled" to buzzer.succeeded(),
 					))
 				}
 			} catch (error: Throwable) {
@@ -160,6 +168,23 @@ class DeskReaderBridge(
 			} catch (error: Throwable) {
 				postError(result, "INVENTORY_START", error.message ?: "Démarrage de la lecture impossible.")
 			}
+		}
+	}
+
+	/** Bip unique du buzzer de la plaque (MID 0x1F : sonner, une fois). */
+	private fun beep(result: MethodChannel.Result) {
+		val current = client
+		if (current == null) {
+			result.success(false)
+			return
+		}
+		executor.execute {
+			val beep = MsgAppSetBeep().apply {
+				beepStatus = 1
+				beepMode = 0
+			}
+			val accepted = runCatching { current.sendSynMsg(beep, BEEP_TIMEOUT_MS) }.isSuccess && beep.succeeded()
+			mainHandler.post { result.success(accepted) }
 		}
 	}
 
@@ -321,6 +346,7 @@ class DeskReaderBridge(
 		const val EVENT_CHANNEL = "com.bibliorfid.myscankey_flutter/desk-reader-events"
 		const val CONNECT_TIMEOUT_MS = 3000
 		const val CLOSE_TIMEOUT_MS = 800
+		const val BEEP_TIMEOUT_MS = 1000
 		const val MIN_POWER = 5
 		const val MAX_POWER = 33
 		const val TID_WORDS = 6

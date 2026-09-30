@@ -1054,6 +1054,8 @@ class _KioskSettingsTabState extends State<_KioskSettingsTab> {
   late int _power;
   late int _maxLoans;
   late int _loanDays;
+  late String _beepSource;
+  late int _beepRearm;
   bool _testing = false;
   String? _readerInfo;
 
@@ -1067,6 +1069,8 @@ class _KioskSettingsTabState extends State<_KioskSettingsTab> {
     _power = kiosk.power;
     _maxLoans = kiosk.maxLoans;
     _loanDays = kiosk.loanDays;
+    _beepSource = kiosk.beepSource;
+    _beepRearm = kiosk.beepRearmSeconds;
   }
 
   @override
@@ -1110,6 +1114,18 @@ class _KioskSettingsTabState extends State<_KioskSettingsTab> {
         nextLoanDays: _loanDays,
       );
       if (mounted) showMessage(context, 'Règles de prêt enregistrées.');
+    } catch (error) {
+      if (mounted) showMessage(context, error.toString(), error: true);
+    }
+  }
+
+  Future<void> _saveFeedback() async {
+    try {
+      await kiosk.configureFeedback(
+        nextSource: _beepSource,
+        nextRearmSeconds: _beepRearm,
+      );
+      if (mounted) showMessage(context, 'Réglages du bip enregistrés.');
     } catch (error) {
       if (mounted) showMessage(context, error.toString(), error: true);
     }
@@ -1372,6 +1388,75 @@ class _KioskSettingsTabState extends State<_KioskSettingsTab> {
                           )
                         : const Icon(Icons.cable),
                     label: const Text('Enregistrer et tester'),
+                  ),
+                ],
+              ),
+            ),
+          ),
+          _heading('Bip et anti-rebond'),
+          Card(
+            child: Padding(
+              padding: const EdgeInsets.all(14),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  DropdownButtonFormField<String>(
+                    initialValue: _beepSource,
+                    decoration: const InputDecoration(
+                      labelText: 'Bip quand un livre ou une carte est posé',
+                    ),
+                    items: const [
+                      DropdownMenuItem(
+                        value: 'reader',
+                        child: Text('Buzzer du lecteur RFID'),
+                      ),
+                      DropdownMenuItem(
+                        value: 'tablet',
+                        child: Text('Haut-parleur de la tablette'),
+                      ),
+                      DropdownMenuItem(value: 'both', child: Text('Les deux')),
+                      DropdownMenuItem(value: 'off', child: Text('Aucun bip')),
+                    ],
+                    onChanged: (value) =>
+                        setState(() => _beepSource = value ?? 'reader'),
+                  ),
+                  const SizedBox(height: 8),
+                  _Stepper(
+                    label: 'Réarmement du bip (secondes)',
+                    value: _beepRearm,
+                    min: 1,
+                    max: 120,
+                    onChanged: (value) => setState(() => _beepRearm = value),
+                  ),
+                  Text(
+                    'Un tag n’est considéré retiré qu’après '
+                    '${KioskController.presenceTimeout.inMilliseconds} ms sans '
+                    'lecture puis ${KioskController.releaseDelay.inMilliseconds} ms '
+                    'de confirmation : un livre mal lu ne rebipe pas et ne '
+                    'relance pas de session. Il bipe de nouveau une fois retiré '
+                    'depuis ce délai. Si le buzzer du lecteur ne répond pas, la '
+                    'tablette bipe à sa place.',
+                    style: Theme.of(context).textTheme.bodySmall,
+                  ),
+                  const SizedBox(height: 10),
+                  Row(
+                    children: [
+                      Expanded(
+                        child: OutlinedButton.icon(
+                          onPressed: kiosk.testBeep,
+                          icon: const Icon(Icons.volume_up_outlined),
+                          label: const Text('Essayer'),
+                        ),
+                      ),
+                      const SizedBox(width: 10),
+                      Expanded(
+                        child: FilledButton.icon(
+                          onPressed: _saveFeedback,
+                          icon: const Icon(Icons.save_outlined),
+                          label: const Text('Enregistrer'),
+                        ),
+                      ),
+                    ],
                   ),
                 ],
               ),

@@ -616,6 +616,45 @@ export class LibraryDatabase {
     return { subscriber, subscriptions, loans };
   }
 
+  /** Comptes du poste pour le rapport d'appareil : jamais de mot de passe. */
+  reportUsers() {
+    return this.db
+      .prepare(
+        "SELECT id, name, email, role, active, created_at, updated_at FROM users ORDER BY id",
+      )
+      .all()
+      .map((user) => ({
+        localId: user.id,
+        name: user.name,
+        email: user.email,
+        role: user.role,
+        active: Boolean(user.active),
+        createdAt: user.created_at,
+        updatedAt: user.updated_at,
+      }));
+  }
+
+  /** Journal d'activité postérieur à [afterId], pour le rapport d'appareil. */
+  reportActivity(afterId, limit = 1000) {
+    return this.db
+      .prepare(
+        `SELECT a.*, b.server_id AS book_server_id FROM activity a
+         LEFT JOIN books b ON b.id=a.book_id
+         WHERE a.id > ? ORDER BY a.id LIMIT ?`,
+      )
+      .all(Number(afterId) || 0, limit)
+      .map((entry) => ({
+        localId: entry.id,
+        type: entry.type,
+        result: entry.result,
+        message: entry.message,
+        epc: entry.epc || null,
+        tid: entry.tid || null,
+        bookServerId: entry.book_server_id || null,
+        createdAt: entry.created_at,
+      }));
+  }
+
   /** Registre des emprunts : en cours, en retard, rendus ou tous. */
   listLoans({ filter = "active", search = "" } = {}) {
     const term = `%${cleanText(search, 120)}%`;

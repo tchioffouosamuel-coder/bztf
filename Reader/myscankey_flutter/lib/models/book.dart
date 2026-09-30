@@ -195,3 +195,21 @@ class ActivityEntry {
     tid: map['tid'] as String?,
   );
 }
+
+/// Exemplaire consultable au poste d'emprunt, avec sa disponibilité.
+class CatalogEntry {
+  const CatalogEntry({required this.book, this.dueAt});
+
+  factory CatalogEntry.fromMap(Map<String, Object?> map) => CatalogEntry(
+    book: Book.fromMap(map),
+    dueAt: map['loan_due_at'] as String?,
+  );
+
+  final Book book;
+
+  /// Retour prévu si l'exemplaire est emprunté.
+  final String? dueAt;
+
+  bool get onLoan => dueAt != null;
+  bool get available => !onLoan && book.status != 'indisponible';
+}

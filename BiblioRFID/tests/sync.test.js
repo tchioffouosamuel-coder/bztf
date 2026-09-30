@@ -274,3 +274,113 @@ test("synchronise les emprunts et les abonnements entre appareils", () => {
   assert.equal(deskB.activeLoanForBook(localBook.id), null);
   assert.equal(deskB.getBook(localBook.id).status, "a_encoder");
 });
+
+test("envoie les comptes et l'activité du poste dans son rapport", async () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "biblio-sync-report-"));
+  const database = new LibraryDatabase(path.join(directory, "catalogue.db"));
+  database.createUser({
+    name: "Admin",
+    email: "admin@bztf.org",
+    password: "mot-de-passe-solide",
+    role: "admin",
+  });
+  const book = database.createBook({ title: "Livre rapporté" });
+  database.addActivity("lecture", "succes", book.id, "Tag lu", book.epc, "E280TID");
+  const reports = [];
+  const server = http.createServer(async (request, response) => {
+    const chunks = [];
+    for await (const chunk of request) chunks.push(chunk);
+    const body = chunks.length ? JSON.parse(Buffer.concat(chunks).toString("utf8")) : null;
+    response.setHeader("Content-Type", "application/json");
+    if (request.url === "/api/v1/devices/register")
+      return response.end(JSON.stringify({ registered: true }));
+    if (request.url === "/api/v1/sync/push")
+      return response.end(
+        JSON.stringify({
+          acknowledgedMutationIds: body.mutations.map((item) => item.mutationId),
+          cursor: 1,
+        }),
+      );
+    if (request.url.startsWith("/api/v1/sync?"))
+      return response.end(JSON.stringify({ cursor: 1, changes: [], hasMore: false }));
+    if (request.url.endsWith("/report")) {
+      reports.push({ url: request.url, body });
+      const ids = body.activity.map((entry) => entry.localId);
+      return response.end(
+        JSON.stringify({
+          usersStored: body.users?.length ?? 0,
+          activityAcknowledgedUntil: ids.length ? Math.max(...ids) : null,
+        }),
+      );
+    }
+    response.statusCode = 404;
+    response.end(JSON.stringify({ error: "Route inconnue" }));
+  });
+  const service = new SyncService(database);
+  try {
+    const port = await listen(server);
+    service.initialize();
+    const status = await service.configure({
+      serverUrl: `http://127.0.0.1:${port}`,
+      apiKey: "secret-test",
+      deviceName: "Poste de test",
+    });
+    assert.equal(status.connected, true);
+    assert.equal(status.reportError, null);
+
+    const [first] = reports;
+    assert.equal(first.url, `/api/v1/devices/${service.deviceId}/report`);
+    assert.equal(first.body.platform, "windows");
+    assert.equal(first.body.name, "Poste de test");
+    assert.deepEqual(
+      first.body.users.map((user) => [user.email, user.role, user.active]),
+      [["admin@bztf.org", "admin", true]],
+    );
+    assert.doesNotMatch(JSON.stringify(first.body), /password|salt|hash/i);
+    const read = first.body.activity.find((entry) => entry.type === "lecture");
+    assert.equal(read.bookServerId, book.server_id);
+    assert.equal(read.tid, "E280TID");
+
+    // Le rapport suivant ne renvoie que l'activité nouvelle.
+    database.addActivity("connexion", "succes", null, "Lecteur connecté");
+    await service.syncNow();
+    const last = reports.at(-1).body.activity;
+    assert.deepEqual(last.map((entry) => entry.type), ["connexion"]);
+  } finally {
+    service.close();
+    await close(server);
+    database.close();
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("un serveur sans rapport d'appareil ne bloque pas la synchronisation", async () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "biblio-sync-old-"));
+  const database = new LibraryDatabase(path.join(directory, "catalogue.db"));
+  const server = http.createServer((request, response) => {
+    response.setHeader("Content-Type", "application/json");
+    if (request.url === "/api/v1/devices/register")
+      return response.end(JSON.stringify({ registered: true }));
+    if (request.url.startsWith("/api/v1/sync?"))
+      return response.end(JSON.stringify({ cursor: 0, changes: [], hasMore: false }));
+    response.statusCode = 404;
+    response.end(JSON.stringify({ error: "Route inconnue" }));
+  });
+  const service = new SyncService(database);
+  try {
+    const port = await listen(server);
+    service.initialize();
+    const status = await service.configure({
+      serverUrl: `http://127.0.0.1:${port}`,
+      apiKey: "secret-test",
+    });
+    assert.equal(status.connected, true);
+    assert.equal(status.error, null);
+    assert.equal(status.reportError, "Route inconnue");
+  } finally {
+    service.close();
+    await close(server);
+    database.close();
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});

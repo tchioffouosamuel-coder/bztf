@@ -12,7 +12,7 @@ import 'desk_reader_service.dart';
 import 'library_controller.dart';
 import 'reader_service.dart';
 
-enum KioskStage { home, borrow, giveBack, receipt }
+enum KioskStage { home, browse, borrow, giveBack, receipt }
 
 enum KioskItemState {
   /// Disponible : sera emprunté.
@@ -73,9 +73,16 @@ class KioskController extends ChangeNotifier {
   static const sessionTimeout = Duration(seconds: 90);
   static const receiptDuration = Duration(seconds: 20);
 
-  /// Délai après lequel une carte ou un livre resté posé depuis la session
-  /// précédente est considéré comme reposé.
-  static const _lingerDelay = Duration(seconds: 3);
+  /// Anti-rebond, mêmes valeurs que le poste Windows : un tag est absent
+  /// après 700 ms sans lecture, puis retiré après 1,5 s de confirmation.
+  /// Une disparition plus brève ne relance ni session, ni bip.
+  static const presenceTimeout = Duration(milliseconds: 700);
+  static const releaseDelay = Duration(milliseconds: 1500);
+  static const _releaseAfter = Duration(milliseconds: 2200);
+
+  /// Les tags détectés dans cet intervalle sont annoncés par un seul bip.
+  static const _beepGrouping = Duration(milliseconds: 140);
+  static const beepSources = ['reader', 'tablet', 'both', 'off'];
 
   final LibraryController library;
   final DeskReaderService reader;
@@ -87,6 +94,13 @@ class KioskController extends ChangeNotifier {
   int power = 20;
   int maxLoans = 3;
   int loanDays = 14;
+
+  /// Bip d'un livre ou d'une carte détecté : buzzer du lecteur, son de la
+  /// tablette, les deux ou aucun.
+  String beepSource = 'reader';
+
+  /// Délai après le retrait d'un tag avant qu'il puisse bipper de nouveau.
+  int beepRearmSeconds = 5;
   String _pinHash = _hash(defaultPin);
 
   // État du poste.
@@ -108,6 +122,9 @@ class KioskController extends ChangeNotifier {
   final Set<String> _seen = {};
   final Set<String> _pending = {};
   final Map<String, DateTime> _lingering = {};
+  final Map<String, DateTime> _lastSeen = {};
+  final Set<String> _beeped = {};
+  Timer? _beepTimer;
   Timer? _idleTimer;
   Timer? _receiptTimer;
   Timer? _reconnectTimer;
@@ -186,6 +203,9 @@ class KioskController extends ChangeNotifier {
     power = settings.getInt('kiosk_power') ?? 20;
     maxLoans = settings.getInt('kiosk_max_loans') ?? 3;
     loanDays = settings.getInt('kiosk_loan_days') ?? 14;
+    final source = settings.getString('kiosk_beep_source');
+    beepSource = beepSources.contains(source) ? source! : 'reader';
+    beepRearmSeconds = settings.getInt('kiosk_beep_rearm') ?? 5;
     _pinHash = settings.getString('kiosk_pin_hash') ?? _hash(defaultPin);
     notifyListeners();
   }
@@ -252,6 +272,27 @@ class KioskController extends ChangeNotifier {
     notifyListeners();
   }
 
+  Future<void> configureFeedback({
+    required String nextSource,
+    required int nextRearmSeconds,
+  }) async {
+    if (!beepSources.contains(nextSource)) {
+      throw ArgumentError('Source de bip inconnue.');
+    }
+    if (nextRearmSeconds < 1 || nextRearmSeconds > 600) {
+      throw RangeError.range(nextRearmSeconds, 1, 600, 'secondes');
+    }
+    beepSource = nextSource;
+    beepRearmSeconds = nextRearmSeconds;
+    final settings = await SharedPreferences.getInstance();
+    await settings.setString('kiosk_beep_source', beepSource);
+    await settings.setInt('kiosk_beep_rearm', beepRearmSeconds);
+    notifyListeners();
+  }
+
+  /// Joue le bip configuré, pour l'essayer depuis le terminal admin.
+  Future<void> testBeep() => _beep();
+
   /// Enregistre la connexion du lecteur de bureau puis la teste.
   Future<Map<Object?, Object?>> configureReader({
     required String nextTransport,
@@ -300,9 +341,9 @@ class KioskController extends ChangeNotifier {
     notifyListeners();
     try {
       if (!reader.connected) await _connect();
-      final tags = (await reader.capture(
-        power: power,
-      )).where((tag) => tag.epc != ReaderService.emptyEpc || tag.tid.isNotEmpty);
+      final tags = (await reader.capture(power: power)).where(
+        (tag) => tag.epc != ReaderService.emptyEpc || tag.tid.isNotEmpty,
+      );
       if (tags.isEmpty) {
         throw StateError('Aucun tag détecté. Posez la carte sur le lecteur.');
       }
@@ -361,6 +402,9 @@ class KioskController extends ChangeNotifier {
       notifyListeners();
     }
   }
+
+  /// Consultation du catalogue : titres, disponibilité et emplacement.
+  void startBrowse() => _beginSession(KioskStage.browse);
 
   void startBorrow() => _beginSession(KioskStage.borrow);
 
@@ -427,15 +471,18 @@ class KioskController extends ChangeNotifier {
   }
 
   Future<void> _onTag(ReaderTag tag) async {
-    if (!active || processing || _encoding || stage == KioskStage.receipt) {
-      return;
-    }
     final epc = tag.epc.trim().toUpperCase();
     if (epc.isEmpty || epc == ReaderService.emptyEpc) return;
     final now = DateTime.now();
+    // La présence est suivie même pendant un reçu ou un traitement : c'est
+    // elle qui mesure le retrait réel du tag.
+    _trackPresence(epc, now);
+    if (!active || processing || _encoding || stage == KioskStage.receipt) {
+      return;
+    }
     final lingeredAt = _lingering[epc];
     if (lingeredAt != null) {
-      if (now.difference(lingeredAt) < _lingerDelay) {
+      if (now.difference(lingeredAt) < _releaseAfter) {
         _lingering[epc] = now;
         return;
       }
@@ -448,11 +495,11 @@ class KioskController extends ChangeNotifier {
       final card = await library.database.cardForTag(epc, tag.tid);
       if (session != _session) return;
       if (card != null) {
-        if (stage == KioskStage.home) {
+        if (_idle) {
           _beginSession(KioskStage.borrow);
           session = _session;
         }
-        await _onCard(card);
+        if (await _onCard(card)) _announce(epc);
         if (session == _session) _seen.add(epc);
         return;
       }
@@ -467,12 +514,12 @@ class KioskController extends ChangeNotifier {
       if (session != _session) return;
       if (book == null) {
         _seen.add(epc);
-        if (stage != KioskStage.home) unknownTags++;
+        if (!_idle) unknownTags++;
         return;
       }
       final loan = await library.database.activeLoanForBook(book.id);
       if (session != _session) return;
-      if (stage == KioskStage.home) {
+      if (_idle) {
         // Un livre emprunté posé seul est rendu ; sinon il sera emprunté.
         _beginSession(loan != null ? KioskStage.giveBack : KioskStage.borrow);
         session = _session;
@@ -480,7 +527,7 @@ class KioskController extends ChangeNotifier {
       _items[epc] = KioskItem(epc: epc, book: book, loan: loan);
       _seen.add(epc);
       _restartIdleTimer();
-      unawaited(_beep());
+      _announce(epc);
     } catch (error) {
       notice = _describe(error);
     } finally {
@@ -489,17 +536,18 @@ class KioskController extends ChangeNotifier {
     }
   }
 
-  Future<void> _onCard(Subscriber card) async {
+  /// `true` si la carte ouvre l'emprunt de cet abonné.
+  Future<bool> _onCard(Subscriber card) async {
     if (stage == KioskStage.giveBack) {
       notice = 'Aucune carte n’est nécessaire pour rendre des livres.';
-      return;
+      return false;
     }
     final current = subscriber;
     if (current != null) {
       if (current.id != card.id) {
         notice = 'Une autre carte a été détectée ; elle est ignorée.';
       }
-      return;
+      return false;
     }
     subscriber = card;
     borrower = await library.database.borrowerStatus(
@@ -508,7 +556,36 @@ class KioskController extends ChangeNotifier {
     );
     notice = null;
     _restartIdleTimer();
-    unawaited(_beep());
+    return true;
+  }
+
+  /// Accueil ou consultation : une carte ou un livre posé ouvre la session
+  /// correspondante.
+  bool get _idle => stage == KioskStage.home || stage == KioskStage.browse;
+
+  void _trackPresence(String epc, DateTime now) {
+    final previous = _lastSeen[epc];
+    _lastSeen[epc] = now;
+    final rearmAfter = _releaseAfter + Duration(seconds: beepRearmSeconds);
+    // Retiré assez longtemps : le tag pourra de nouveau bipper.
+    if (previous != null && now.difference(previous) >= rearmAfter) {
+      _beeped.remove(epc);
+    }
+    if (_lastSeen.length > 500) {
+      _lastSeen.removeWhere((_, seen) => now.difference(seen) >= rearmAfter);
+      _beeped.removeWhere((key) => !_lastSeen.containsKey(key));
+    }
+  }
+
+  /// Un bip par tag nouvellement posé ; plusieurs tags posés ensemble
+  /// n'en déclenchent qu'un. Un tag resté posé (ou qui clignote) ne rebipe
+  /// pas avant son retrait confirmé et le délai de réarmement.
+  void _announce(String epc) {
+    if (!_beeped.add(epc)) return;
+    _beepTimer ??= Timer(_beepGrouping, () {
+      _beepTimer = null;
+      unawaited(_beep());
+    });
   }
 
   /// Relit l'éligibilité et l'état des livres après un refus.
@@ -661,10 +738,16 @@ class KioskController extends ChangeNotifier {
   }
 
   Future<void> _beep() async {
-    try {
-      await library.reader.playScanBeep();
-    } catch (error) {
-      debugPrint('Bip du poste indisponible : $error');
+    if (beepSource == 'off') return;
+    var played = false;
+    if (beepSource != 'tablet') played = await reader.beep();
+    // Son de la tablette demandé, ou buzzer du lecteur indisponible.
+    if (beepSource != 'reader' || !played) {
+      try {
+        await library.reader.playScanBeep();
+      } catch (error) {
+        debugPrint('Bip du poste indisponible : $error');
+      }
     }
   }
 
@@ -692,6 +775,7 @@ class KioskController extends ChangeNotifier {
 
   @override
   void dispose() {
+    _beepTimer?.cancel();
     _idleTimer?.cancel();
     _receiptTimer?.cancel();
     _reconnectTimer?.cancel();

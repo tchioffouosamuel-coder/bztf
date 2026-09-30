@@ -133,6 +133,98 @@ class LibraryDatabase {
     return rows.map(Book.fromMap).toList();
   }
 
+  /// Comptes de l'appareil pour le rapport d'appareil : jamais de mot de
+  /// passe ni de sel.
+  Future<List<Map<String, Object?>>> reportUsers() async {
+    final rows = await (await database).query(
+      'users',
+      columns: [
+        'id',
+        'name',
+        'email',
+        'role',
+        'active',
+        'created_at',
+        'updated_at',
+      ],
+      orderBy: 'id',
+    );
+    return [
+      for (final row in rows)
+        {
+          'localId': row['id'],
+          'name': row['name'],
+          'email': row['email'],
+          'role': row['role'],
+          'active': row['active'] == 1,
+          'createdAt': row['created_at'],
+          'updatedAt': row['updated_at'],
+        },
+    ];
+  }
+
+  /// Journal d'activité postérieur à [afterId], pour le rapport d'appareil.
+  Future<List<Map<String, Object?>>> reportActivity(
+    int afterId, {
+    int limit = 1000,
+  }) async {
+    final rows = await (await database).rawQuery(
+      '''
+      SELECT a.*, b.server_id AS book_server_id
+      FROM activity a LEFT JOIN books b ON b.id = a.book_id
+      WHERE a.id > ? ORDER BY a.id LIMIT ?
+    ''',
+      [afterId, limit],
+    );
+    return [
+      for (final row in rows)
+        {
+          'localId': row['id'],
+          'type': row['type'],
+          'result': row['result'],
+          'message': row['message'],
+          'epc': row['epc'],
+          'tid': row['tid'],
+          'bookServerId': row['book_server_id'],
+          'createdAt': row['created_at'],
+        },
+    ];
+  }
+
+  /// Catalogue consultable par les abonnés au poste : chaque exemplaire,
+  /// son emplacement et, s'il est emprunté, son retour prévu.
+  Future<List<CatalogEntry>> browseCatalog({
+    String search = '',
+    bool availableOnly = false,
+    int limit = 100,
+  }) async {
+    final where = <String>[];
+    final args = <Object?>[];
+    final term = search.trim();
+    if (term.isNotEmpty) {
+      where.add(
+        '(b.title LIKE ? OR b.author LIKE ? OR b.isbn LIKE ? '
+        'OR b.category LIKE ? OR b.shelf LIKE ?)',
+      );
+      args.addAll(List.filled(5, '%$term%'));
+    }
+    if (availableOnly) {
+      where.add("l.id IS NULL AND b.status <> 'indisponible'");
+    }
+    final rows = await (await database).rawQuery(
+      '''
+      SELECT b.*, l.due_at AS loan_due_at
+      FROM books b
+      LEFT JOIN loans l ON l.book_id = b.id AND l.returned_at IS NULL
+      ${where.isEmpty ? '' : 'WHERE ${where.join(' AND ')}'}
+      ORDER BY b.title COLLATE NOCASE, b.accession
+      LIMIT ?
+    ''',
+      [...args, limit],
+    );
+    return rows.map(CatalogEntry.fromMap).toList();
+  }
+
   Future<int> countBooks({String search = '', String status = 'tous'}) async {
     final db = await database;
     final terms = <String>[];

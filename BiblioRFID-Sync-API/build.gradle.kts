@@ -5,7 +5,7 @@ plugins {
 }
 
 group = "com.bibliorfid"
-version = "1.1.0"
+version = "1.2.0"
 
 // Gradle's Windows test worker corrupts non-ASCII paths in its classpath file.
 layout.buildDirectory.set(file("${System.getProperty("java.io.tmpdir")}/bibliorfid-sync-api-build"))

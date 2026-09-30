@@ -1,7 +1,19 @@
 import { randomUUID } from "node:crypto";
+import fs from "node:fs";
 
 const SYNC_INTERVAL_MS = 60_000;
 const REQUEST_TIMEOUT_MS = 30_000;
+const REPORT_ACTIVITY_BATCH = 1000;
+
+function appVersion() {
+  try {
+    return JSON.parse(
+      fs.readFileSync(new URL("../package.json", import.meta.url), "utf8"),
+    ).version;
+  } catch {
+    return "";
+  }
+}
 
 function normalizeServerUrl(value) {
   const text = String(value || "").trim().replace(/\/+$/, "");
@@ -28,6 +40,7 @@ export class SyncService {
     this.syncing = false;
     this.lastSyncAt = null;
     this.error = null;
+    this.reportError = null;
     this.timer = null;
     this.debounce = null;
     this.socket = null;
@@ -73,6 +86,7 @@ export class SyncService {
       pendingCount: this.database.pendingMutationCount(),
       lastSyncAt: this.lastSyncAt,
       error: this.error,
+      reportError: this.reportError,
     };
   }
 
@@ -117,6 +131,14 @@ export class SyncService {
       await this.registerDevice();
       await this.pushPending();
       await this.pullAll();
+      // Comptes et activité : un échec (serveur plus ancien, par exemple)
+      // ne doit pas bloquer la synchronisation du catalogue.
+      try {
+        await this.sendReport();
+        this.reportError = null;
+      } catch (error) {
+        this.reportError = this.friendlyError(error);
+      }
       this.connected = true;
       this.lastSyncAt = new Date().toISOString();
       this.database.setSettings({ sync_last_at: this.lastSyncAt });
@@ -167,6 +189,39 @@ export class SyncService {
       this.database.acknowledgeMutations(acknowledged);
     }
     throw new Error("Trop de modifications en attente pour une synchronisation.");
+  }
+
+  /**
+   * Rapport d'appareil pour l'API de données : comptes du poste (sans mot
+   * de passe) et activité nouvelle depuis le dernier envoi accepté.
+   */
+  async sendReport() {
+    let after =
+      Number(this.database.getSetting("sync_report_activity_id", "0")) || 0;
+    for (let batch = 0; batch < 20; batch++) {
+      const activity = this.database.reportActivity(
+        after,
+        REPORT_ACTIVITY_BATCH,
+      );
+      const result = await this.request(
+        `/api/v1/devices/${encodeURIComponent(this.deviceId)}/report`,
+        {
+          method: "POST",
+          body: JSON.stringify({
+            deviceId: this.deviceId,
+            name: this.deviceName,
+            platform: "windows",
+            appVersion: appVersion(),
+            users: batch === 0 ? this.database.reportUsers() : null,
+            activity,
+          }),
+        },
+      );
+      if (!activity.length) return;
+      after = Number(result.activityAcknowledgedUntil) || activity.at(-1).localId;
+      this.database.setSettings({ sync_report_activity_id: String(after) });
+      if (activity.length < REPORT_ACTIVITY_BATCH) return;
+    }
   }
 
   async pullAll() {

@@ -482,6 +482,145 @@ void main() {
     }
   });
 
+  test('bips du poste et anti-rebond de présence', () async {
+    final database = LibraryDatabase.instance;
+    final member = await _subscriberWithCard(database, 'ab-1', 'A001');
+    await database.renewSubscription(
+      member.id,
+      DateTime.now().add(const Duration(days: 365)),
+    );
+    final first = await _taggedBook(database, 'Premier', 'B001');
+    final second = await _taggedBook(database, 'Second', 'B002');
+    final tablet = _SilentReader();
+    final desk = _FakeDeskReader();
+    final controller = LibraryController(
+      database: database,
+      reader: tablet,
+      deskReader: desk,
+    );
+    final kiosk = controller.kiosk
+      ..transport = 'simulation'
+      ..beepRearmSeconds = 1;
+    try {
+      await kiosk.enter();
+
+      // Carte puis deux livres posés ensemble : un bip pour la carte, un
+      // seul pour les deux livres.
+      desk.emit(_cardTag(member));
+      await _until(() => kiosk.subscriber != null);
+      await _until(() => desk.beeps == 1);
+      desk.emit(_bookTag(first));
+      desk.emit(_bookTag(second));
+      await _until(() => kiosk.items.length == 2);
+      await Future<void>.delayed(const Duration(milliseconds: 300));
+      expect(desk.beeps, 2);
+
+      // Un tag qui clignote (relu sans retrait confirmé) ne rebipe pas.
+      for (var index = 0; index < 5; index++) {
+        desk.emit(_bookTag(first));
+        await Future<void>.delayed(const Duration(milliseconds: 200));
+      }
+      expect(desk.beeps, 2);
+      expect(tablet.beeps, 0);
+
+      // Fin de session : les livres encore posés ne relancent rien tant
+      // que leur retrait n'est pas confirmé.
+      kiosk.cancelSession();
+      desk.emit(_bookTag(first));
+      await Future<void>.delayed(const Duration(milliseconds: 300));
+      expect(kiosk.stage, KioskStage.home);
+      expect(desk.beeps, 2);
+
+      // Retiré plus de 2,2 s + 1 s de réarmement : il ouvre une session et
+      // bipe de nouveau.
+      await Future<void>.delayed(const Duration(milliseconds: 3400));
+      desk.emit(_bookTag(first));
+      await _until(() => kiosk.items.length == 1);
+      await _until(() => desk.beeps == 3);
+
+      // Buzzer du lecteur muet : la tablette prend le relais.
+      desk.buzzer = false;
+      await kiosk.testBeep();
+      expect(tablet.beeps, 1);
+      await kiosk.configureFeedback(nextSource: 'off', nextRearmSeconds: 1);
+      await kiosk.testBeep();
+      expect(desk.beeps, 3);
+      expect(tablet.beeps, 1);
+    } finally {
+      controller.dispose();
+    }
+  });
+
+  test('consultation du catalogue au poste', () async {
+    final database = LibraryDatabase.instance;
+    final member = await _subscriberWithCard(database, 'ab-1', 'A001');
+    await database.renewSubscription(
+      member.id,
+      DateTime.now().add(const Duration(days: 365)),
+    );
+    final shelved = await database.createBook({
+      'title': 'Atlas du monde',
+      'author': 'Collectif',
+      'shelf': 'A-12',
+    });
+    final lent = await _taggedBook(database, 'Botanique', 'B010');
+    final withdrawn = await database.createBook({
+      'title': 'Chimie',
+      'shelf': 'C-03',
+    });
+    await (await database.database).update(
+      'books',
+      {'status': 'indisponible'},
+      where: 'id = ?',
+      whereArgs: [withdrawn.id],
+    );
+    await database.borrowBook(
+      lent.id,
+      memberNumber: member.memberNumber,
+      name: member.name,
+      dueAt: DateTime.now().add(const Duration(days: 14)),
+    );
+
+    final all = await database.browseCatalog();
+    expect(all.map((entry) => entry.book.title), [
+      'Atlas du monde',
+      'Botanique',
+      'Chimie',
+    ]);
+    expect(all[0].available, isTrue);
+    expect(all[1].onLoan, isTrue);
+    expect(all[1].dueAt, isNotNull);
+    expect(all[2].available, isFalse);
+    expect(
+      (await database.browseCatalog(availableOnly: true)).single.book.id,
+      shelved.id,
+    );
+    expect(
+      (await database.browseCatalog(search: 'a-12')).single.book.shelf,
+      'A-12',
+    );
+    expect(await database.browseCatalog(search: 'introuvable'), isEmpty);
+
+    // En consultation, poser sa carte ouvre l'emprunt.
+    final desk = _FakeDeskReader();
+    final controller = LibraryController(
+      database: database,
+      reader: _SilentReader(),
+      deskReader: desk,
+    );
+    final kiosk = controller.kiosk..transport = 'simulation';
+    try {
+      await kiosk.enter();
+      kiosk.startBrowse();
+      expect(kiosk.stage, KioskStage.browse);
+      desk.emit(_cardTag(member));
+      await _until(() => kiosk.subscriber != null);
+      expect(kiosk.stage, KioskStage.borrow);
+    } finally {
+      controller.dispose();
+    }
+  });
+
   test('le type d’appareil est mémorisé', () async {
     final controller = LibraryController(
       database: LibraryDatabase.instance,
@@ -649,8 +788,10 @@ Future<void> _until(bool Function() condition) async {
 }
 
 class _SilentReader extends ReaderService {
+  int beeps = 0;
+
   @override
-  Future<void> playScanBeep() async {}
+  Future<void> playScanBeep() async => beeps++;
 }
 
 class _FakeDeskReader extends DeskReaderService {
@@ -669,6 +810,14 @@ class _FakeDeskReader extends DeskReaderService {
 
   /// Tags posés sur le lecteur, remontés au démarrage de la lecture.
   List<ReaderTag> placed = [];
+  int beeps = 0;
+  bool buzzer = true;
+
+  @override
+  Future<bool> beep() async {
+    if (buzzer) beeps++;
+    return buzzer;
+  }
   final List<(String, String)> written = [];
 
   void emit(ReaderTag tag) => _events.add(tag);
