@@ -153,10 +153,40 @@ export class SyncService {
   }
 
   async registerDevice() {
-    await this.request("/api/v1/devices/register", {
+    const result = await this.request("/api/v1/devices/register", {
       method: "POST",
       body: JSON.stringify({ deviceId: this.deviceId, name: this.deviceName }),
     });
+    this.checkServerDatabase(result);
+  }
+
+  /**
+   * Un serveur dont la base a été recréée (redéploiement sans disque
+   * persistant, restauration) ne connaît plus rien, alors que ce poste croit
+   * tout synchronisé : on le détecte à l'identifiant de sa base, ou à un
+   * curseur serveur en retard sur celui du poste, et on renvoie tout.
+   */
+  checkServerDatabase(result = {}) {
+    const databaseId = String(result.databaseId || "");
+    const serverCursor = Number(result.cursor);
+    const known = this.database.getSyncMeta("server_database_id", "");
+    const localCursor = this.database.syncCursor();
+    const replaced = Boolean(databaseId && known && known !== databaseId);
+    const behind =
+      Number.isFinite(serverCursor) && serverCursor < localCursor;
+    if (replaced || behind) {
+      console.warn(
+        `Serveur de synchronisation réinitialisé (base ${known || "?"} -> ${databaseId || "?"}, curseur ${localCursor} -> ${serverCursor}) : renvoi complet.`,
+      );
+      this.database.resetSyncState();
+      this.database.addActivity(
+        "synchronisation",
+        "succes",
+        null,
+        "Serveur distant réinitialisé : tout le contenu du poste lui est renvoyé.",
+      );
+    }
+    if (databaseId) this.database.setSyncMeta("server_database_id", databaseId);
   }
 
   async pushPending() {

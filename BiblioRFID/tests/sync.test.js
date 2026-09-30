@@ -384,3 +384,80 @@ test("un serveur sans rapport d'appareil ne bloque pas la synchronisation", asyn
     fs.rmSync(directory, { recursive: true, force: true });
   }
 });
+
+test("renvoie tout le contenu du poste à un serveur dont la base a été recréée", async () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "biblio-sync-reset-"));
+  const database = new LibraryDatabase(path.join(directory, "catalogue.db"));
+  database.createBook({ title: "Livre A" });
+  database.createBook({ title: "Livre B" });
+  const server = {
+    databaseId: "base-1",
+    sequence: 0,
+    pushed: [],
+  };
+  const http_ = http.createServer(async (request, response) => {
+    const chunks = [];
+    for await (const chunk of request) chunks.push(chunk);
+    const body = chunks.length ? JSON.parse(Buffer.concat(chunks).toString("utf8")) : null;
+    response.setHeader("Content-Type", "application/json");
+    if (request.url === "/api/v1/devices/register")
+      return response.end(
+        JSON.stringify({ registered: true, databaseId: server.databaseId, cursor: server.sequence }),
+      );
+    if (request.url === "/api/v1/sync/push") {
+      server.pushed.push(...body.mutations);
+      server.sequence += body.mutations.length;
+      return response.end(
+        JSON.stringify({
+          acknowledgedMutationIds: body.mutations.map((item) => item.mutationId),
+          cursor: server.sequence,
+        }),
+      );
+    }
+    if (request.url.startsWith("/api/v1/sync?"))
+      return response.end(
+        JSON.stringify({ cursor: server.sequence, changes: [], hasMore: false }),
+      );
+    if (request.url.endsWith("/report"))
+      return response.end(JSON.stringify({ activityAcknowledgedUntil: null }));
+    response.statusCode = 404;
+    response.end("{}");
+  });
+  const service = new SyncService(database);
+  try {
+    const port = await listen(http_);
+    service.initialize();
+    await service.configure({ serverUrl: `http://127.0.0.1:${port}`, apiKey: "k" });
+    assert.equal(server.pushed.length, 2);
+    assert.equal(database.syncCursor(), 2);
+
+    // Le serveur est redéployé sans disque : base vide, nouvel identifiant.
+    server.databaseId = "base-2";
+    server.sequence = 0;
+    server.pushed = [];
+    let status = await service.syncNow();
+    assert.equal(status.error, null);
+    assert.deepEqual(
+      server.pushed.map((item) => item.book.title).sort(),
+      ["Livre A", "Livre B"],
+    );
+    assert.equal(status.pendingCount, 0);
+
+    // Serveur plus ancien sans identifiant, mais curseur en retard : idem.
+    server.databaseId = "";
+    server.sequence = 0;
+    server.pushed = [];
+    status = await service.syncNow();
+    assert.equal(server.pushed.length, 2);
+
+    // Serveur intact : rien n'est renvoyé.
+    server.pushed = [];
+    await service.syncNow();
+    assert.equal(server.pushed.length, 0);
+  } finally {
+    service.close();
+    await close(http_);
+    database.close();
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});

@@ -250,6 +250,33 @@ class ApplicationTest {
     }
 
     @Test
+    fun `registration exposes a stable database id and the cursor`() = testApplication {
+        val store = SyncStore("jdbc:sqlite::memory:", wireJsonForTests)
+        application { module(store, "secret") }
+        val client = createClient { install(ContentNegotiation) { json(wireJsonForTests) } }
+        suspend fun register() = client.post("/api/v1/devices/register") {
+            header("X-Device-Key", "secret")
+            header(HttpHeaders.ContentType, ContentType.Application.Json)
+            setBody(DeviceRegistration("poste-1", "Poste"))
+        }.body<DeviceResponse>()
+        val first = register()
+        assertEquals(36, first.databaseId.length)
+        assertEquals(0, first.cursor)
+        val now = "2026-01-01T00:00:00Z"
+        client.post("/api/v1/sync/push") {
+            header("X-Device-Key", "secret")
+            header(HttpHeaders.ContentType, ContentType.Application.Json)
+            setBody(PushRequest("poste-1", listOf(Mutation("m-1", "upsert", "b-1", SyncBook("b-1", "A", "E", title = "T", createdAt = now, updatedAt = now)))))
+        }
+        val second = register()
+        assertEquals(first.databaseId, second.databaseId)
+        assertEquals(1, second.cursor)
+        // Une base recréée a un autre identifiant.
+        val other = SyncStore("jdbc:sqlite::memory:", wireJsonForTests)
+        kotlin.test.assertNotEquals(first.databaseId, other.databaseId)
+    }
+
+    @Test
     fun `private routes reject invalid keys`() = testApplication {
         val store = SyncStore("jdbc:sqlite::memory:", wireJsonForTests)
         application { module(store, "secret") }

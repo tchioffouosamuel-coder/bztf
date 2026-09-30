@@ -1555,6 +1555,29 @@ class LibraryDatabase {
     });
   }
 
+  /// Le serveur a perdu ses données : tout ce que possède l'appareil repart
+  /// vers lui et les changements sont relus depuis le début.
+  Future<void> resetSyncState() async {
+    final db = await database;
+    await db.transaction((transaction) async {
+      for (final table in const [
+        'books',
+        'subscribers',
+        'subscriptions',
+        'loans',
+        'gate_days',
+        'staff_passages',
+      ]) {
+        await transaction.update(table, {'sync_state': 'pending'});
+      }
+      await transaction.insert('sync_meta', {
+        'key': 'cursor',
+        'value': '0',
+      }, conflictAlgorithm: ConflictAlgorithm.replace);
+    });
+    await prepareInitialSync();
+  }
+
   Future<void> queueBook(Book book) async {
     final db = await database;
     await db.transaction((transaction) => _queueBook(transaction, book));

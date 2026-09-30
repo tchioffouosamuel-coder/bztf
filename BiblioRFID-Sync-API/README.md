@@ -16,6 +16,20 @@ Le serveur écoute sur `0.0.0.0:8080` par défaut. Définissez `PORT` pour chang
 En production, placez-le derrière un proxy HTTPS et remplacez impérativement la clé
 de développement par défaut.
 
+## Données persistantes (Render, Docker)
+
+La base SQLite est dans `/app/data/bibliorfid-sync.db`. Sur Render, le disque d'un
+service est **effacé à chaque déploiement ou redémarrage** : le `VOLUME` du Dockerfile
+n'est pas pris en compte. Ajoutez un disque persistant au service (*Disks* : chemin de
+montage `/app/data`), ou pointez `BIBLIORFID_DATABASE_URL` vers un emplacement
+persistant. Sans cela, `/api/v1/stats` repasse à zéro après chaque redéploiement.
+
+Chaque base porte un identifiant tiré au sort à sa création, renvoyé avec le curseur par
+`POST /api/v1/devices/register` (`databaseId`, `cursor`). Si cet identifiant change, ou
+si le curseur du serveur est en retard sur celui d'un poste, le poste en conclut que la
+base a été perdue et renvoie automatiquement tout son contenu (livres, abonnés,
+abonnements, emprunts, personnel, activité des portails).
+
 ## Routes de synchronisation (postes)
 
 - `GET /health`

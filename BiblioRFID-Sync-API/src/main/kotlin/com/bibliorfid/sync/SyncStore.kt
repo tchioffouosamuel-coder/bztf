@@ -222,6 +222,22 @@ class SyncStore(databaseUrl: String, private val json: Json) : Closeable {
                 "CREATE INDEX IF NOT EXISTS idx_staff_passages_staff ON staff_passages(staff_server_id, passed_at)",
             )
             statement.executeUpdate("CREATE INDEX IF NOT EXISTS idx_staff_passages_at ON staff_passages(passed_at)")
+            statement.executeUpdate("CREATE TABLE IF NOT EXISTS store_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
+            statement.executeUpdate(
+                "INSERT OR IGNORE INTO store_meta(key, value) VALUES ('database_id', '${java.util.UUID.randomUUID()}')",
+            )
+        }
+    }
+
+    /** Identifiant de cette base, stable tant qu'elle n'est pas recréée. */
+    val databaseId: String by lazy {
+        read { connection ->
+            connection.createStatement().use { statement ->
+                statement.executeQuery("SELECT value FROM store_meta WHERE key='database_id'").use { rows ->
+                    rows.next()
+                    rows.getString(1)
+                }
+            }
         }
     }
 
@@ -263,7 +279,7 @@ class SyncStore(databaseUrl: String, private val json: Json) : Closeable {
             it.setString(3, now)
             it.executeUpdate()
         }
-        return DeviceResponse(registration.deviceId, true, now)
+        return DeviceResponse(registration.deviceId, true, now, databaseId, currentCursor())
     }
 
     @Synchronized

@@ -136,6 +136,44 @@ class SyncService extends ChangeNotifier {
         )
         .timeout(const Duration(seconds: 12));
     _requireSuccess(response);
+    await _checkServerDatabase(response.body);
+  }
+
+  /// Un serveur dont la base a été recréée (redéploiement sans disque
+  /// persistant) ne connaît plus rien alors que l'appareil croit tout
+  /// synchronisé : détecté par l'identifiant de sa base ou par un curseur
+  /// en retard, tout le contenu de l'appareil lui est renvoyé.
+  Future<void> _checkServerDatabase(String body) async {
+    Map<Object?, Object?> result;
+    try {
+      result = jsonDecode(body) as Map<Object?, Object?>;
+    } catch (_) {
+      return;
+    }
+    final databaseId = result['databaseId']?.toString() ?? '';
+    final serverCursor = (result['cursor'] as num?)?.toInt();
+    final preferences = await SharedPreferences.getInstance();
+    final known = preferences.getString('sync_server_database_id') ?? '';
+    final localCursor = await database.syncCursor();
+    final replaced =
+        databaseId.isNotEmpty && known.isNotEmpty && known != databaseId;
+    final behind = serverCursor != null && serverCursor < localCursor;
+    if (replaced || behind) {
+      debugPrint(
+        'Serveur réinitialisé ($known -> $databaseId, curseur '
+        '$localCursor -> $serverCursor) : renvoi complet.',
+      );
+      await database.resetSyncState();
+      await preferences.remove('sync_report_activity_id');
+      await database.addActivity(
+        'synchronisation',
+        'succes',
+        'Serveur distant réinitialisé : tout le contenu de l’appareil lui est renvoyé.',
+      );
+    }
+    if (databaseId.isNotEmpty) {
+      await preferences.setString('sync_server_database_id', databaseId);
+    }
   }
 
   Future<void> _pushPending() async {

@@ -158,4 +158,80 @@ void main() {
       }
     },
   );
+
+  test('renvoie tout à un serveur dont la base a été recréée', () async {
+    final database = LibraryDatabase.instance;
+    await database.createBook({'title': 'Livre A'});
+    await database.createBook({'title': 'Livre B'});
+    var databaseId = 'base-1';
+    var sequence = 0;
+    final pushed = <String>[];
+    final client = MockClient((request) async {
+      final route = request.url.path;
+      if (route == '/api/v1/devices/register') {
+        return http.Response(
+          jsonEncode({
+            'registered': true,
+            'databaseId': databaseId,
+            'cursor': sequence,
+          }),
+          200,
+        );
+      }
+      if (route == '/api/v1/sync/push') {
+        final mutations =
+            (jsonDecode(request.body) as Map)['mutations'] as List;
+        for (final mutation in mutations.cast<Map>()) {
+          pushed.add((mutation['book'] as Map)['title'] as String);
+        }
+        sequence += mutations.length;
+        return http.Response(
+          jsonEncode({
+            'acknowledgedMutationIds': [
+              for (final mutation in mutations) (mutation as Map)['mutationId'],
+            ],
+            'cursor': sequence,
+          }),
+          200,
+        );
+      }
+      if (route == '/api/v1/sync') {
+        return http.Response(
+          jsonEncode({'cursor': sequence, 'changes': [], 'hasMore': false}),
+          200,
+        );
+      }
+      return http.Response(
+        jsonEncode({'activityAcknowledgedUntil': null}),
+        200,
+      );
+    });
+    final sync = SyncService(database, client: client);
+    try {
+      await sync.initialize();
+      await sync.configure(
+        nextServerUrl: 'https://api.test',
+        nextApiKey: 'secret',
+        nextDeviceName: 'Lecteur',
+      );
+      expect(pushed..sort(), ['Livre A', 'Livre B']);
+      expect(await database.syncCursor(), 2);
+
+      // Redéploiement sans disque : base vide, nouvel identifiant.
+      databaseId = 'base-2';
+      sequence = 0;
+      pushed.clear();
+      await sync.syncNow();
+      expect(sync.error, isNull);
+      expect(pushed..sort(), ['Livre A', 'Livre B']);
+      expect(await database.pendingMutationCount(), 0);
+
+      // Serveur intact : rien n'est renvoyé.
+      pushed.clear();
+      await sync.syncNow();
+      expect(pushed, isEmpty);
+    } finally {
+      sync.dispose();
+    }
+  });
 }

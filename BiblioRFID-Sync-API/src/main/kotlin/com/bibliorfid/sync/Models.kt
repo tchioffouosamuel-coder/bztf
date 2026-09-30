@@ -193,7 +193,18 @@ data class PullResponse(val cursor: Long, val changes: List<Change>, val hasMore
 data class DeviceRegistration(val deviceId: String, val name: String = "")
 
 @Serializable
-data class DeviceResponse(val deviceId: String, val registered: Boolean, val serverTime: String)
+data class DeviceResponse(
+    val deviceId: String,
+    val registered: Boolean,
+    val serverTime: String,
+    /**
+     * Identifiant de la base du serveur, tiré au sort à sa création. S'il
+     * change (base perdue ou recréée), les postes renvoient tout leur contenu.
+     */
+    val databaseId: String = "",
+    /** Dernière séquence de changements connue du serveur. */
+    val cursor: Long = 0,
+)
 
 @Serializable
 data class HealthResponse(val status: String, val service: String, val time: String)

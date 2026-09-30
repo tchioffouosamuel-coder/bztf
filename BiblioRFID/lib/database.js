@@ -1865,6 +1865,25 @@ export class LibraryDatabase {
     }
   }
 
+  /**
+   * Le serveur a perdu ses données (base recréée) : tout ce que ce poste
+   * possède repart vers lui, et les changements sont relus depuis le début.
+   */
+  resetSyncState() {
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      for (const table of ["books", "subscribers", "subscriptions", "loans", "staff"])
+        this.db.exec(`UPDATE ${table} SET sync_state='pending'`);
+      this.setSyncMeta("cursor", 0);
+      this.db.exec("COMMIT");
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
+    this.setSettings({ sync_report_activity_id: "0" });
+    this.prepareInitialSync();
+  }
+
   pendingMutations(limit = 500) {
     return this.db
       .prepare(
