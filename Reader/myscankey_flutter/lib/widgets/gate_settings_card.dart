@@ -23,8 +23,11 @@ class _GateSettingsSectionState extends State<GateSettingsSection> {
   late int _outside;
   late int _inside;
   late double _volume;
-  late bool _light;
+  late int _lightGpo;
   late int _rearm;
+  late bool _buzzer;
+  late int _buzzerGpo;
+  late int _buzzerSeconds;
   bool _testing = false;
 
   GateController get gate => widget.gate;
@@ -39,8 +42,11 @@ class _GateSettingsSectionState extends State<GateSettingsSection> {
     _outside = gate.outsideSensor;
     _inside = gate.insideSensor;
     _volume = gate.alarmVolume;
-    _light = gate.alarmLight;
+    _lightGpo = gate.lightGpo;
     _rearm = gate.bookRearmSeconds;
+    _buzzer = gate.buzzerEnabled;
+    _buzzerGpo = gate.buzzerGpo;
+    _buzzerSeconds = gate.buzzerSeconds;
   }
 
   @override
@@ -83,6 +89,22 @@ class _GateSettingsSectionState extends State<GateSettingsSection> {
         context,
       ).textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w800),
     ),
+  );
+
+  DropdownButtonFormField<int> _outputField(
+    String label,
+    int value,
+    ValueChanged<int> onChanged, {
+    bool allowNone = false,
+  }) => DropdownButtonFormField<int>(
+    initialValue: value,
+    decoration: InputDecoration(labelText: label),
+    items: [
+      if (allowNone) const DropdownMenuItem(value: 0, child: Text('Aucun')),
+      for (var gpo = 1; gpo <= 4; gpo++)
+        DropdownMenuItem(value: gpo, child: Text('Sortie GPO $gpo')),
+    ],
+    onChanged: (next) => onChanged(next ?? 0),
   );
 
   DropdownButtonFormField<int> _sensorField(
@@ -342,14 +364,14 @@ class _GateSettingsSectionState extends State<GateSettingsSection> {
                       Text('${(_volume * 100).round()} %'),
                     ],
                   ),
-                  SwitchListTile(
-                    contentPadding: EdgeInsets.zero,
-                    value: _light,
-                    onChanged: (value) => setState(() => _light = value),
-                    title: const Text(
-                      'Voyant rouge du portail pendant l’alarme',
-                    ),
+                  const SizedBox(height: 4),
+                  _outputField(
+                    'Voyant du portail pendant l’alarme',
+                    _lightGpo,
+                    (value) => setState(() => _lightGpo = value),
+                    allowNone: true,
                   ),
+                  const SizedBox(height: 8),
                   Row(
                     children: [
                       const Expanded(
@@ -383,9 +405,10 @@ class _GateSettingsSectionState extends State<GateSettingsSection> {
                   Text(
                     'Un livre non emprunté déclenche le message vocal « Attention ! '
                     'Ne sortez pas avec un livre non emprunté… » sur fond de '
-                    'sirène, joué par la tablette (volume « alarme »). Le buzzer '
-                    'du portail reste coupé. Un livre resté près du portail ne '
-                    'redéclenche l’alarme qu’après ce délai d’absence.',
+                    'sirène, joué par la tablette (volume « alarme »), et allume '
+                    'le voyant choisi (GPO1 = voyant rouge d’après le manuel). '
+                    'Un livre resté près du portail ne redéclenche l’alarme '
+                    'qu’après ce délai d’absence.',
                     style: small,
                   ),
                   const SizedBox(height: 10),
@@ -405,11 +428,124 @@ class _GateSettingsSectionState extends State<GateSettingsSection> {
                           onPressed: () => _run(
                             () => gate.configureAlarm(
                               nextVolume: _volume,
-                              nextLight: _light,
+                              nextLightGpo: _lightGpo,
                               nextRearmSeconds: _rearm,
                               nextGateName: _name.text,
                             ),
                             'Réglages de l’alarme enregistrés.',
+                          ),
+                          icon: const Icon(Icons.save_outlined),
+                          label: const Text('Enregistrer'),
+                        ),
+                      ),
+                    ],
+                  ),
+                ],
+              ),
+            ),
+          ),
+          _heading('Buzzer du portail'),
+          Card(
+            child: Padding(
+              padding: const EdgeInsets.all(14),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  SwitchListTile(
+                    contentPadding: EdgeInsets.zero,
+                    value: _buzzer,
+                    onChanged: (value) => setState(() => _buzzer = value),
+                    title: const Text(
+                      'Faire sonner le buzzer pendant l’alarme',
+                    ),
+                    subtitle: Text(
+                      _buzzer
+                          ? 'Le buzzer bipe en plus du message vocal.'
+                          : 'Désactivé : seuls le message vocal de la tablette '
+                                'et le voyant signalent l’alarme.',
+                    ),
+                  ),
+                  const SizedBox(height: 8),
+                  _outputField(
+                    'Sortie du buzzer',
+                    _buzzerGpo,
+                    (value) => setState(() => _buzzerGpo = value),
+                  ),
+                  Row(
+                    children: [
+                      const Expanded(child: Text('Durée du bip (secondes)')),
+                      IconButton(
+                        onPressed: _buzzerSeconds > 1
+                            ? () => setState(() => _buzzerSeconds--)
+                            : null,
+                        icon: const Icon(Icons.remove_circle_outline),
+                      ),
+                      SizedBox(
+                        width: 40,
+                        child: Text(
+                          '$_buzzerSeconds',
+                          textAlign: TextAlign.center,
+                          style: const TextStyle(
+                            fontWeight: FontWeight.w800,
+                            fontSize: 16,
+                          ),
+                        ),
+                      ),
+                      IconButton(
+                        onPressed: _buzzerSeconds < 10
+                            ? () => setState(() => _buzzerSeconds++)
+                            : null,
+                        icon: const Icon(Icons.add_circle_outline),
+                      ),
+                    ],
+                  ),
+                  if (!_buzzer && _buzzerGpo == _lightGpo)
+                    Padding(
+                      padding: const EdgeInsets.only(bottom: 6),
+                      child: Text(
+                        'Le voyant est sur la même sortie que le buzzer : il '
+                        'ne sera pas allumé, pour que le buzzer reste muet.',
+                        style: small?.copyWith(color: colors.error),
+                      ),
+                    ),
+                  Text(
+                    'Si le buzzer sonne quand l’alarme allume le voyant, il est '
+                    'câblé sur la sortie du voyant : utilisez « Tester le '
+                    'buzzer » pour trouver sa sortie et indiquez-la ici. '
+                    'Désactivé, sa sortie n’est jamais actionnée par '
+                    'l’application et le portail ne la déclenche plus de '
+                    'lui-même à la lecture d’un tag.',
+                    style: small,
+                  ),
+                  const SizedBox(height: 10),
+                  Row(
+                    children: [
+                      Expanded(
+                        child: OutlinedButton.icon(
+                          onPressed: gate.readerConnected && !gate.simulation
+                              ? () => _run(() async {
+                                  if (!await gate.testBuzzer(gpo: _buzzerGpo)) {
+                                    throw StateError(
+                                      'Le portail a refusé la sortie GPO '
+                                      '$_buzzerGpo.',
+                                    );
+                                  }
+                                }, 'Sortie GPO $_buzzerGpo activée.')
+                              : null,
+                          icon: const Icon(Icons.notifications_active_outlined),
+                          label: const Text('Tester le buzzer'),
+                        ),
+                      ),
+                      const SizedBox(width: 10),
+                      Expanded(
+                        child: FilledButton.icon(
+                          onPressed: () => _run(
+                            () => gate.configureBuzzer(
+                              nextEnabled: _buzzer,
+                              nextGpo: _buzzerGpo,
+                              nextSeconds: _buzzerSeconds,
+                            ),
+                            'Réglages du buzzer enregistrés.',
                           ),
                           icon: const Icon(Icons.save_outlined),
                           label: const Text('Enregistrer'),

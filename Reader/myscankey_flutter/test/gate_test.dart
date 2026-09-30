@@ -366,6 +366,57 @@ void main() {
       controller.dispose();
     });
   });
+
+  test(
+    'buzzer : coupé par défaut, réglable, jamais via la sortie du voyant',
+    () async {
+      final reader = _FakeGateReader();
+      final controller = LibraryController(
+        database: LibraryDatabase.instance,
+        reader: _SilentReader(),
+        gateReader: reader,
+      );
+      final gate = controller.gate..transport = 'simulation';
+      try {
+        await gate.initialize();
+        expect(gate.buzzerEnabled, isFalse);
+        await gate.testAlarm();
+        expect(reader.outputs, [1]); // voyant seul
+
+        await gate.configureBuzzer(
+          nextEnabled: true,
+          nextGpo: 3,
+          nextSeconds: 2,
+        );
+        reader.outputs.clear();
+        await gate.testAlarm();
+        expect(reader.outputs, [1, 3]);
+
+        // Buzzer câblé sur la sortie du voyant et désactivé : rien n'est actionné.
+        await gate.configureBuzzer(
+          nextEnabled: false,
+          nextGpo: 1,
+          nextSeconds: 2,
+        );
+        reader.outputs.clear();
+        await gate.testAlarm();
+        expect(reader.outputs, isEmpty);
+
+        // Réglages conservés.
+        final reloaded = LibraryController(
+          database: LibraryDatabase.instance,
+          reader: _SilentReader(),
+          gateReader: _FakeGateReader(),
+        );
+        await reloaded.gate.initialize();
+        expect(reloaded.gate.buzzerGpo, 1);
+        expect(reloaded.gate.buzzerEnabled, isFalse);
+        reloaded.dispose();
+      } finally {
+        controller.dispose();
+      }
+    },
+  );
 }
 
 Future<Book> _taggedBook(
@@ -398,6 +449,9 @@ class _FakeGateReader extends GateReaderService {
   int alarms = 0;
   int lights = 0;
 
+  /// Sorties actionnées (voyant, buzzer), dans l'ordre.
+  final List<int> outputs = [];
+
   @override
   Future<Duration> playAlarm(double volume) async {
     alarms++;
@@ -408,8 +462,9 @@ class _FakeGateReader extends GateReaderService {
   Future<void> stopAlarm() async {}
 
   @override
-  Future<bool> pulseLight(int gpo, Duration duration) async {
+  Future<bool> pulseGpo(int gpo, Duration duration) async {
     lights++;
+    outputs.add(gpo);
     return true;
   }
 

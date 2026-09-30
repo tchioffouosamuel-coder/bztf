@@ -1119,6 +1119,92 @@ async function api(request, response, url) {
     }
   }
 
+  // Tag encodé sur un autre poste (livre, carte ou badge absent d'ici) :
+  // effacé sans passer par le catalogue, pour pouvoir le réutiliser.
+  if (request.method === "POST" && pathname === "/api/reader/erase-foreign") {
+    const input = await readBody(request);
+    const connection = normalizeConnection(input);
+    const expectedEpc = String(input.epc || "").trim().toUpperCase();
+    const expectedTid = String(input.tid || "").trim().toUpperCase();
+    try {
+      await ensureReaderConnection(connection);
+      const snapshot = currentSnapshot({ raw: true });
+      if (snapshot.count === 0)
+        return json(response, 409, {
+          ok: false,
+          error: "Aucun tag détecté. Posez le tag à désencoder sur le lecteur.",
+        });
+      if (snapshot.count > 1)
+        return json(response, 409, {
+          ok: false,
+          error: "Plusieurs tags détectés. Isolez le tag à désencoder.",
+        });
+      const target = snapshot.tags[0];
+      if (!target.tid)
+        return json(response, 409, {
+          ok: false,
+          error: "Le tag ne fournit pas de TID; le désencodage sécurisé est annulé.",
+        });
+      if (target.epc !== expectedEpc || target.tid !== expectedTid)
+        return json(response, 409, {
+          ok: false,
+          error: "Le tag posé n'est plus celui affiché. Recommencez.",
+        });
+      if (target.book || target.subscriber || target.staff)
+        return json(response, 409, {
+          ok: false,
+          error:
+            "Ce tag est connu de ce poste : désencodez-le depuis sa fiche.",
+        });
+      if (!["book", "card", "badge"].includes(target.kind))
+        return json(response, 409, {
+          ok: false,
+          error: "Ce tag n'est pas encodé : il n'y a rien à effacer.",
+        });
+      let result;
+      if (connection.type === "simulation") {
+        simulatedTag = { ...simulatedTag, epc: EMPTY_EPC };
+        result = { ok: true, verified: true, tag: simulatedTag };
+      } else {
+        result = normalizeBridgePayload(
+          await reader.write(EMPTY_EPC, target.tid),
+        );
+      }
+      if (
+        !result.verified ||
+        result.tag?.epc !== EMPTY_EPC ||
+        result.tag?.tid !== target.tid
+      )
+        throw new Error("Le désencodage n'a pas pu être vérifié par relecture.");
+      db.addActivity(
+        "desencodage",
+        "succes",
+        null,
+        `Tag d'un autre poste désencodé (${{ book: "livre", card: "carte d'abonné", badge: "badge du personnel" }[target.kind]})`,
+        target.epc,
+        target.tid,
+      );
+      const oldKey = presenceKey(target);
+      presentTags.delete(oldKey);
+      stableTags.delete(oldKey);
+      const erasedPresence = { tag: result.tag, lastSeen: Date.now() };
+      presentTags.set(presenceKey(result.tag), erasedPresence);
+      stableTags.set(presenceKey(result.tag), erasedPresence);
+      broadcastSnapshot(true);
+      return json(response, 200, result);
+    } catch (error) {
+      db.addActivity(
+        "desencodage",
+        "echec",
+        null,
+        `Tag d'un autre poste : ${error.message}`,
+        expectedEpc,
+        expectedTid,
+      );
+      return json(response, 503, { ok: false, error: error.message });
+    }
+  }
+
   if (request.method === "POST" && pathname === "/api/subscribers/card") {
     const input = await readBody(request);
     const connection = normalizeConnection(input);

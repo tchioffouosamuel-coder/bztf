@@ -2413,6 +2413,46 @@ function showStaffBadge(staff) {
   icons();
 }
 
+function foreignEraseButton(tag) {
+  if (!tag.tid) return "";
+  return `<div class="selected-actions"><button class="button danger" type="button" id="erase-foreign-tag"><i data-lucide="badge-minus"></i><span>Désencoder le tag</span></button></div>`;
+}
+
+/**
+ * Désencode un tag encodé sur un autre poste : EPC effacé (24 zéros) après
+ * contrôle du TID, écriture vérifiée par relecture. Le tag redevient vierge.
+ */
+function bindForeignErase(tag) {
+  $("#erase-foreign-tag")?.addEventListener("click", async (event) => {
+    // currentTarget n'est plus défini après l'attente de la confirmation.
+    const button = event.currentTarget;
+    const what =
+      { card: "cette carte d’abonné", badge: "ce badge du personnel" }[
+        tag.kind
+      ] || "ce livre";
+    if (
+      !(await confirmAction({
+        title: "Désencoder ce tag ?",
+        text: `Ce tag vient d’un autre poste. Son EPC sera effacé et ${what} ne sera plus reconnu nulle part tant qu’il n’aura pas été réencodé. Laissez-le seul sur le lecteur.`,
+        confirmButtonText: "Désencoder",
+        confirmButtonClass: "button danger",
+      }))
+    )
+      return;
+    button.disabled = true;
+    try {
+      await api("/api/reader/erase-foreign", {
+        method: "POST",
+        body: JSON.stringify({ epc: tag.epc, tid: tag.tid, ...getConnection() }),
+      });
+      toast("Tag désencodé et vérifié : il est de nouveau vierge.");
+    } catch (error) {
+      toast(error.message, "error");
+      button.disabled = false;
+    }
+  });
+}
+
 /** Tag au format carte, badge ou livre, mais inconnu de ce poste : jamais réécrit. */
 function showForeignTag(tag) {
   if (tag.kind === "badge") {
@@ -2425,9 +2465,11 @@ function showForeignTag(tag) {
     container.className = "selected-book";
     container.innerHTML = `<i data-lucide="id-card-lanyard"></i><div class="selected-book-copy">
     <span class="selection-label">Badge du personnel non reconnu</span><h3>Badge d’un autre poste ou désactivé</h3>
-    <p>Synchronisez ce poste pour l’identifier ; il ne sera pas réécrit comme livre.</p>
+    <p>Synchronisez ce poste pour l’identifier, ou désencodez-le pour le réutiliser.</p>
     <div class="selected-identifiers"><strong>EPC</strong><code>${escapeHtml(tag.epc || "—")}</code></div>
+    ${foreignEraseButton(tag)}
   </div>`;
+    bindForeignErase(tag);
     setWriteStatus("Badge non reconnu", "Synchronisation nécessaire", "warning");
     setReaderBanner(
       "Badge du personnel détecté",
@@ -2446,9 +2488,11 @@ function showForeignTag(tag) {
   container.className = "selected-book";
   container.innerHTML = `<i data-lucide="${card ? "id-card" : "book-dashed"}"></i><div class="selected-book-copy">
     <span class="selection-label">${card ? "Carte d’abonné" : "Livre"} non reconnu</span><h3>${card ? "Carte d’un autre poste" : "Livre d’un autre poste"}</h3>
-    <p>Ce tag a été encodé ailleurs. Synchronisez ce poste pour l’identifier ; il ne sera pas réécrit.</p>
+    <p>Ce tag a été encodé ailleurs. Synchronisez ce poste pour l’identifier, ou désencodez-le pour le réutiliser.</p>
     <div class="selected-identifiers"><strong>EPC</strong><code>${escapeHtml(tag.epc || "—")}</code></div>
+    ${foreignEraseButton(tag)}
   </div>`;
+  bindForeignErase(tag);
   setWriteStatus(
     card ? "Carte non reconnue" : "Livre non reconnu",
     "Synchronisation nécessaire",

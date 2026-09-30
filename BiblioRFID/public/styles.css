@@ -2368,3 +2368,6 @@ dialog::backdrop {
 .gate-grid table {
   min-width: 0;
 }
+.selected-actions {
+  margin-top: 14px;
+}

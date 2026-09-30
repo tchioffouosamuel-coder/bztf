@@ -65,11 +65,15 @@ class GateReaderService {
     }
   }
 
-  /// Connecte le portail et relève le niveau au repos des [sensors].
+  /// Connecte le portail et relève le niveau au repos des [sensors]. Avec
+  /// [silenceBuzzer], la sortie [buzzerGpo] est retirée de ce que le portail
+  /// déclenche de lui-même.
   Future<Map<Object?, Object?>> connect({
     required String transport,
     required String endpoint,
     List<int> sensors = const [],
+    int buzzerGpo = 3,
+    bool silenceBuzzer = true,
   }) async {
     await disconnect();
     _transport = transport;
@@ -93,6 +97,8 @@ class GateReaderService {
       'transport': transport,
       'endpoint': target,
       'sensors': sensors,
+      'buzzerGpo': buzzerGpo,
+      'silenceBuzzer': silenceBuzzer,
     });
     _connected = result?['connected'] == true;
     return result ?? const {};
@@ -151,14 +157,25 @@ class GateReaderService {
     _connected = false;
   }
 
-  /// Allume le voyant [gpo] du portail pendant [duration].
-  Future<bool> pulseLight(int gpo, Duration duration) async {
+  /// Active la sortie [gpo] du portail (voyant ou buzzer) pendant [duration].
+  Future<bool> pulseGpo(int gpo, Duration duration) async {
     if (!_connected || simulation) return false;
     try {
-      return await _methods.invokeMethod<bool>('pulseLight', {
+      return await _methods.invokeMethod<bool>('pulseGpo', {
             'gpo': gpo,
             'durationMs': duration.inMilliseconds,
           }) ??
+          false;
+    } on PlatformException {
+      return false;
+    }
+  }
+
+  /// Retire la sortie [gpo] du buzzer de ce que le portail déclenche seul.
+  Future<bool> silenceBuzzer(int gpo) async {
+    if (!_connected || simulation) return true;
+    try {
+      return await _methods.invokeMethod<bool>('silenceBuzzer', {'gpo': gpo}) ??
           false;
     } on PlatformException {
       return false;

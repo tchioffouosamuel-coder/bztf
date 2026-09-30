@@ -91,8 +91,22 @@ class GateController extends ChangeNotifier {
   int power = 30;
   String gateName = 'Portail antivol';
   double alarmVolume = 0.8;
-  bool alarmLight = true;
+
+  /// Sortie du voyant allumé pendant l'alarme (0 : aucun). GPO1 = voyant
+  /// rouge d'après le manuel du portail.
   int lightGpo = 1;
+
+  /// Buzzer du portail pendant l'alarme : coupé par défaut, le message vocal
+  /// et la sirène de la tablette suffisent.
+  bool buzzerEnabled = false;
+
+  /// Sortie du buzzer (GPO3 d'après le manuel ; à vérifier selon le câblage).
+  int buzzerGpo = 3;
+
+  /// Durée du bip du buzzer, en secondes.
+  int buzzerSeconds = 2;
+
+  bool get alarmLight => lightGpo > 0;
 
   /// Délai de réarmement de l'alarme d'un même livre, en secondes.
   int bookRearmSeconds = 20;
@@ -150,8 +164,12 @@ class GateController extends ChangeNotifier {
     power = settings.getInt('gate_power') ?? 30;
     gateName = settings.getString('gate_name') ?? 'Portail antivol';
     alarmVolume = settings.getDouble('gate_alarm_volume') ?? 0.8;
-    alarmLight = settings.getBool('gate_alarm_light') ?? true;
-    lightGpo = settings.getInt('gate_light_gpo') ?? 1;
+    lightGpo = settings.getBool('gate_alarm_light') == false
+        ? 0
+        : settings.getInt('gate_light_gpo') ?? 1;
+    buzzerEnabled = settings.getBool('gate_buzzer_enabled') ?? false;
+    buzzerGpo = settings.getInt('gate_buzzer_gpo') ?? 3;
+    buzzerSeconds = settings.getInt('gate_buzzer_seconds') ?? 2;
     bookRearmSeconds = settings.getInt('gate_book_rearm') ?? 20;
     tracker
       ..outsideSensor = settings.getInt('gate_outside_sensor') ?? 1
@@ -256,7 +274,7 @@ class GateController extends ChangeNotifier {
 
   Future<void> configureAlarm({
     required double nextVolume,
-    required bool nextLight,
+    required int nextLightGpo,
     required int nextRearmSeconds,
     required String nextGateName,
   }) async {
@@ -265,17 +283,51 @@ class GateController extends ChangeNotifier {
     }
     final name = nextGateName.trim();
     if (name.isEmpty) throw ArgumentError('Donnez un nom au portail.');
+    if (nextLightGpo < 0 || nextLightGpo > 4) {
+      throw RangeError.range(nextLightGpo, 0, 4, 'GPO');
+    }
     alarmVolume = nextVolume.clamp(0.1, 1.0);
-    alarmLight = nextLight;
+    lightGpo = nextLightGpo;
     bookRearmSeconds = nextRearmSeconds;
     gateName = name.length > 60 ? name.substring(0, 60) : name;
     final settings = await SharedPreferences.getInstance();
     await settings.setDouble('gate_alarm_volume', alarmVolume);
     await settings.setBool('gate_alarm_light', alarmLight);
+    await settings.setInt('gate_light_gpo', lightGpo);
     await settings.setInt('gate_book_rearm', bookRearmSeconds);
     await settings.setString('gate_name', gateName);
     notifyListeners();
   }
+
+  /// Buzzer du portail pendant l'alarme. Désactivé, sa sortie est aussi
+  /// retirée de ce que le portail déclenche de lui-même.
+  Future<void> configureBuzzer({
+    required bool nextEnabled,
+    required int nextGpo,
+    required int nextSeconds,
+  }) async {
+    if (nextGpo < 1 || nextGpo > 4) {
+      throw RangeError.range(nextGpo, 1, 4, 'GPO');
+    }
+    if (nextSeconds < 1 || nextSeconds > 10) {
+      throw RangeError.range(nextSeconds, 1, 10, 'secondes');
+    }
+    buzzerEnabled = nextEnabled;
+    buzzerGpo = nextGpo;
+    buzzerSeconds = nextSeconds;
+    final settings = await SharedPreferences.getInstance();
+    await settings.setBool('gate_buzzer_enabled', buzzerEnabled);
+    await settings.setInt('gate_buzzer_gpo', buzzerGpo);
+    await settings.setInt('gate_buzzer_seconds', buzzerSeconds);
+    if (!buzzerEnabled && reader.connected) {
+      buzzerSilenced = await reader.silenceBuzzer(buzzerGpo);
+    }
+    notifyListeners();
+  }
+
+  /// Fait sonner le buzzer une fois, pour identifier sa sortie.
+  Future<bool> testBuzzer({int? gpo}) =>
+      reader.pulseGpo(gpo ?? buzzerGpo, Duration(seconds: buzzerSeconds));
 
   /// Joue l'alarme (message et voyant) sans la compter.
   Future<void> testAlarm() => _signalAlarm();
@@ -382,7 +434,9 @@ class GateController extends ChangeNotifier {
     notifyListeners();
   }
 
-  /// Message vocal et voyant rouge ; jamais le buzzer du portail.
+  /// Message vocal, voyant et, s'il est activé, buzzer du portail. Buzzer
+  /// désactivé : sa sortie n'est jamais actionnée, même si c'est aussi celle
+  /// du voyant.
   Future<void> _signalAlarm() async {
     var shown = alarmDisplay;
     try {
@@ -391,7 +445,13 @@ class GateController extends ChangeNotifier {
     } catch (error) {
       debugPrint('Message d’alarme indisponible : $error');
     }
-    if (alarmLight) unawaited(reader.pulseLight(lightGpo, shown));
+    final lightAllowed = buzzerEnabled || lightGpo != buzzerGpo;
+    if (alarmLight && lightAllowed) {
+      unawaited(reader.pulseGpo(lightGpo, shown));
+    }
+    if (buzzerEnabled && buzzerGpo != lightGpo) {
+      unawaited(reader.pulseGpo(buzzerGpo, Duration(seconds: buzzerSeconds)));
+    }
     _alarmTimer?.cancel();
     _alarmTimer = Timer(shown, () {
       alarm = null;
@@ -538,6 +598,8 @@ class GateController extends ChangeNotifier {
         transport: transport,
         endpoint: endpoint,
         sensors: sensors,
+        buzzerGpo: buzzerGpo,
+        silenceBuzzer: !buzzerEnabled,
       );
       final levels = <int, int>{};
       final raw = info['gpiLevels'];

@@ -810,8 +810,17 @@ class KioskController extends ChangeNotifier {
   static String _hash(String pin) =>
       sha256.convert(utf8.encode('bibliorfid-kiosk:$pin')).toString();
 
+  bool _disposed = false;
+
+  /// Une lecture en cours peut se terminer après la fermeture du poste.
+  @override
+  void notifyListeners() {
+    if (!_disposed) super.notifyListeners();
+  }
+
   @override
   void dispose() {
+    _disposed = true;
     _beepTimer?.cancel();
     _idleTimer?.cancel();
     _receiptTimer?.cancel();

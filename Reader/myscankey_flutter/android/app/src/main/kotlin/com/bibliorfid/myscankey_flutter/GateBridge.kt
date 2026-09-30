@@ -27,7 +27,8 @@ import java.util.concurrent.Executors
  * Portail antivol N01 (SDK « N01RFID », N01_1.3.1.6.jar) : lecture continue
  * EPC + TID sur toutes les antennes, remontée des barrières infrarouges
  * (GPI) sur la connexion en cours, voyant rouge (GPO) et message d'alarme
- * joué par la tablette. Le buzzer du portail n'est jamais utilisé.
+ * joué par la tablette. Le buzzer du portail ne sonne que si les réglages
+ * l'autorisent.
  */
 class GateBridge(
 	messenger: BinaryMessenger,
@@ -61,6 +62,8 @@ class GateBridge(
 				call.argument<String>("transport") ?: "tcp",
 				call.argument<String>("endpoint") ?: "",
 				call.argument<List<Int>>("sensors") ?: emptyList(),
+				call.argument<Int>("buzzerGpo") ?: DEFAULT_BUZZER_GPO,
+				call.argument<Boolean>("silenceBuzzer") ?: true,
 				result,
 			)
 			"disconnect" -> executor.execute {
@@ -70,7 +73,19 @@ class GateBridge(
 			"startInventory" -> startInventory(call.argument<Int>("power"), result)
 			"stopInventory" -> stopInventory(result)
 			"ping" -> ping(result)
-			"pulseLight" -> pulseLight(call.argument<Int>("gpo") ?: RED_LIGHT_GPO, call.argument<Int>("durationMs") ?: 3000, result)
+			"pulseGpo" -> pulseGpo(call.argument<Int>("gpo") ?: RED_LIGHT_GPO, call.argument<Int>("durationMs") ?: 3000, result)
+			"silenceBuzzer" -> {
+				val current = reader
+				val gpo = call.argument<Int>("gpo") ?: DEFAULT_BUZZER_GPO
+				if (current == null) {
+					result.success(false)
+				} else {
+					executor.execute {
+						val silent = silenceBuzzer(current, gpo)
+						mainHandler.post { result.success(silent) }
+					}
+				}
+			}
 			"playAlarm" -> playAlarm(call.argument<Double>("volume") ?: 0.8, result)
 			"stopAlarm" -> {
 				stopAlarm()
@@ -84,7 +99,14 @@ class GateBridge(
 		}
 	}
 
-	private fun connect(transportInput: String, endpoint: String, sensors: List<Int>, result: MethodChannel.Result) {
+	private fun connect(
+		transportInput: String,
+		endpoint: String,
+		sensors: List<Int>,
+		buzzerGpo: Int,
+		silence: Boolean,
+		result: MethodChannel.Result,
+	) {
 		executor.execute {
 			try {
 				closeReader()
@@ -107,7 +129,7 @@ class GateBridge(
 				val levels = sensors.filter { it in 1..4 }.associate { gpi ->
 					gpi.toString() to runCatching { candidate.N01_GetGpi(gpi) }.getOrDefault(-1)
 				}
-				val buzzerSilenced = silenceBuzzer(candidate)
+				val buzzerSilenced = if (silence) silenceBuzzer(candidate, buzzerGpo) else null
 				reader = candidate
 				tagEventAt.clear()
 				val version = runCatching { candidate.N01_GetHardWareVersion()?.getOrNull(1) }.getOrNull().orEmpty()
@@ -130,26 +152,29 @@ class GateBridge(
 	}
 
 	/**
-	 * Retire le buzzer (GPO3, bit 4) des sorties déclenchées par le portail
-	 * lui-même : indicateur de lecture et GPO après lecture d'un tag (EAS).
-	 * Voyants et autres réglages sont conservés. `true` si rien ne sonne plus.
+	 * Retire la sortie du buzzer ([gpo], GPO3 d'après le manuel du portail)
+	 * des sorties que le portail déclenche lui-même : indicateur de lecture et
+	 * GPO après lecture d'un tag (EAS). Les autres sorties sont conservées.
+	 * `true` si rien ne fait plus sonner le buzzer.
 	 */
-	private fun silenceBuzzer(api: N01_Api): Boolean {
+	private fun silenceBuzzer(api: N01_Api, gpo: Int): Boolean {
+		if (gpo !in 1..4) return true
+		val buzzerMask = 1 shl (gpo - 1)
 		var silent = true
 		runCatching {
 			val indicator = api.N01_IndicatorGpoGet()
-			if (indicator != null && indicator.size >= 6 && indicator[3] and BUZZER_MASK != 0) {
-				indicator[3] = indicator[3] and BUZZER_MASK.inv()
+			if (indicator != null && indicator.size >= 6 && indicator[3] and buzzerMask != 0) {
+				indicator[3] = indicator[3] and buzzerMask.inv()
 				silent = api.N01_IndicatorGpoSet(indicator) == N01_Api.RET_ERRNO.RET_OK && silent
 			}
 		}.onFailure { Log.w(TAG, "Indicator GPO unavailable", it) }
 		runCatching {
 			val tagGpo = api.N01_GetTagGpo()
-			val gpo = (tagGpo?.getOrNull(0) as? Number)?.toInt() ?: 0
-			if (gpo and BUZZER_MASK != 0) {
+			val outputs = (tagGpo?.getOrNull(0) as? Number)?.toInt() ?: 0
+			if (outputs and buzzerMask != 0) {
 				val level = (tagGpo?.getOrNull(1) as? Number)?.toInt() ?: 1
 				val duration = (tagGpo?.getOrNull(2) as? Number)?.toInt() ?: 1
-				val remaining = gpo and BUZZER_MASK.inv()
+				val remaining = outputs and buzzerMask.inv()
 				val status = if (tagGpo != null && tagGpo.size >= 6) {
 					api.N01_SetTagGpo(
 						remaining,
@@ -163,7 +188,7 @@ class GateBridge(
 				silent = status == N01_Api.RET_ERRNO.RET_OK && silent
 			}
 		}.onFailure { Log.w(TAG, "Tag GPO unavailable", it) }
-		runCatching { api.N01_SetGpo(BUZZER_GPO, 0) }
+		runCatching { api.N01_SetGpo(gpo, 0) }
 		return silent
 	}
 
@@ -231,10 +256,10 @@ class GateBridge(
 		return api.N01_SetMultiAntPwr(antennas) == N01_Api.RET_ERRNO.RET_OK
 	}
 
-	/** Voyant (rouge par défaut) allumé pendant [durationMs], puis éteint. */
-	private fun pulseLight(gpo: Int, durationMs: Int, result: MethodChannel.Result) {
+	/** Sortie [gpo] (voyant ou buzzer) activée pendant [durationMs], puis coupée. */
+	private fun pulseGpo(gpo: Int, durationMs: Int, result: MethodChannel.Result) {
 		val current = reader
-		if (current == null || gpo !in 1..4 || gpo == BUZZER_GPO) {
+		if (current == null || gpo !in 1..4) {
 			result.success(false)
 			return
 		}
@@ -344,8 +369,7 @@ class GateBridge(
 		const val MIN_POWER = 5
 		const val MAX_POWER = 33
 		const val RED_LIGHT_GPO = 1
-		const val BUZZER_GPO = 3
-		const val BUZZER_MASK = 4
+		const val DEFAULT_BUZZER_GPO = 3
 		const val TAG_EVENT_DEBOUNCE_MS = 250L
 	}
 }
