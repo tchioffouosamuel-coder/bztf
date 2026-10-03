@@ -131,7 +131,34 @@ void main() {
     ].whereType<PassageDirection>().toList();
     expect(directions, [PassageDirection.entry]);
 
-    // Barrières libérées : le passage suivant est compté.
+    // Impulsions de 100 ms : les barrières semblent libres entre deux
+    // impulsions, une seule sortie est comptée (relevé du 3 octobre).
+    final pulses = GateDirectionTracker(outsideSensor: 1, insideSensor: 2)
+      ..setIdleLevels({});
+    final exit = start.add(const Duration(minutes: 1));
+    final pulseEvents = [
+      (0, 2, 1),
+      (100, 2, 0),
+      (770, 1, 1),
+      (870, 1, 0),
+      (1020, 2, 1),
+      (1120, 2, 0),
+      (1390, 1, 1),
+      (1490, 1, 0),
+      (1890, 1, 1),
+      (1990, 1, 0),
+      (2090, 2, 1),
+      (2190, 2, 0),
+    ];
+    expect(
+      [
+        for (final (ms, sensor, level) in pulseEvents)
+          pulses.onLevel(sensor, level, exit.add(Duration(milliseconds: ms))),
+      ].whereType<PassageDirection>(),
+      [PassageDirection.exit],
+    );
+
+    // Barrières calmes : le passage suivant est compté.
     final later = start.add(const Duration(seconds: 10));
     tracker.onLevel(2, 1, later);
     expect(
@@ -233,9 +260,16 @@ void main() {
     final gate = controller.gate..transport = 'simulation';
     try {
       await gate.enter();
-      gate.simulatePassage(PassageDirection.entry);
-      gate.simulatePassage(PassageDirection.entry);
-      gate.simulatePassage(PassageDirection.exit);
+      // Passages espacés : un passage n'est compté qu'après le calme des
+      // barrières.
+      for (final direction in [
+        PassageDirection.entry,
+        PassageDirection.entry,
+        PassageDirection.exit,
+      ]) {
+        gate.simulatePassage(direction);
+        await Future<void>.delayed(gate.tracker.settle * 1.2);
+      }
       await _until(() => gate.today.entries == 2 && gate.today.exits == 1);
       expect(gate.today.inside, 1);
 
@@ -450,6 +484,33 @@ void main() {
       controller.dispose();
     });
   });
+
+  test(
+    'la lecture démarre quand les réglages arrivent après l’écran',
+    () async {
+      SharedPreferences.setMockInitialValues({'gate_transport': 'simulation'});
+      final reader = _FakeGateReader();
+      final controller = LibraryController(
+        database: LibraryDatabase.instance,
+        reader: _SilentReader(),
+        gateReader: reader,
+      );
+      final gate = controller.gate;
+      try {
+        // Écran ouvert avant le chargement : portail encore inconnu.
+        await gate.enter();
+        expect(reader.reading, isFalse);
+        expect(gate.readerError, contains('Configurez'));
+
+        await gate.initialize();
+        expect(reader.reading, isTrue);
+        expect(gate.readerError, isNull);
+      } finally {
+        await gate.leave();
+        controller.dispose();
+      }
+    },
+  );
 
   test(
     'buzzer : coupé par défaut, réglable, jamais via la sortie du voyant',

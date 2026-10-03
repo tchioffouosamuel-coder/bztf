@@ -136,15 +136,19 @@ class GateBridge(
 				val gpiReport = runCatching {
 					candidate.N01_SetExGet(intArrayOf(0, if (mode == 1) 3 else 2, 0, 0, 0)) == N01_Api.RET_ERRNO.RET_OK
 				}.getOrDefault(false)
+				// Relevé pour le diagnostic seulement : GpiGet renvoie 1 pour une
+				// barrière libre, à l'inverse du masque « gpis » (0 = libre) qui
+				// alimente le comptage. Le repos est donc laissé à 0.
 				val levels = sensors.filter { it in 1..4 }.associate { gpi ->
 					gpi.toString() to runCatching { candidate.N01_GetGpi(gpi) }.getOrDefault(-1)
 				}
+				val reportsFixed = routeReportsToNetwork(candidate)
 				val buzzerSilenced = if (silence) silenceBuzzer(candidate, buzzerGpo) else null
 				triggerSensors = sensors.filter { it in 1..3 }.ifEmpty { listOf(1, 2) }
 				reader = candidate
 				tagEventAt.clear()
 				tidCache.clear()
-				Log.i(TAG, "Gate connected: $transportInput $endpoint, GPI report=$gpiReport, levels=$levels, buzzer silenced=$buzzerSilenced")
+				Log.i(TAG, "Gate connected: $transportInput $endpoint, GPI report=$gpiReport, levels=$levels, reports=$reportsFixed, buzzer silenced=$buzzerSilenced")
 				val version = runCatching { candidate.N01_GetHardWareVersion()?.getOrNull(1) }.getOrNull().orEmpty()
 				val readerId = runCatching { candidate.N01_GetReaderId() }.getOrNull().orEmpty()
 				mainHandler.post {
@@ -152,15 +156,63 @@ class GateBridge(
 						"connected" to true,
 						"readerId" to readerId,
 						"version" to version,
-						"gpiLevels" to levels,
+						"gpiLevels" to emptyMap<String, Int>(),
 						"gpiReport" to gpiReport,
 						"buzzerSilenced" to buzzerSilenced,
 					))
 				}
+				logSettings(candidate)
 			} catch (error: Throwable) {
 				Log.e(TAG, "Gate connection failed", error)
 				postError(result, "GATE_CONNECT", error.message ?: "Connexion au portail impossible.")
 			}
+		}
+	}
+
+	/**
+	 * Les tags lus sont envoyés par le chemin « router » de la configuration
+	 * des rapports (0 : Ethernet/Wi-Fi, 1 : 4G), au format « jsontype »
+	 * (0 : par défaut). Ce portail était réglé sur la 4G au format
+	 * personnalisé 1 : aucun tag n'arrivait sur la connexion réseau. Les
+	 * autres paramètres sont conservés. Renvoie l'état pour les logs.
+	 */
+	private fun routeReportsToNetwork(api: N01_Api): String {
+		val current = runCatching { api.N01_GetReportCfg() }.getOrNull()
+		if (current == null || current.size < 6) return "inconnu"
+		if (current[0] == 0 && current[5] == 0) return "réseau"
+		val fixed = current.copyOf().apply {
+			this[0] = 0
+			this[5] = 0
+		}
+		val status = runCatching { api.N01_SetReportCfg(fixed) }.getOrNull()
+		Log.w(TAG, "Gate reports rerouted: ${current.toList()} -> ${fixed.toList()}, status=$status")
+		return if (status == N01_Api.RET_ERRNO.RET_OK) "réseau (corrigé)" else "échec $status"
+	}
+
+	/**
+	 * Réglages du portail qui décident des tags remontés (région, antennes,
+	 * session Gen2, filtres, inventaire automatique, licence) : leurs
+	 * réponses brutes apparaissent dans les logs (« Gate message »).
+	 */
+	private fun logSettings(api: N01_Api) {
+		val queries = listOf<Pair<String, () -> Any?>>(
+			"region" to { api.N01_GetFreqRegion() },
+			"antennas" to { api.N01_GetInvingAnt() },
+			"session" to { api.N01_GetSession() },
+			"q" to { api.N01_GetQValue() },
+			"target" to { api.N01_GetTarget() },
+			"uniByAnt" to { api.N01_GetUniByAnt() },
+			"uniByBank" to { api.N01_GetUniByBank() },
+			"tagInfoEx" to { api.N01_GetTagInfoEx()?.toList() },
+			"reportCfg" to { api.N01_GetReportCfg()?.toList() },
+			"autoInv" to { api.N01_GetAutoInv()?.toList() },
+			"autoInvCfg" to { api.N01_GetAutoInvCfg() },
+			"license" to { api.N01_GetLicense()?.toList() },
+		)
+		for ((name, query) in queries) {
+			if (reader !== api) return
+			val value = runCatching { query() }.getOrElse { "erreur ${it.javaClass.simpleName}" }
+			Log.i(TAG, "Gate setting $name=$value")
 		}
 	}
 

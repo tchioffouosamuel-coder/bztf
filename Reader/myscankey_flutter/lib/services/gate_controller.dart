@@ -179,7 +179,15 @@ class GateController extends ChangeNotifier {
     tracker
       ..outsideSensor = settings.getInt('gate_outside_sensor') ?? 1
       ..insideSensor = settings.getInt('gate_inside_sensor') ?? 2;
+    debugPrint(
+      'Portail : réglages chargés ($transport, '
+      '${endpoint.isEmpty ? 'adresse vide' : endpoint}, '
+      'barrières $outsideSensor/$insideSensor).',
+    );
     await refreshToday();
+    // L'écran du portail peut ouvrir la surveillance avant le chargement de
+    // ces réglages : la lecture démarre dès qu'ils sont connus.
+    if (active) await _ensureReading();
   }
 
   /// Relit les compteurs et les passages du personnel du jour.
@@ -250,6 +258,7 @@ class GateController extends ChangeNotifier {
     await settings.setString('gate_transport', transport);
     await settings.setString('gate_endpoint', endpoint);
     await settings.setInt('gate_power', power);
+    debugPrint('Portail : réglages enregistrés ($transport, $endpoint).');
     final info = await _connect();
     if (active) await _ensureReading();
     return info;
