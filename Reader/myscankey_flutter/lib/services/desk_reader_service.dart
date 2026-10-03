@@ -1,5 +1,6 @@
 import 'dart:async';
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 
 import '../models/book.dart';
@@ -179,6 +180,15 @@ class DeskReaderService {
     } on PlatformException {
       return false;
     }
+  }
+
+  /// Son de retrait joué par la tablette : `card` ou `book`.
+  Future<void> playRemovalTone(String kind) async {
+    if (_transport == 'simulation' ||
+        defaultTargetPlatform != TargetPlatform.android) {
+      return;
+    }
+    await _methods.invokeMethod<void>('removalTone', {'kind': kind});
   }
 
   /// Garde l'écran allumé tant que le poste est ouvert.

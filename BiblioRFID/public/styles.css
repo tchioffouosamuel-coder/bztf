@@ -327,11 +327,14 @@ svg {
 .main-content {
   grid-column: 2;
   min-width: 0;
+  padding-top: 78px;
 }
 .topbar {
   height: 78px;
-  position: sticky;
+  position: fixed;
   top: 0;
+  right: 0;
+  left: 248px;
   z-index: 12;
   display: flex;
   align-items: center;
@@ -340,6 +343,9 @@ svg {
   background: color-mix(in srgb, var(--surface) 95%, transparent);
   border-bottom: 1px solid var(--line);
   backdrop-filter: blur(12px);
+}
+.desktop .topbar {
+  top: 38px;
 }
 .topbar h1 {
   font-size: 21px;
@@ -2118,9 +2124,12 @@ dialog::backdrop {
   }
   .main-content {
     min-width: 0;
+    padding-top: 68px;
   }
   .topbar {
     height: 68px;
+    right: 0;
+    left: 0;
     padding: 0 14px;
   }
   .topbar h1 {

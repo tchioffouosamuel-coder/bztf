@@ -139,6 +139,18 @@ class GateReaderService {
     }
   }
 
+  /// TID du tag [epc], relu par une commande ciblée : le portail ne le
+  /// transmet pas pendant la lecture continue. Vide si le tag n'a pas
+  /// répondu.
+  Future<String> readTid(String epc) async {
+    if (!_connected || simulation) return '';
+    try {
+      return await _methods.invokeMethod<String>('readTid', {'epc': epc}) ?? '';
+    } on PlatformException {
+      return '';
+    }
+  }
+
   /// `false` si le portail ne répond plus (le SDK ne signale pas les coupures).
   Future<bool> ping() async {
     if (!_connected) return false;

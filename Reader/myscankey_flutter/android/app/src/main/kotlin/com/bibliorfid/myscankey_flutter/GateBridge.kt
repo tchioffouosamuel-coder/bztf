@@ -2,11 +2,8 @@ package com.bibliorfid.myscankey_flutter
 
 import Interface.ListenGPI
 import Interface.TagReadDataEventCallback
-import Tool.BankData
 import Tool.Epc_Filter
-import Tool.GPIState
 import Tool.N01AntPwr
-import Tool.TagBackData
 import Tool.TagFilter
 import ZAO_API.N01_Api
 import android.content.Context
@@ -23,6 +20,7 @@ import io.flutter.plugin.common.MethodChannel
 import java.util.Locale
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.Executors
+import org.json.JSONObject
 
 /**
  * Portail antivol N01 (SDK « N01RFID », N01_1.3.1.6.jar) : lecture continue
@@ -39,6 +37,11 @@ class GateBridge(
 ) {
 	private val executor = Executors.newSingleThreadExecutor()
 	private val tagEventAt = ConcurrentHashMap<String, Long>()
+
+	/** Dernière lecture de chaque EPC (diagnostic) et TID déjà relus. */
+	private val lastReadAt = ConcurrentHashMap<String, Long>()
+	private val tidCache = ConcurrentHashMap<String, String>()
+	@Volatile private var reading = false
 	@Volatile private var reader: N01_Api? = null
 	@Volatile private var transport = "tcp"
 	@Volatile private var eventSink: EventChannel.EventSink? = null
@@ -73,6 +76,7 @@ class GateBridge(
 			}
 			"startInventory" -> startInventory(call.argument<Int>("power"), result)
 			"stopInventory" -> stopInventory(result)
+			"readTid" -> readTid(call.argument<String>("epc") ?: "", result)
 			"ping" -> ping(result)
 			"pulseGpo" -> pulseGpo(call.argument<Int>("gpo") ?: RED_LIGHT_GPO, call.argument<Int>("durationMs") ?: 3000, result)
 			"silenceBuzzer" -> {
@@ -112,7 +116,7 @@ class GateBridge(
 			try {
 				closeReader()
 				val mode = if (transportInput == "serial") 1 else 0
-				val candidate = N01_Api()
+				val candidate = GateApi(::onTag, ::onGpi)
 				val status = candidate.N01_Connect(mode, endpoint)
 				if (status != N01_Api.RET_ERRNO.RET_OK) {
 					runCatching { candidate.N01_Close() }
@@ -123,7 +127,9 @@ class GateBridge(
 				transport = transportInput
 				// Barrières infrarouges : changements d'état remontés sur la
 				// connexion en cours (2 : TCP, 3 : série).
-				candidate.addReadListener(ListenGPI { state: GPIState -> onGpi(state) })
+				// Décodés par GateApi : écouteurs du SDK jamais appelés, mais
+				// présents pour qu'il ne rencontre pas de référence nulle.
+				candidate.addReadListener(ListenGPI { })
 				val gpiReport = runCatching {
 					candidate.N01_SetExGet(intArrayOf(0, if (mode == 1) 3 else 2, 0, 0, 0)) == N01_Api.RET_ERRNO.RET_OK
 				}.getOrDefault(false)
@@ -133,6 +139,8 @@ class GateBridge(
 				val buzzerSilenced = if (silence) silenceBuzzer(candidate, buzzerGpo) else null
 				reader = candidate
 				tagEventAt.clear()
+				tidCache.clear()
+				Log.i(TAG, "Gate connected: $transportInput $endpoint, GPI report=$gpiReport, levels=$levels, buzzer silenced=$buzzerSilenced")
 				val version = runCatching { candidate.N01_GetHardWareVersion()?.getOrNull(1) }.getOrNull().orEmpty()
 				val readerId = runCatching { candidate.N01_GetReaderId() }.getOrNull().orEmpty()
 				mainHandler.post {
@@ -211,13 +219,18 @@ class GateBridge(
 					return@execute
 				}
 				tagEventAt.clear()
-				current.AsyncInvStartThread(TagReadDataEventCallback { data -> onTag(data) })
-				// EPC et TID (6 mots) : le TID authentifie cartes et badges.
-				val status = current.N01_StartReadingBank(TagFilter(1, 32, "", true), BankData(2, 0, 6))
+				lastReadAt.clear()
+				current.AsyncInvStartThread(TagReadDataEventCallback { })
+				// Lecture EPC seule, comme la démo du SDK : le SDK ne transmet
+				// jamais la zone mémoire demandée (TagBackData sans TID). Le TID
+				// d'un badge est relu à la demande (readTid).
+				val status = current.N01_StartReading()
+				Log.i(TAG, "Gate inventory started: power=${power ?: "reader"} dBm, status=$status")
 				if (status != N01_Api.RET_ERRNO.RET_OK) {
 					postError(result, "INVENTORY_START", "Le portail a refusé la lecture ($status).")
 					return@execute
 				}
+				reading = true
 				mainHandler.post { result.success(mapOf("started" to true)) }
 			} catch (error: Throwable) {
 				postError(result, "INVENTORY_START", error.message ?: "Démarrage de la lecture impossible.")
@@ -232,8 +245,51 @@ class GateBridge(
 			return
 		}
 		executor.execute {
+			reading = false
 			runCatching { current.N01_StopReading() }
 			mainHandler.post { result.success(mapOf("stopped" to true)) }
+		}
+	}
+
+	/**
+	 * TID (6 mots) du tag [epcInput], lu par une commande ciblée sur son EPC :
+	 * la lecture continue est suspendue le temps de la lecture. Gardé en
+	 * cache pour la connexion. Chaîne vide si le tag n'a pas répondu.
+	 */
+	private fun readTid(epcInput: String, result: MethodChannel.Result) {
+		val epc = epcInput.filter { it.isLetterOrDigit() }.uppercase(Locale.ROOT)
+		val current = reader
+		if (current == null || epc.isEmpty()) {
+			result.success("")
+			return
+		}
+		tidCache[epc]?.let {
+			result.success(it)
+			return
+		}
+		executor.execute {
+			val resume = reading
+			var tid = ""
+			try {
+				if (resume) runCatching { current.N01_StopReading() }
+				val filter = TagFilter(1, EPC_FILTER_START_BIT, epc, true)
+				for (attempt in 0 until TID_ATTEMPTS) {
+					tid = runCatching { current.N01_GetBankData(2, 0, TID_WORDS, filter) }
+						.getOrNull().orEmpty().filter { it.isLetterOrDigit() }.uppercase(Locale.ROOT)
+					if (tid.isNotEmpty() && !tid.all { it == '0' }) break
+					tid = ""
+				}
+				if (tid.isNotEmpty()) tidCache[epc] = tid
+				Log.i(TAG, "Gate TID read: epc=$epc tid=${if (tid.isEmpty()) "none" else tid}")
+			} catch (error: Throwable) {
+				Log.w(TAG, "Gate TID read failed for $epc", error)
+			} finally {
+				if (resume && reader === current) {
+					val status = runCatching { current.N01_StartReading() }.getOrNull()
+					if (status != N01_Api.RET_ERRNO.RET_OK) Log.w(TAG, "Gate inventory restart: $status")
+				}
+			}
+			mainHandler.post { result.success(tid) }
 		}
 	}
 
@@ -321,32 +377,108 @@ class GateBridge(
 	}
 
 	/** Appelé par le fil de réception du SDK : aucun traitement bloquant ici. */
-	private fun onTag(data: TagBackData?) = runCatching {
-		if (data == null) return@runCatching
-		val epc = data.epc.orEmpty().filter { it.isLetterOrDigit() }.uppercase(Locale.ROOT)
+	/** Appelé par le fil de réception du SDK : aucun traitement bloquant ici. */
+	private fun onTag(epcInput: String, tidInput: String, rssi: Int, antenna: Int) = runCatching {
+		val epc = epcInput.filter { it.isLetterOrDigit() }.uppercase(Locale.ROOT)
 		if (epc.isEmpty()) return@runCatching
-		val tid = data.bank_data.orEmpty().filter { it.isLetterOrDigit() }.uppercase(Locale.ROOT)
+		val tid = tidInput.filter { it.isLetterOrDigit() }.uppercase(Locale.ROOT)
+			.ifEmpty { tidCache[epc].orEmpty() }
 		// Plusieurs antennes lisent le même tag : une remontée par intervalle,
 		// en gardant celles qui apportent le TID.
 		val key = if (tid.isEmpty()) "$epc:" else "$epc:$tid"
 		val now = SystemClock.elapsedRealtime()
+		// Diagnostic : première lecture d'un tag (ou après une absence).
+		val previousRead = lastReadAt.put(epc, now)
+		if (previousRead == null || now - previousRead > FIRST_READ_GAP_MS) {
+			Log.i(TAG, "Gate tag seen: epc=$epc ant=$antenna rssi=$rssi tid=${if (tid.isEmpty()) "none" else "yes"}")
+		}
 		val last = tagEventAt[key]
 		if (last != null && now - last < TAG_EVENT_DEBOUNCE_MS) return@runCatching
 		tagEventAt[key] = now
 		if (tagEventAt.size > 2000) tagEventAt.entries.removeIf { now - it.value > 60_000 }
-		val tag = mapOf("type" to "tag", "epc" to epc, "tid" to tid, "rssi" to data.rssi, "antenna" to data.antid)
+		val tag = mapOf("type" to "tag", "epc" to epc, "tid" to tid, "rssi" to rssi, "antenna" to antenna)
 		mainHandler.post { eventSink?.success(tag) }
 	}
 
-	private fun onGpi(state: GPIState?) = runCatching {
-		if (state == null) return@runCatching
-		val event = mapOf("type" to "gpi", "gpi" to state.gpinum, "level" to state.level)
+	private fun onGpi(gpi: Int, level: Int) = runCatching {
+		Log.i(TAG, "Gate GPI$gpi level=$level")
+		val event = mapOf("type" to "gpi", "gpi" to gpi, "level" to level)
 		mainHandler.post { eventSink?.success(event) }
+	}
+
+	/**
+	 * Le SDK décode lui-même les messages du portail, mais lit sur chaque tag
+	 * des champs (counts, freq, timestamp, phase) que le portail n'envoie pas :
+	 * le tag lève une erreur et est perdu sans bruit. Il ignore aussi le TID
+	 * (bank_data) et ne lit que le premier de plusieurs messages collés. Tags
+	 * et barrières sont donc décodés ici ; les réponses aux commandes (qui
+	 * portent toutes « RES ») restent au SDK.
+	 */
+	private class GateApi(
+		private val onTag: (String, String, Int, Int) -> Unit,
+		private val onGpi: (Int, Int) -> Unit,
+	) : N01_Api() {
+		override fun SetClass(message: String?) {
+			if (message.isNullOrBlank()) return
+			for (part in splitObjects(message)) {
+				val json = runCatching { JSONObject(part) }.getOrNull()
+				when {
+					json == null -> {
+						Log.w(TAG, "Gate message unreadable: ${part.oneLine()}")
+					}
+					json.has("epc") && !json.has("RES") -> onTag(
+						json.optString("epc"),
+						json.optString("bank_data").ifEmpty { json.optString("tid") },
+						json.optInt("rssi"),
+						json.optInt("antid"),
+					)
+					json.optString("RES") == "Report" && json.has("gpinum") -> onGpi(
+						json.optInt("gpinum"),
+						json.optInt("level"),
+					)
+					else -> {
+						Log.i(TAG, "Gate message: ${part.oneLine()}")
+						super.SetClass(part)
+					}
+				}
+			}
+		}
+
+		/** Objets JSON de premier niveau d'un bloc reçu (« }{ » collés). */
+		private fun splitObjects(text: String): List<String> {
+			val parts = mutableListOf<String>()
+			var depth = 0
+			var start = -1
+			var inString = false
+			var escaped = false
+			for ((index, char) in text.withIndex()) {
+				if (inString) {
+					when {
+						escaped -> escaped = false
+						char == '\\' -> escaped = true
+						char == '"' -> inString = false
+					}
+					continue
+				}
+				when (char) {
+					'"' -> inString = true
+					'{' -> if (depth++ == 0) start = index
+					'}' -> if (depth > 0 && --depth == 0 && start >= 0) {
+						parts += text.substring(start, index + 1)
+						start = -1
+					}
+				}
+			}
+			return parts.ifEmpty { listOf(text) }
+		}
+
+		private fun String.oneLine() = replace(Regex("\\s+"), " ").take(300)
 	}
 
 	private fun closeReader() {
 		val current = reader ?: return
 		reader = null
+		reading = false
 		runCatching { current.N01_StopReading() }
 		runCatching { current.N01_SetGpo(RED_LIGHT_GPO, 0) }
 		runCatching { current.N01_Close() }
@@ -372,5 +504,10 @@ class GateBridge(
 		const val RED_LIGHT_GPO = 1
 		const val DEFAULT_BUZZER_GPO = 3
 		const val TAG_EVENT_DEBOUNCE_MS = 250L
+		const val FIRST_READ_GAP_MS = 2000L
+		/** Filtre sur l'EPC : la zone EPC commence après CRC et PC (32 bits). */
+		const val EPC_FILTER_START_BIT = 32
+		const val TID_WORDS = 6
+		const val TID_ATTEMPTS = 3
 	}
 }

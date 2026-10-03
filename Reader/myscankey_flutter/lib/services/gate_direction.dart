@@ -53,6 +53,10 @@ class GateDirectionTracker {
     reset();
   }
 
+  /// Niveau relevé hors surveillance (terminal admin) : affiché, jamais
+  /// compté.
+  void observe(int sensor, int level) => _level[sensor] = level;
+
   void reset() {
     _outsideAt = null;
     _insideAt = null;

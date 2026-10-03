@@ -621,6 +621,40 @@ void main() {
     }
   });
 
+  test('un tag lu irrégulièrement obtient plus de tolérance', () async {
+    final database = LibraryDatabase.instance;
+    final book = await _taggedBook(database, 'Premier', 'B001');
+    final desk = _FakeDeskReader();
+    final controller = LibraryController(
+      database: database,
+      reader: _SilentReader(),
+      deskReader: desk,
+    );
+    final kiosk = controller.kiosk..transport = 'simulation';
+    try {
+      await kiosk.configureFeedback(
+        nextSource: 'reader',
+        nextRearmSeconds: 1,
+        nextPresenceMs: 200,
+        nextReleaseMs: 1000,
+      );
+      await kiosk.enter();
+      desk.emit(_bookTag(book));
+      await _until(() => kiosk.items.length == 1);
+      // Silence de 500 ms : retiré au bout de 200 ms, puis relu.
+      await Future<void>.delayed(const Duration(milliseconds: 500));
+      expect(kiosk.items, isEmpty);
+      desk.emit(_bookTag(book));
+      await _until(() => kiosk.items.length == 1);
+      // Le même silence est désormais toléré (seuil 750 ms).
+      await Future<void>.delayed(const Duration(milliseconds: 500));
+      expect(kiosk.items, hasLength(1));
+      await _until(() => kiosk.items.isEmpty);
+    } finally {
+      controller.dispose();
+    }
+  });
+
   test('délais d’anti-rebond réglables et enregistrés', () async {
     final database = LibraryDatabase.instance;
     final member = await _subscriberWithCard(database, 'ab-1', 'A001');
@@ -667,6 +701,30 @@ void main() {
       desk.emit(_bookTag(book));
       await _until(() => kiosk.items.length == 1);
       expect(kiosk.stage, KioskStage.borrow);
+
+      // Retiré du lecteur : le livre quitte la session, reposé il est relu.
+      // Une étiquette inconnue retirée quitte aussi le décompte.
+      desk.emit(
+        const ReaderTag(
+          epc: 'E20000000000000000001234',
+          tid: 'E2000000000000000000ABCD',
+          rssi: 50,
+        ),
+      );
+      await _until(() => kiosk.unknownTags == 1);
+      await _until(() => kiosk.items.isEmpty && kiosk.unknownTags == 0);
+      expect(kiosk.stage, KioskStage.borrow);
+      expect(desk.removalTones.last, 'book');
+      desk.emit(_bookTag(book));
+      await _until(() => kiosk.items.length == 1);
+
+      // Carte retirée : l'abonné quitte l'écran ; avec ses livres, la
+      // session se termine.
+      desk.emit(_cardTag(member));
+      await _until(() => kiosk.subscriber != null);
+      await _until(() => kiosk.subscriber == null);
+      expect(kiosk.stage, KioskStage.home);
+      expect(desk.removalTones.last, 'card');
     } finally {
       controller.dispose();
     }
@@ -746,6 +804,30 @@ void main() {
     await tester.pump(const Duration(milliseconds: 300));
     expect(find.text('Emprunt enregistré'), findsOneWidget);
     controller.kiosk.finish();
+    await tester.pump(const Duration(milliseconds: 300));
+
+    // Catalogue en colonnes sur toute la largeur, sans débordement.
+    await tester.runAsync(() async {
+      await _taggedBook(LibraryDatabase.instance, 'Deuxième', 'B002');
+      await _taggedBook(LibraryDatabase.instance, 'Troisième', 'B003');
+    });
+    controller.kiosk.startBrowse();
+    await tester.pump();
+    await tester.tap(find.text('Disponibles seulement'));
+    for (var attempt = 0; attempt < 20; attempt++) {
+      await tester.runAsync(
+        () => Future<void>.delayed(const Duration(milliseconds: 50)),
+      );
+      await tester.pump();
+      if (find.text('Troisième').evaluate().isNotEmpty) break;
+    }
+    await tester.pump(const Duration(milliseconds: 500));
+    // Tri par titre : Deuxième, Livre du poste, Troisième sur une ligne.
+    final firstTile = tester.getTopLeft(find.text('Deuxième'));
+    final thirdTile = tester.getTopLeft(find.text('Troisième'));
+    expect(thirdTile.dy, firstTile.dy);
+    expect(thirdTile.dx, greaterThan(800));
+    controller.kiosk.cancelSession();
     await tester.pump(const Duration(milliseconds: 300));
 
     await tester.pumpWidget(
@@ -869,6 +951,7 @@ class _FakeDeskReader extends DeskReaderService {
     if (buzzer) beeps++;
     return buzzer;
   }
+
   final List<(String, String)> written = [];
 
   void emit(ReaderTag tag) => _events.add(tag);
@@ -901,6 +984,11 @@ class _FakeDeskReader extends DeskReaderService {
 
   @override
   Future<void> setKeepScreenOn(bool enabled) async {}
+
+  final List<String> removalTones = [];
+
+  @override
+  Future<void> playRemovalTone(String kind) async => removalTones.add(kind);
 
   @override
   Future<void> dispose() => _events.close();

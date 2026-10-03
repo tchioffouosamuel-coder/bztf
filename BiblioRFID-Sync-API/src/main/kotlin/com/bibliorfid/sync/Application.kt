@@ -52,6 +52,8 @@ fun Application.module(
     ),
     apiKey: String = System.getenv("BIBLIORFID_API_KEY") ?: "change-me-in-production",
     readApiKey: String? = System.getenv("BIBLIORFID_READ_API_KEY"),
+    logs: LogBuffer = LogBuffer(),
+    publicLogs: Boolean = System.getenv("BIBLIORFID_PUBLIC_LOGS") != "false",
 ) {
     val keys = ApiKeys(apiKey, readApiKey)
     val data = DataQueries(store, wireJson)
@@ -100,6 +102,7 @@ fun Application.module(
         get("/health") {
             call.respond(HealthResponse("ok", "bibliorfid-sync-api", Instant.now().toString()))
         }
+        logRoutes(logs, apiKey, publicLogs)
         route("/api/v1") {
             post("/devices/register") {
                 if (!call.authorized(apiKey)) return@post

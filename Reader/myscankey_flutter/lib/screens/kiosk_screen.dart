@@ -478,7 +478,11 @@ class _BrowseViewState extends State<_BrowseView> {
                 ),
               )
             else
-              for (final entry in _entries) _CatalogTile(entry: entry),
+              _TileGrid(
+                children: [
+                  for (final entry in _entries) _CatalogTile(entry: entry),
+                ],
+              ),
           ],
         ),
       ),
@@ -533,37 +537,52 @@ class _CatalogTile extends StatelessWidget {
       book.accession,
     ].join(' · ');
     return Card(
-      margin: const EdgeInsets.only(bottom: 8),
+      margin: EdgeInsets.zero,
       child: Padding(
         padding: const EdgeInsets.all(14),
-        child: Row(
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
-            Icon(Icons.menu_book_outlined, size: 32, color: color),
-            const SizedBox(width: 14),
-            Expanded(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(
-                    book.title,
-                    style: const TextStyle(
-                      fontSize: 17,
-                      fontWeight: FontWeight.w800,
-                    ),
+            Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Icon(Icons.menu_book_outlined, size: 32, color: color),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        book.title,
+                        maxLines: 2,
+                        overflow: TextOverflow.ellipsis,
+                        style: const TextStyle(
+                          fontSize: 17,
+                          fontWeight: FontWeight.w800,
+                        ),
+                      ),
+                      Text(
+                        details,
+                        maxLines: 2,
+                        overflow: TextOverflow.ellipsis,
+                      ),
+                      const SizedBox(height: 4),
+                      Text(
+                        label,
+                        style: TextStyle(
+                          color: color,
+                          fontWeight: FontWeight.w700,
+                        ),
+                      ),
+                    ],
                   ),
-                  Text(details),
-                  const SizedBox(height: 4),
-                  Text(
-                    label,
-                    style: TextStyle(color: color, fontWeight: FontWeight.w700),
-                  ),
-                ],
-              ),
+                ),
+              ],
             ),
-            const SizedBox(width: 12),
+            const Spacer(),
+            const SizedBox(height: 10),
             // L'emplacement, pour trouver le livre en rayon.
             Container(
-              constraints: const BoxConstraints(minWidth: 96),
               padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
               decoration: BoxDecoration(
                 color: colors.secondaryContainer,
@@ -582,7 +601,7 @@ class _CatalogTile extends StatelessWidget {
                     book.shelf.isEmpty ? '—' : book.shelf,
                     textAlign: TextAlign.center,
                     style: TextStyle(
-                      fontSize: 18,
+                      fontSize: 16,
                       fontWeight: FontWeight.w800,
                       color: colors.onSecondaryContainer,
                     ),
@@ -675,24 +694,19 @@ class _SessionLayout extends StatelessWidget {
   Widget build(BuildContext context) => Column(
     children: [
       Expanded(
-        child: Align(
-          alignment: Alignment.topCenter,
-          child: ConstrainedBox(
-            constraints: const BoxConstraints(maxWidth: 820),
-            child: ListView(
-              padding: const EdgeInsets.fromLTRB(16, 8, 16, 16),
-              children: [
-                Text(
-                  title,
-                  style: Theme.of(context).textTheme.headlineSmall?.copyWith(
-                    fontWeight: FontWeight.w800,
-                  ),
-                ),
-                const SizedBox(height: 12),
-                ...children,
-              ],
+        // Toute la largeur de l'écran : les livres s'affichent en colonnes.
+        child: ListView(
+          padding: const EdgeInsets.fromLTRB(24, 8, 24, 16),
+          children: [
+            Text(
+              title,
+              style: Theme.of(
+                context,
+              ).textTheme.headlineSmall?.copyWith(fontWeight: FontWeight.w800),
             ),
-          ),
+            const SizedBox(height: 12),
+            ...children,
+          ],
         ),
       ),
       footer,
@@ -822,15 +836,16 @@ class _ItemsSection extends StatelessWidget {
             ),
           )
         else
-          for (final item in items)
-            Padding(
-              padding: const EdgeInsets.only(bottom: 8),
-              child: _ItemTile(
-                item: item,
-                state: kiosk.stateOf(item),
-                onRemove: () => kiosk.removeItem(item.epc),
-              ),
-            ),
+          _TileGrid(
+            children: [
+              for (final item in items)
+                _ItemTile(
+                  item: item,
+                  state: kiosk.stateOf(item),
+                  onRemove: () => kiosk.removeItem(item.epc),
+                ),
+            ],
+          ),
         if (kiosk.unknownTags > 0)
           Padding(
             padding: const EdgeInsets.only(top: 4),
@@ -890,6 +905,7 @@ class _ItemTile extends StatelessWidget {
       ),
     };
     return Card(
+      margin: EdgeInsets.zero,
       child: ListTile(
         contentPadding: const EdgeInsets.fromLTRB(14, 6, 6, 6),
         leading: Icon(icon, color: color, size: 30),
@@ -912,6 +928,52 @@ class _ItemTile extends StatelessWidget {
       ),
     );
   }
+}
+
+/// Tuiles en colonnes de même largeur : 3 sur grand écran, 2 ou 1 sinon.
+/// Les tuiles d'une même ligne ont la même hauteur.
+class _TileGrid extends StatelessWidget {
+  const _TileGrid({required this.children});
+
+  final List<Widget> children;
+
+  static const _spacing = 12.0;
+
+  @override
+  Widget build(BuildContext context) => LayoutBuilder(
+    builder: (context, constraints) {
+      final width = constraints.maxWidth;
+      final columns = width >= 900
+          ? 3
+          : width >= 560
+          ? 2
+          : 1;
+      return Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          for (var start = 0; start < children.length; start += columns)
+            Padding(
+              padding: const EdgeInsets.only(bottom: _spacing),
+              child: IntrinsicHeight(
+                child: Row(
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: [
+                    for (var i = start; i < start + columns; i++) ...[
+                      if (i > start) const SizedBox(width: _spacing),
+                      Expanded(
+                        child: i < children.length
+                            ? children[i]
+                            : const SizedBox.shrink(),
+                      ),
+                    ],
+                  ],
+                ),
+              ),
+            ),
+        ],
+      );
+    },
+  );
 }
 
 class _ActionBar extends StatelessWidget {

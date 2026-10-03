@@ -230,6 +230,56 @@ void main() {
     }
   });
 
+  test('le TID d’un badge absent de la lecture est relu', () async {
+    final database = LibraryDatabase.instance;
+    final badgeEpc = generateBadgeEpc();
+    final now = DateTime.now().toUtc().toIso8601String();
+    await database.applyRemoteChanges([
+      {
+        'entityType': 'staff',
+        'operation': 'upsert',
+        'entityId': 'staff-3',
+        'staff': {
+          'serverId': 'staff-3',
+          'staffNumber': 'P-03',
+          'name': 'Chloé',
+          'badgeEpc': badgeEpc,
+          'badgeTid': 'E2800000BADGE0003',
+          'createdAt': now,
+          'updatedAt': now,
+        },
+      },
+    ], 1);
+    final reader = _FakeGateReader();
+    final controller = LibraryController(
+      database: database,
+      reader: _SilentReader(),
+      gateReader: reader,
+    );
+    final gate = controller.gate..transport = 'simulation';
+    try {
+      await gate.configureSensors(nextOutside: 0, nextInside: 0);
+      await gate.enter();
+      // Lu sans TID : relu à la demande, puis le passage est enregistré.
+      reader.tids[badgeEpc] = 'E2800000BADGE0003';
+      reader.simulateTag(_tag(badgeEpc, ''));
+      await _until(() => gate.staffToday.length == 1);
+      expect(gate.staffToday.single.staffName, 'Chloé');
+      expect(reader.tidReads, [badgeEpc]);
+
+      // Badge qui ne répond pas : une seule relecture par intervalle.
+      final silent = generateBadgeEpc();
+      reader.simulateTag(_tag(silent, ''));
+      await _until(() => reader.tidReads.length == 2);
+      reader.simulateTag(_tag(silent, ''));
+      await Future<void>.delayed(const Duration(milliseconds: 50));
+      expect(reader.tidReads, [badgeEpc, silent]);
+    } finally {
+      await gate.leave();
+      controller.dispose();
+    }
+  });
+
   test('sans barrières, les passages du personnel alternent', () async {
     final database = LibraryDatabase.instance;
     final badgeEpc = generateBadgeEpc();
@@ -470,4 +520,14 @@ class _FakeGateReader extends GateReaderService {
 
   @override
   Future<void> setKeepScreenOn(bool enabled) async {}
+
+  /// TID renvoyés par la relecture ciblée, par EPC.
+  final Map<String, String> tids = {};
+  final List<String> tidReads = [];
+
+  @override
+  Future<String> readTid(String epc) async {
+    tidReads.add(epc);
+    return tids[epc] ?? '';
+  }
 }

@@ -47,29 +47,38 @@ class _PinDialogState extends State<_PinDialog> {
   }
 
   @override
-  Widget build(BuildContext context) => AlertDialog(
-    icon: const Icon(Icons.lock_outline),
-    title: Text(widget.title),
-    content: TextField(
-      controller: _pin,
-      autofocus: true,
-      obscureText: true,
-      keyboardType: TextInputType.number,
-      maxLength: 8,
-      inputFormatters: [FilteringTextInputFormatter.digitsOnly],
-      decoration: InputDecoration(
-        labelText: 'Code administrateur',
-        counterText: '',
-        errorText: _error,
+  Widget build(BuildContext context) {
+    // Clavier ouvert sur une tablette en paysage : peu de hauteur restante.
+    final keyboardOpen = MediaQuery.viewInsetsOf(context).bottom > 0;
+    return AlertDialog(
+      scrollable: true,
+      insetPadding: EdgeInsets.symmetric(
+        horizontal: 40,
+        vertical: keyboardOpen ? 8 : 24,
       ),
-      onSubmitted: (_) => _submit(),
-    ),
-    actions: [
-      TextButton(
-        onPressed: () => Navigator.pop(context, false),
-        child: const Text('Annuler'),
+      icon: keyboardOpen ? null : const Icon(Icons.lock_outline),
+      title: Text(widget.title),
+      content: TextField(
+        controller: _pin,
+        autofocus: true,
+        obscureText: true,
+        keyboardType: TextInputType.number,
+        maxLength: 8,
+        inputFormatters: [FilteringTextInputFormatter.digitsOnly],
+        decoration: InputDecoration(
+          labelText: 'Code administrateur',
+          counterText: '',
+          errorText: _error,
+        ),
+        onSubmitted: (_) => _submit(),
       ),
-      FilledButton(onPressed: _submit, child: const Text('Valider')),
-    ],
-  );
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.pop(context, false),
+          child: const Text('Annuler'),
+        ),
+        FilledButton(onPressed: _submit, child: const Text('Valider')),
+      ],
+    );
+  }
 }

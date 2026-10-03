@@ -55,6 +55,7 @@ class MainActivity : FlutterActivity() {
 	private var deskReader: DeskReaderBridge? = null
 	private var gate: GateBridge? = null
 	private var heading: HeadingBridge? = null
+	private var logs: LogBridge? = null
 
 	override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
 		super.configureFlutterEngine(flutterEngine)
@@ -74,6 +75,9 @@ class MainActivity : FlutterActivity() {
 			Log.e("BiblioRFID", "Desk reader bridge unavailable", error)
 			null
 		}
+		logs = runCatching { LogBridge(flutterEngine.dartExecutor.binaryMessenger, mainHandler) }
+			.onFailure { Log.e("BiblioRFID", "Log bridge unavailable", it) }
+			.getOrNull()
 		heading = runCatching { HeadingBridge(flutterEngine.dartExecutor.binaryMessenger, applicationContext) }
 			.onFailure { Log.e("BiblioRFID", "Compass unavailable", it) }
 			.getOrNull()
@@ -595,6 +599,8 @@ class MainActivity : FlutterActivity() {
 		gate = null
 		runCatching { heading?.dispose() }
 		heading = null
+		runCatching { logs?.dispose() }
+		logs = null
 		executor.shutdownNow()
 		soundPool?.release()
 		soundPool = null

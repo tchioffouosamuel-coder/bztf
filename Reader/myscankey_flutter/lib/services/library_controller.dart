@@ -15,6 +15,7 @@ import 'locator_direction.dart';
 import 'kiosk_controller.dart';
 import 'locator_signal.dart';
 import 'reader_service.dart';
+import 'log_shipper.dart';
 import 'sync_service.dart';
 
 class LibraryController extends ChangeNotifier {
@@ -28,6 +29,7 @@ class LibraryController extends ChangeNotifier {
        _headingService = heading ?? HeadingService(),
        reader = reader ?? ReaderService() {
     sync = SyncService(this.database);
+    logs = LogShipper(sync);
     kiosk = KioskController(this, reader: deskReader);
     gate = GateController(this, reader: gateReader);
     sync.addListener(_onSyncChanged);
@@ -41,6 +43,9 @@ class LibraryController extends ChangeNotifier {
   final LibraryDatabase database;
   final ReaderService reader;
   late final SyncService sync;
+
+  /// Logs de l'application envoyés au serveur (débogage à distance).
+  late final LogShipper logs;
   late final KioskController kiosk;
   late final GateController gate;
   final Map<String, ReaderTag> _observed = {};
@@ -192,6 +197,7 @@ class LibraryController extends ChangeNotifier {
     writePower = settings.getInt('rfid_write_power') ?? 25;
     inventoryPower = settings.getInt('rfid_inventory_power') ?? 20;
     await sync.initialize();
+    logs.start();
     await kiosk.initialize();
     await gate.initialize();
     hasAccounts = await database.countUsers() > 0;
@@ -1150,6 +1156,7 @@ class LibraryController extends ChangeNotifier {
     unawaited(_tagSubscription.cancel());
     unawaited(_nativeKeySubscription.cancel());
     sync.removeListener(_onSyncChanged);
+    logs.dispose();
     sync.dispose();
     kiosk.dispose();
     gate.dispose();

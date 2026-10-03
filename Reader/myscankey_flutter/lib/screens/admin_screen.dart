@@ -1459,7 +1459,7 @@ class _KioskSettingsTabState extends State<_KioskSettingsTab> {
                     _MillisecondsSlider(
                       label: 'Absence d’un tag',
                       help:
-                          'Temps sans lecture avant de considérer le tag absent.',
+                          'Temps sans lecture avant de retirer le livre de l’écran.',
                       value: _presenceMs,
                       min: 100,
                       max: 5000,
@@ -1481,7 +1481,7 @@ class _KioskSettingsTabState extends State<_KioskSettingsTab> {
                       '${((_presenceMs + _releaseMs) / 1000).toStringAsFixed(1)} s '
                       'ne rebipe pas et ne relance pas de session. Plus court : '
                       'retraits reconnus plus vite, mais plus de rebonds. '
-                      'Valeurs du poste Windows : '
+                      'Valeurs par défaut : '
                       '${KioskController.defaultPresenceMs} ms et '
                       '${KioskController.defaultReleaseMs} ms. Si le buzzer du '
                       'lecteur ne répond pas, la tablette bipe à sa place.',

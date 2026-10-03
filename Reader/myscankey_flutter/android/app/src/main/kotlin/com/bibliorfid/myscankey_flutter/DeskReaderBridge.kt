@@ -1,5 +1,8 @@
 package com.bibliorfid.myscankey_flutter
 
+import android.media.AudioAttributes
+import android.media.AudioFormat
+import android.media.AudioTrack
 import android.os.Handler
 import android.os.SystemClock
 import android.util.Log
@@ -75,6 +78,10 @@ class DeskReaderBridge(
 			"startInventory" -> startInventory(call.argument<Int>("power"), result)
 			"stopInventory" -> stopInventory(result)
 			"beep" -> beep(result)
+			"removalTone" -> {
+				playRemovalTone(call.argument<String>("kind") ?: "book")
+				result.success(null)
+			}
 			"writeEpc" -> writeEpc(call.argument<String>("epc") ?: "", call.argument<String>("tid") ?: "", result)
 			"keepScreenOn" -> {
 				keepScreenOn(call.argument<Boolean>("enabled") == true)
@@ -197,6 +204,58 @@ class DeskReaderBridge(
 			val accepted = runCatching { current.sendSynMsg(beep, BEEP_TIMEOUT_MS) }.isSuccess && beep.succeeded()
 			mainHandler.post { result.success(accepted) }
 		}
+	}
+
+	/**
+	 * Son de retrait joué par la tablette, distinct du bip de lecture :
+	 * deux notes descendantes pour un livre, trois plus graves pour la carte.
+	 */
+	private fun playRemovalTone(kind: String) {
+		val notes = if (kind == "card") CARD_REMOVED_NOTES else BOOK_REMOVED_NOTES
+		Thread {
+			runCatching {
+				val pcm = synthesize(notes)
+				val track = AudioTrack.Builder()
+					.setAudioAttributes(
+						AudioAttributes.Builder()
+							.setUsage(AudioAttributes.USAGE_ASSISTANCE_SONIFICATION)
+							.setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION)
+							.build(),
+					)
+					.setAudioFormat(
+						AudioFormat.Builder()
+							.setEncoding(AudioFormat.ENCODING_PCM_16BIT)
+							.setSampleRate(TONE_SAMPLE_RATE)
+							.setChannelMask(AudioFormat.CHANNEL_OUT_MONO)
+							.build(),
+					)
+					.setTransferMode(AudioTrack.MODE_STATIC)
+					.setBufferSizeInBytes(pcm.size * 2)
+					.build()
+				try {
+					track.write(pcm, 0, pcm.size)
+					track.play()
+					Thread.sleep(pcm.size * 1000L / TONE_SAMPLE_RATE + 50)
+				} finally {
+					track.release()
+				}
+			}.onFailure { Log.w(TAG, "Removal tone unavailable", it) }
+		}.start()
+	}
+
+	/** Notes (fréquence en Hz, durée en ms) en sinusoïdes avec fondu court. */
+	private fun synthesize(notes: List<Pair<Double, Int>>): ShortArray {
+		val samples = ArrayList<Short>()
+		for ((frequency, durationMs) in notes) {
+			val count = TONE_SAMPLE_RATE * durationMs / 1000
+			val fade = minOf(count / 4, TONE_SAMPLE_RATE * 8 / 1000)
+			for (i in 0 until count) {
+				val envelope = minOf(1.0, i / fade.toDouble(), (count - i) / fade.toDouble())
+				val value = Math.sin(2 * Math.PI * frequency * i / TONE_SAMPLE_RATE) * envelope * 0.8
+				samples.add((value * Short.MAX_VALUE).toInt().toShort())
+			}
+		}
+		return samples.toShortArray()
 	}
 
 	private fun stopInventory(result: MethodChannel.Result) {
@@ -380,10 +439,13 @@ class DeskReaderBridge(
 		const val MIN_POWER = 5
 		const val MAX_POWER = 33
 		const val TID_WORDS = 6
-		const val TAG_EVENT_DEBOUNCE_MS = 300L
+		const val TAG_EVENT_DEBOUNCE_MS = 100L
 		const val FIRST_READ_GAP_MS = 2000L
 		const val VERIFY_SETTLE_MS = 180L
 		const val VERIFY_TIMEOUT_MS = 1800L
 		const val HEX = "0123456789ABCDEF"
+		const val TONE_SAMPLE_RATE = 44100
+		val BOOK_REMOVED_NOTES = listOf(1318.5 to 70, 880.0 to 110)
+		val CARD_REMOVED_NOTES = listOf(784.0 to 90, 587.3 to 90, 392.0 to 200)
 	}
 }

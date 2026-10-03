@@ -67,6 +67,10 @@ class GateController extends ChangeNotifier {
   /// Un badge lu reste ignoré pendant ce délai après son passage enregistré.
   static const staffRearm = Duration(seconds: 30);
 
+  /// Intervalle minimal entre deux relectures du TID d'un même badge : la
+  /// lecture continue est suspendue pendant chacune.
+  static const tidRetry = Duration(seconds: 2);
+
   /// Un sens mesuré par les barrières peu avant la lecture d'un badge lui
   /// est attribué.
   static const directionLookback = Duration(seconds: 4);
@@ -126,6 +130,7 @@ class GateController extends ChangeNotifier {
   final Map<String, DateTime> _bookSeenAt = {};
   final Map<String, DateTime> _staffSeenAt = {};
   final Map<String, DateTime> _unknownBadgeAt = {};
+  final Map<String, DateTime> _tidReadAt = {};
   final Set<String> _checking = {};
   final List<(DateTime, PassageDirection)> _recentDirections = [];
   final List<Completer<PassageDirection?>> _directionWaiters = [];
@@ -382,6 +387,11 @@ class GateController extends ChangeNotifier {
       final loan = book == null
           ? null
           : await library.database.activeLoanForBook(book.id);
+      debugPrint(
+        'Portail : tag $epc → '
+        '${book == null ? 'livre inconnu' : book.accession} '
+        '${loan == null ? '→ alarme' : '→ emprunté'} (RSSI ${tag.rssi}).',
+      );
       if (loan != null) {
         _addEvent(
           GateEvent(
@@ -460,8 +470,23 @@ class GateController extends ChangeNotifier {
   }
 
   Future<void> _onBadge(String epc, String tid, DateTime now) async {
-    // TID manquant : le badge sera authentifié à la lecture suivante.
-    if (tid.trim().isEmpty) return;
+    if (tid.trim().isEmpty) {
+      // Relu une fois, le TID est ensuite joint par le portail à chaque
+      // lecture du badge ; un échec est retenté après [tidRetry].
+      final tried = _tidReadAt[epc];
+      if (tried != null && now.difference(tried) < tidRetry) return;
+      _tidReadAt[epc] = now;
+      if (_tidReadAt.length > 500) {
+        _tidReadAt.removeWhere((_, at) => now.difference(at) > staffRearm);
+      }
+      // Le portail ne transmet pas le TID en lecture continue : relu à la
+      // demande pour authentifier le badge.
+      tid = await reader.readTid(epc);
+      debugPrint(
+        'Portail : badge $epc, TID ${tid.isEmpty ? 'non relu' : 'relu'}.',
+      );
+      if (tid.isEmpty) return;
+    }
     final staff = await library.database.staffForBadge(epc, tid);
     if (staff == null) {
       final last = _unknownBadgeAt[epc];
@@ -552,10 +577,19 @@ class GateController extends ChangeNotifier {
   }
 
   Future<void> _onSensor(GateSensorEvent event) async {
-    if (!active) return;
+    if (!active) {
+      // Terminal admin ouvert : état des barrières affiché pour le test.
+      tracker.observe(event.sensor, event.level);
+      notifyListeners();
+      return;
+    }
     final now = _clock();
     _lastEventAt = now;
     final direction = tracker.onLevel(event.sensor, event.level, now);
+    debugPrint(
+      'Portail : barrière GPI${event.sensor} = ${event.level}'
+      '${direction == null ? '' : ' → ${direction == PassageDirection.entry ? 'entrée' : 'sortie'}'}.',
+    );
     if (direction == null) {
       notifyListeners();
       return;
