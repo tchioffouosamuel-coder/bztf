@@ -211,10 +211,12 @@ class GateBridge(
 			result.error("READER_OFFLINE", "Connectez le portail avant de lancer la lecture.", null)
 			return
 		}
+		Log.i(TAG, "Gate inventory starting: power=${power ?: "reader"} dBm")
 		executor.execute {
 			try {
 				runCatching { current.N01_StopReading() }
 				if (power != null && !applyPower(current, power)) {
+					Log.w(TAG, "Gate power $power dBm refused")
 					postError(result, "POWER_SET", "Le portail a refusé la puissance de $power dBm.")
 					return@execute
 				}
@@ -233,6 +235,7 @@ class GateBridge(
 				reading = true
 				mainHandler.post { result.success(mapOf("started" to true)) }
 			} catch (error: Throwable) {
+				Log.e(TAG, "Gate inventory start failed", error)
 				postError(result, "INVENTORY_START", error.message ?: "Démarrage de la lecture impossible.")
 			}
 		}
@@ -418,6 +421,9 @@ class GateBridge(
 		private val onTag: (String, String, Int, Int) -> Unit,
 		private val onGpi: (Int, Int) -> Unit,
 	) : N01_Api() {
+		/** Dernier masque des entrées GPI reçu (« gpis »). */
+		private var lastGpis: String? = null
+
 		override fun SetClass(message: String?) {
 			if (message.isNullOrBlank()) return
 			for (part in splitObjects(message)) {
@@ -436,11 +442,29 @@ class GateBridge(
 						json.optInt("gpinum"),
 						json.optInt("level"),
 					)
+					json.has("gpis") && !json.has("RES") -> onGpis(json.optString("gpis"))
 					else -> {
 						Log.i(TAG, "Gate message: ${part.oneLine()}")
 						super.SetClass(part)
 					}
 				}
+			}
+		}
+
+		/**
+		 * Firmware V1.3.6.6 : les barrières remontent en masque, un caractère
+		 * par entrée (« 0100000 » : GPI2 à 1). Seules les entrées qui changent
+		 * sont signalées, dans l'ordre des entrées.
+		 */
+		private fun onGpis(mask: String) {
+			val previous = lastGpis
+			lastGpis = mask
+			for ((index, char) in mask.withIndex()) {
+				if (char != '0' && char != '1') continue
+				if (previous != null && previous.getOrNull(index) == char) continue
+				// Premier masque : seules les entrées actives sont signalées.
+				if (previous == null && char == '0') continue
+				onGpi(index + 1, if (char == '1') 1 else 0)
 			}
 		}
 

@@ -194,6 +194,7 @@ class GateController extends ChangeNotifier {
   Future<void> enter() async {
     if (active) return;
     active = true;
+    debugPrint('Portail : surveillance ouverte.');
     library.kioskActive = true;
     unawaited(_keepScreenOn(true));
     _housekeeping?.cancel();
@@ -208,6 +209,7 @@ class GateController extends ChangeNotifier {
   Future<void> leave() async {
     if (!active) return;
     active = false;
+    debugPrint('Portail : surveillance en pause (terminal admin ou sortie).');
     library.kioskActive = false;
     _housekeeping?.cancel();
     _reconnectTimer?.cancel();
@@ -681,10 +683,14 @@ class GateController extends ChangeNotifier {
         }
         await _connect();
       }
-      if (!reader.reading) await reader.startInventory(power: power);
+      if (!reader.reading) {
+        await reader.startInventory(power: power);
+        debugPrint('Portail : lecture démarrée ($power dBm).');
+      }
       readerError = null;
     } catch (error) {
       readerError = _describe(error);
+      debugPrint('Portail : lecture impossible : $readerError');
       _scheduleReconnect();
     }
     notifyListeners();
