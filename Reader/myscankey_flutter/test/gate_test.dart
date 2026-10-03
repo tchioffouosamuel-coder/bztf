@@ -106,6 +106,40 @@ void main() {
     expect(inverted.onLevel(1, 0, start), PassageDirection.entry);
   });
 
+  test('les rebonds des barrières ne comptent qu’un passage', () {
+    final start = DateTime(2026, 10, 3, 19, 26, 14);
+    final tracker = GateDirectionTracker(outsideSensor: 2, insideSensor: 1)
+      ..setIdleLevels({1: 0, 2: 0});
+    // Séquence relevée sur le portail (ms depuis la première coupure).
+    final events = [
+      (0, 2, 1),
+      (660, 1, 1),
+      (1140, 2, 0),
+      (1240, 2, 1),
+      (1340, 1, 0),
+      (1480, 1, 1),
+      (1690, 2, 0),
+      (1910, 2, 1),
+      (2090, 1, 0),
+      (2220, 1, 1),
+      (2650, 2, 0),
+      (2780, 1, 0),
+    ];
+    final directions = [
+      for (final (ms, sensor, level) in events)
+        tracker.onLevel(sensor, level, start.add(Duration(milliseconds: ms))),
+    ].whereType<PassageDirection>().toList();
+    expect(directions, [PassageDirection.entry]);
+
+    // Barrières libérées : le passage suivant est compté.
+    final later = start.add(const Duration(seconds: 10));
+    tracker.onLevel(2, 1, later);
+    expect(
+      tracker.onLevel(1, 1, later.add(const Duration(milliseconds: 400))),
+      PassageDirection.entry,
+    );
+  });
+
   test(
     'alarme pour un livre non emprunté, silence pour un livre emprunté',
     () async {

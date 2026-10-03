@@ -5,8 +5,7 @@ import '../models/staff.dart';
 /// intérieure = entrée, l'inverse = sortie.
 ///
 /// Le niveau « au repos » de chaque barrière est relevé à la connexion ; à
-/// défaut, le premier changement signalé est pris pour une coupure. Seul le
-/// passage du repos à la coupure compte.
+/// défaut, il vaut 0. Seul le passage du repos à la coupure compte.
 class GateDirectionTracker {
   GateDirectionTracker({
     required this.outsideSensor,
@@ -27,6 +26,10 @@ class GateDirectionTracker {
   final Map<int, int> _level = {};
   DateTime? _outsideAt;
   DateTime? _insideAt;
+
+  /// Passage compté : les rebonds des barrières sont ignorés jusqu'à ce que
+  /// les deux soient de nouveau libres.
+  bool _awaitingClear = false;
 
   bool get enabled =>
       outsideSensor > 0 && insideSensor > 0 && outsideSensor != insideSensor;
@@ -60,6 +63,18 @@ class GateDirectionTracker {
   void reset() {
     _outsideAt = null;
     _insideAt = null;
+    _awaitingClear = false;
+  }
+
+  bool _isIdle(int sensor) {
+    final idle = _idle[sensor];
+    return idle == null || _level[sensor] == null || _level[sensor] == idle;
+  }
+
+  PassageDirection _counted(PassageDirection direction) {
+    reset();
+    _awaitingClear = true;
+    return direction;
   }
 
   /// Traite un changement de niveau ; renvoie le sens quand un passage
@@ -71,24 +86,24 @@ class GateDirectionTracker {
     }
     final previous = _level[sensor];
     _level[sensor] = level;
-    final idle = _idle.putIfAbsent(
-      sensor,
-      () => previous ?? (level == 0 ? 1 : 0),
-    );
+    // Niveau au repos inconnu : 0, celui du portail N01 (« gpis »
+    // 0000000 sans personne), plutôt qu'un niveau relevé pendant une
+    // coupure.
+    final idle = _idle.putIfAbsent(sensor, () => 0);
     final wasCut = (previous ?? idle) != idle;
+    if (_awaitingClear) {
+      if (_isIdle(outsideSensor) && _isIdle(insideSensor)) {
+        _awaitingClear = false;
+      }
+      return null;
+    }
     if (level == idle || wasCut || !enabled) return null;
     bool recent(DateTime? cut) => cut != null && at.difference(cut) <= window;
     if (sensor == outsideSensor) {
-      if (recent(_insideAt)) {
-        reset();
-        return PassageDirection.exit;
-      }
+      if (recent(_insideAt)) return _counted(PassageDirection.exit);
       _outsideAt = at;
     } else {
-      if (recent(_outsideAt)) {
-        reset();
-        return PassageDirection.entry;
-      }
+      if (recent(_outsideAt)) return _counted(PassageDirection.entry);
       _insideAt = at;
     }
     return null;

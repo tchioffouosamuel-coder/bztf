@@ -42,6 +42,9 @@ class GateBridge(
 	private val lastReadAt = ConcurrentHashMap<String, Long>()
 	private val tidCache = ConcurrentHashMap<String, String>()
 	@Volatile private var reading = false
+
+	/** Barrières qui déclenchent la lecture (GPI 1 à 3), relevées à la connexion. */
+	@Volatile private var triggerSensors = listOf(1, 2)
 	@Volatile private var reader: N01_Api? = null
 	@Volatile private var transport = "tcp"
 	@Volatile private var eventSink: EventChannel.EventSink? = null
@@ -137,6 +140,7 @@ class GateBridge(
 					gpi.toString() to runCatching { candidate.N01_GetGpi(gpi) }.getOrDefault(-1)
 				}
 				val buzzerSilenced = if (silence) silenceBuzzer(candidate, buzzerGpo) else null
+				triggerSensors = sensors.filter { it in 1..3 }.ifEmpty { listOf(1, 2) }
 				reader = candidate
 				tagEventAt.clear()
 				tidCache.clear()
@@ -214,7 +218,7 @@ class GateBridge(
 		Log.i(TAG, "Gate inventory starting: power=${power ?: "reader"} dBm")
 		executor.execute {
 			try {
-				runCatching { current.N01_StopReading() }
+				haltReading(current)
 				if (power != null && !applyPower(current, power)) {
 					Log.w(TAG, "Gate power $power dBm refused")
 					postError(result, "POWER_SET", "Le portail a refusé la puissance de $power dBm.")
@@ -223,11 +227,8 @@ class GateBridge(
 				tagEventAt.clear()
 				lastReadAt.clear()
 				current.AsyncInvStartThread(TagReadDataEventCallback { })
-				// Lecture EPC seule, comme la démo du SDK : le SDK ne transmet
-				// jamais la zone mémoire demandée (TagBackData sans TID). Le TID
-				// d'un badge est relu à la demande (readTid).
-				val status = current.N01_StartReading()
-				Log.i(TAG, "Gate inventory started: power=${power ?: "reader"} dBm, status=$status")
+				val status = beginReading(current)
+				Log.i(TAG, "Gate inventory started: power=${power ?: "reader"} dBm, triggers=$triggerSensors, status=$status")
 				if (status != N01_Api.RET_ERRNO.RET_OK) {
 					postError(result, "INVENTORY_START", "Le portail a refusé la lecture ($status).")
 					return@execute
@@ -249,14 +250,36 @@ class GateBridge(
 		}
 		executor.execute {
 			reading = false
-			runCatching { current.N01_StopReading() }
+			haltReading(current)
 			mainHandler.post { result.success(mapOf("stopped" to true)) }
 		}
 	}
 
 	/**
+	 * Lecture déclenchée par les barrières, comme le réglage d'usine du
+	 * portail (firmware V1.3.6.6) : chaque coupure d'une barrière lance une
+	 * lecture de [AUTO_INVENTORY_SECONDS] s dont les tags arrivent sur cette
+	 * connexion (mode TCP_FAST). La lecture continue (AsyncInvStart) est
+	 * acceptée par ce firmware mais ne remonte aucun tag.
+	 */
+	private fun beginReading(api: N01_Api): N01_Api.RET_ERRNO {
+		val triggers = hashMapOf(
+			"start1" to "GPI${triggerSensors[0]}",
+			"stop1" to "NONE",
+			"start2" to (triggerSensors.getOrNull(1)?.let { "GPI$it" } ?: "NONE"),
+			"stop2" to "NONE",
+		)
+		return api.N01_AutoInvStar("TCP_FAST", AUTO_INVENTORY_SECONDS, triggers)
+	}
+
+	private fun haltReading(api: N01_Api) {
+		runCatching { api.N01_AutoInvStop() }
+		runCatching { api.N01_StopReading() }
+	}
+
+	/**
 	 * TID (6 mots) du tag [epcInput], lu par une commande ciblée sur son EPC :
-	 * la lecture continue est suspendue le temps de la lecture. Gardé en
+	 * la lecture du portail est suspendue le temps de la lecture. Gardé en
 	 * cache pour la connexion. Chaîne vide si le tag n'a pas répondu.
 	 */
 	private fun readTid(epcInput: String, result: MethodChannel.Result) {
@@ -274,7 +297,7 @@ class GateBridge(
 			val resume = reading
 			var tid = ""
 			try {
-				if (resume) runCatching { current.N01_StopReading() }
+				if (resume) haltReading(current)
 				val filter = TagFilter(1, EPC_FILTER_START_BIT, epc, true)
 				for (attempt in 0 until TID_ATTEMPTS) {
 					tid = runCatching { current.N01_GetBankData(2, 0, TID_WORDS, filter) }
@@ -288,7 +311,7 @@ class GateBridge(
 				Log.w(TAG, "Gate TID read failed for $epc", error)
 			} finally {
 				if (resume && reader === current) {
-					val status = runCatching { current.N01_StartReading() }.getOrNull()
+					val status = runCatching { beginReading(current) }.getOrNull()
 					if (status != N01_Api.RET_ERRNO.RET_OK) Log.w(TAG, "Gate inventory restart: $status")
 				}
 			}
@@ -503,7 +526,7 @@ class GateBridge(
 		val current = reader ?: return
 		reader = null
 		reading = false
-		runCatching { current.N01_StopReading() }
+		haltReading(current)
 		runCatching { current.N01_SetGpo(RED_LIGHT_GPO, 0) }
 		runCatching { current.N01_Close() }
 		tagEventAt.clear()
@@ -533,5 +556,6 @@ class GateBridge(
 		const val EPC_FILTER_START_BIT = 32
 		const val TID_WORDS = 6
 		const val TID_ATTEMPTS = 3
+		const val AUTO_INVENTORY_SECONDS = 3
 	}
 }
