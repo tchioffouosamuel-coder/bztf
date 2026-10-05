@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 
 import '../services/library_controller.dart';
 import '../widgets/accounts_card.dart';
+import '../widgets/cataloguing_settings_card.dart';
 import '../widgets/reader_connection_dialog.dart';
 import '../widgets/sync_settings_card.dart';
 
@@ -81,6 +82,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
       ),
       const SizedBox(height: 10),
       AccountsCard(controller: controller),
+      const SizedBox(height: 22),
+      const CataloguingSettingsCard(),
       const SizedBox(height: 22),
       Text(
         'Lecteur RFID',

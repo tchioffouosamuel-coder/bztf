@@ -5,6 +5,7 @@ import '../app.dart';
 import '../models/book.dart';
 import '../models/lending.dart';
 import '../services/library_controller.dart';
+import '../services/cote_label.dart';
 import 'loan_editor.dart';
 import 'status_pill.dart';
 
@@ -56,7 +57,8 @@ class _BookDetailsState extends State<BookDetails> {
     'publisher': 'Éditeur',
     'publication_year': 'Année de publication',
     'category': 'Catégorie',
-    'shelf': 'Rayon / cote',
+    'shelf': 'Cote',
+    'location': 'Localisation',
     'notes': 'Notes',
   };
 
@@ -93,6 +95,7 @@ class _BookDetailsState extends State<BookDetails> {
     'publication_year' => book.publicationYear,
     'category' => book.category,
     'shelf' => book.shelf,
+    'location' => book.location,
     'notes' => book.notes,
     _ => '',
   };
@@ -290,6 +293,25 @@ class _BookDetailsState extends State<BookDetails> {
                   ),
                 const Divider(height: 24),
                 _ReadOnlyInfo('EPC', _book.epc, monospace: true),
+                _ReadOnlyInfo(
+                  'Source de la notice',
+                  _book.sourceNotice.isEmpty ? 'manuelle' : _book.sourceNotice,
+                ),
+                _ReadOnlyInfo('Type de document', _book.documentType),
+                _ReadOnlyInfo('Statut de l’exemplaire', _book.itemStatus),
+                OutlinedButton.icon(
+                  onPressed: _busy
+                      ? null
+                      : () => _run(
+                          () => previewCoteLabel(
+                            context,
+                            _book,
+                            controller: _controller,
+                          ),
+                        ),
+                  icon: const Icon(Icons.print_outlined),
+                  label: const Text('Prévisualiser l’étiquette de cote'),
+                ),
                 _ReadOnlyInfo('TID', _book.tid ?? '—', monospace: true),
                 _ReadOnlyInfo('Ajouté le', _date(_book.createdAt)),
                 _ReadOnlyInfo('Modifié le', _date(_book.updatedAt)),

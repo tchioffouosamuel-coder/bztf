@@ -9,10 +9,27 @@ class Book {
     required this.updatedAt,
     this.tid,
     this.author = '',
+    this.subtitle = '',
     this.isbn = '',
     this.publisher = '',
     this.publicationYear = '',
+    this.collection = '',
+    this.collectionNumber = '',
+    this.language = '',
+    this.originalLanguage = '',
+    this.summary = '',
+    this.subjects = '',
+    this.dewey = '',
+    this.edition = '',
+    this.pageCount = '',
+    this.sourceNotice = '',
+    this.sourceIdentifier = '',
+    this.retrievedAt,
     this.category = '',
+    this.documentType = '',
+    this.location = '',
+    this.itemStatus = 'Disponible',
+    this.catalogDraft = false,
     this.shelf = '',
     this.notes = '',
     this.taggedAt,
@@ -27,10 +44,27 @@ class Book {
   final String? tid;
   final String title;
   final String author;
+  final String subtitle;
   final String isbn;
   final String publisher;
   final String publicationYear;
+  final String collection;
+  final String collectionNumber;
+  final String language;
+  final String originalLanguage;
+  final String summary;
+  final String subjects;
+  final String dewey;
+  final String edition;
+  final String pageCount;
+  final String sourceNotice;
+  final String sourceIdentifier;
+  final String? retrievedAt;
   final String category;
+  final String documentType;
+  final String location;
+  final String itemStatus;
+  final bool catalogDraft;
   final String shelf;
   final String notes;
   final String status;
@@ -48,10 +82,27 @@ class Book {
     tid: map['tid'] as String?,
     title: map['title'] as String,
     author: map['author'] as String? ?? '',
+    subtitle: map['subtitle'] as String? ?? '',
     isbn: map['isbn'] as String? ?? '',
     publisher: map['publisher'] as String? ?? '',
     publicationYear: map['publication_year'] as String? ?? '',
+    collection: map['collection'] as String? ?? '',
+    collectionNumber: map['collection_number'] as String? ?? '',
+    language: map['language'] as String? ?? '',
+    originalLanguage: map['original_language'] as String? ?? '',
+    summary: map['summary'] as String? ?? '',
+    subjects: map['subjects'] as String? ?? '',
+    dewey: map['dewey'] as String? ?? '',
+    edition: map['edition'] as String? ?? '',
+    pageCount: map['page_count'] as String? ?? '',
+    sourceNotice: map['source_notice'] as String? ?? '',
+    sourceIdentifier: map['source_identifier'] as String? ?? '',
+    retrievedAt: map['retrieved_at'] as String?,
     category: map['category'] as String? ?? '',
+    documentType: map['document_type'] as String? ?? '',
+    location: map['location'] as String? ?? '',
+    itemStatus: map['item_status'] as String? ?? 'Disponible',
+    catalogDraft: map['catalog_draft'] == 1,
     shelf: map['shelf'] as String? ?? '',
     notes: map['notes'] as String? ?? '',
     status: map['status'] as String,
@@ -70,10 +121,27 @@ class Book {
     'tid': tid,
     'title': title,
     'author': author,
+    'subtitle': subtitle,
     'isbn': isbn,
     'publisher': publisher,
     'publication_year': publicationYear,
+    'collection': collection,
+    'collection_number': collectionNumber,
+    'language': language,
+    'original_language': originalLanguage,
+    'summary': summary,
+    'subjects': subjects,
+    'dewey': dewey,
+    'edition': edition,
+    'page_count': pageCount,
+    'source_notice': sourceNotice,
+    'source_identifier': sourceIdentifier,
+    'retrieved_at': retrievedAt,
     'category': category,
+    'document_type': documentType,
+    'location': location,
+    'item_status': itemStatus,
+    'catalog_draft': catalogDraft ? 1 : 0,
     'shelf': shelf,
     'notes': notes,
     'status': status,
@@ -92,10 +160,26 @@ class Book {
     'tid': tid,
     'title': title,
     'author': author,
+    'subtitle': subtitle,
     'isbn': isbn,
     'publisher': publisher,
     'publicationYear': publicationYear,
+    'collection': collection,
+    'collectionNumber': collectionNumber,
+    'language': language,
+    'originalLanguage': originalLanguage,
+    'summary': summary,
+    'subjects': subjects,
+    'dewey': dewey,
+    'edition': edition,
+    'pageCount': pageCount,
+    'sourceNotice': sourceNotice,
+    'sourceIdentifier': sourceIdentifier,
+    'retrievedAt': retrievedAt,
     'category': category,
+    'documentType': documentType,
+    'location': location,
+    'itemStatus': itemStatus,
     'shelf': shelf,
     'notes': notes,
     'status': status,

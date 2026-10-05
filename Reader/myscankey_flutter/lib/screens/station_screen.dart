@@ -126,7 +126,7 @@ class StationScreen extends StatelessWidget {
   }
 
   Future<void> _registerNew(BuildContext context, ReaderTag tag) async {
-    final values = await BookEditor.show(context);
+    final values = await BookEditor.show(context, controller: controller);
     if (values == null || !context.mounted) return;
     try {
       await controller.createAndEncode(values, tag);

@@ -1,4 +1,6 @@
 import 'dart:io';
+import 'dart:convert';
+import 'dart:typed_data';
 
 import 'package:csv/csv.dart' as csv;
 import 'package:path/path.dart' as path;
@@ -8,7 +10,10 @@ import 'package:sqflite/sqflite.dart';
 import '../models/book.dart';
 import '../models/lending.dart';
 
-Future<void> shareCatalogCsv(List<Book> books) async {
+Uint8List encodeCsvRows(List<List<dynamic>> rows) =>
+    Uint8List.fromList(utf8.encode(csv.Csv.excel().encode(rows)));
+
+Uint8List catalogCsvBytes(List<Book> books) {
   final rows = <List<dynamic>>[
     [
       'Numéro',
@@ -20,6 +25,26 @@ Future<void> shareCatalogCsv(List<Book> books) async {
       'Statut',
       'EPC',
       'TID',
+      'Sous-titre',
+      'Éditeur',
+      'Date de publication',
+      'Collection',
+      'Numéro dans la collection',
+      'Langue',
+      'Langue originale',
+      'Résumé',
+      'Sujets',
+      'Dewey',
+      'Édition',
+      'Pagination',
+      'Source de la notice',
+      'Identifiant de la notice',
+      'Date de récupération',
+      'Type de document',
+      'Localisation',
+      'Statut de l’exemplaire',
+      'Brouillon',
+      'Notes',
     ],
     for (final book in books)
       [
@@ -32,12 +57,35 @@ Future<void> shareCatalogCsv(List<Book> books) async {
         book.status,
         book.epc,
         book.tid ?? '',
+        book.subtitle,
+        book.publisher,
+        book.publicationYear,
+        book.collection,
+        book.collectionNumber,
+        book.language,
+        book.originalLanguage,
+        book.summary,
+        book.subjects,
+        book.dewey,
+        book.edition,
+        book.pageCount,
+        book.sourceNotice,
+        book.sourceIdentifier,
+        book.retrievedAt ?? '',
+        book.documentType,
+        book.location,
+        book.itemStatus,
+        book.catalogDraft ? 'Oui' : 'Non',
+        book.notes,
       ],
   ];
-  final content = csv.Csv.excel().encode(rows);
+  return encodeCsvRows(rows);
+}
+
+Future<void> shareCatalogCsv(List<Book> books) async {
   final directory = await getDatabasesPath();
   final file = File(path.join(directory, 'biblio-rfid.csv'));
-  await file.writeAsString(content, flush: true);
+  await file.writeAsBytes(catalogCsvBytes(books), flush: true);
   await SharePlus.instance.share(
     ShareParams(files: [XFile(file.path)], subject: 'Export BiblioRFID'),
   );

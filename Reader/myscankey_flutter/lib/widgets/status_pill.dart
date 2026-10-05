@@ -11,6 +11,8 @@ class StatusPill extends StatelessWidget {
     final (label, color) = switch (status) {
       'encode' => ('Encodé', colors.primary),
       'indisponible' => ('Indisponible', colors.error),
+      'reader_connected' => ('RFID connecté', colors.primary),
+      'reader_disconnected' => ('RFID déconnecté', colors.error),
       _ => ('À encoder', const Color(0xFFA96800)),
     };
     return Container(

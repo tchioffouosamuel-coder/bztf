@@ -115,6 +115,7 @@ class LibraryController extends ChangeNotifier {
 
   String view = 'dashboard';
   String statusFilter = 'tous';
+  String catalogueWorkList = 'all';
   String search = '';
   String transport = 'serial';
   String endpoint = 'dev/ttyS5';
@@ -319,6 +320,7 @@ class LibraryController extends ChangeNotifier {
     final page = await database.listBooks(
       search: search,
       status: statusFilter,
+      workList: catalogueWorkList,
       limit: 200,
       offset: pageOffset,
     );
@@ -327,6 +329,7 @@ class LibraryController extends ChangeNotifier {
     totalBooks = await database.countBooks(
       search: search,
       status: statusFilter,
+      workList: catalogueWorkList,
     );
     notifyListeners();
   }
@@ -338,6 +341,12 @@ class LibraryController extends ChangeNotifier {
 
   void setStatusFilter(String value) {
     statusFilter = value;
+    unawaited(loadBooks());
+  }
+
+  void setCatalogueWorkList(String value) {
+    catalogueWorkList = value;
+    statusFilter = value == 'unencoded' ? 'a_encoder' : 'tous';
     unawaited(loadBooks());
   }
 
@@ -765,9 +774,11 @@ class LibraryController extends ChangeNotifier {
 
   Future<Book> createAndEncode(
     Map<String, Object?> values,
-    ReaderTag tag,
-  ) async {
+    ReaderTag tag, {
+    void Function(Book book)? onCreated,
+  }) async {
     final book = await database.createBook(values);
+    onCreated?.call(book);
     await loadBooks();
     await encodeBook(book, tag);
     return (await database.getBook(book.id))!;
@@ -826,6 +837,7 @@ class LibraryController extends ChangeNotifier {
   /// courant (formulaire d'emprunt).
   Future<ReaderTag> captureSingleTag({
     Duration timeout = const Duration(seconds: 5),
+    String? noTagMessage,
   }) async {
     if (_capturingCard) throw StateError('Une lecture de carte est en cours.');
     if (!reader.connected) await connectReader();
@@ -853,7 +865,9 @@ class LibraryController extends ChangeNotifier {
       try {
         await detected.future.timeout(timeout);
       } on TimeoutException {
-        throw StateError('Aucune carte détectée. Posez-la sur le lecteur.');
+        throw StateError(
+          noTagMessage ?? 'Aucune carte détectée. Posez-la sur le lecteur.',
+        );
       }
       // Laisse le temps à d'éventuels autres tags de se manifester.
       await Future<void>.delayed(const Duration(milliseconds: 600));
@@ -879,6 +893,31 @@ class LibraryController extends ChangeNotifier {
       antenna: tag.antenna,
       count: tag.count,
     );
+  }
+
+  /// Capture un tag unique avec la routine existante (y compris la résolution
+  /// du TID en série), puis expose cette lecture à la vérification d'encodage.
+  Future<ReaderTag> captureEncodingTag() async {
+    final tag = await captureSingleTag(
+      noTagMessage: 'Aucun tag de livre détecté. Posez-en un sur le lecteur.',
+    );
+    if (tag.tid.isEmpty) {
+      throw StateError(
+        'Le TID du tag n’est pas lisible. Réessayez avec un seul tag.',
+      );
+    }
+    for (final timer in _releaseTimers.values) {
+      timer.cancel();
+    }
+    _releaseTimers.clear();
+    _observed.clear();
+    _observed[_key(tag)] = tag;
+    if (view == 'station') {
+      _stationSessionTags.clear();
+      _stationSessionTags[_stationKey(tag)] = tag;
+    }
+    notifyListeners();
+    return tag;
   }
 
   /// Identifie l'abonné à partir de sa carte RFID.

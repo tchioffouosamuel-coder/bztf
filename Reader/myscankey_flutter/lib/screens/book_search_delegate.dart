@@ -9,7 +9,7 @@ class BookSearchDelegate extends SearchDelegate<Book?> {
     : super(
         searchFieldLabel: encodedOnly
             ? 'Livre encodé à localiser'
-            : 'Titre, auteur, ISBN ou numéro',
+            : 'Titre, auteur, ISBN, sujet, cote ou Dewey',
       );
 
   final LibraryDatabase database;
@@ -45,7 +45,7 @@ class BookSearchDelegate extends SearchDelegate<Book?> {
         child: Padding(
           padding: EdgeInsets.all(28),
           child: Text(
-            'Recherchez un titre, un auteur, un ISBN ou un numéro de livre.',
+            'Recherchez un titre, un auteur, un ISBN, un sujet, une cote, un Dewey ou un numéro de livre.',
             textAlign: TextAlign.center,
           ),
         ),

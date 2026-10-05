@@ -10,6 +10,8 @@ import '../services/library_controller.dart';
 import '../widgets/book_details.dart';
 import '../widgets/book_editor.dart';
 import '../widgets/status_pill.dart';
+import '../widgets/duplicate_review.dart';
+import '../widgets/isbn_import_panel.dart';
 import '../app.dart';
 
 class CatalogueScreen extends StatefulWidget {
@@ -25,6 +27,14 @@ class _CatalogueScreenState extends State<CatalogueScreen> {
   final _search = TextEditingController();
   Timer? _searchDebounce;
   bool _working = false;
+  late String _tab = widget.controller.catalogueWorkList;
+
+  void _selectTab(String tab) {
+    setState(() => _tab = tab);
+    if (tab != 'duplicates' && tab != 'retro') {
+      widget.controller.setCatalogueWorkList(tab);
+    }
+  }
 
   @override
   void dispose() {
@@ -34,23 +44,17 @@ class _CatalogueScreenState extends State<CatalogueScreen> {
   }
 
   Future<void> _edit([Book? book]) async {
-    final values = await BookEditor.show(context, book: book);
+    final values = await BookEditor.show(
+      context,
+      book: book,
+      controller: widget.controller,
+      manageSaving: true,
+    );
     if (values == null || !mounted) return;
-    try {
-      if (book == null) {
-        await widget.controller.createBook(values);
-      } else {
-        await widget.controller.updateBook(book.id, values);
-      }
-      if (mounted) {
-        showMessage(
-          context,
-          book == null ? 'Livre ajouté au catalogue.' : 'Livre mis à jour.',
-        );
-      }
-    } catch (error) {
-      if (mounted) showMessage(context, error.toString(), error: true);
-    }
+    showMessage(
+      context,
+      book == null ? 'Livre ajouté au catalogue.' : 'Livre mis à jour.',
+    );
   }
 
   Future<void> _import() async {
@@ -150,7 +154,7 @@ class _CatalogueScreenState extends State<CatalogueScreen> {
                 },
                 decoration: InputDecoration(
                   prefixIcon: const Icon(Icons.search),
-                  hintText: 'Titre, auteur, ISBN, numéro…',
+                  hintText: 'Titre, auteur, ISBN, sujet, cote, Dewey, numéro…',
                   suffixIcon: _search.text.isEmpty
                       ? null
                       : IconButton(
@@ -166,6 +170,30 @@ class _CatalogueScreenState extends State<CatalogueScreen> {
               const SizedBox(height: 10),
               SingleChildScrollView(
                 scrollDirection: Axis.horizontal,
+                child: Row(
+                  children: [
+                    for (final entry in const {
+                      'all': 'Catalogue',
+                      'incomplete': 'Notices incomplètes',
+                      'unencoded': 'Exemplaires à encoder',
+                      'drafts': 'Brouillons',
+                      'duplicates': 'Doublons',
+                      'retro': 'Rétroconversion CSV',
+                    }.entries)
+                      Padding(
+                        padding: const EdgeInsets.only(right: 8),
+                        child: ChoiceChip(
+                          label: Text(entry.value),
+                          selected: _tab == entry.key,
+                          onSelected: (_) => _selectTab(entry.key),
+                        ),
+                      ),
+                  ],
+                ),
+              ),
+              const SizedBox(height: 10),
+              SingleChildScrollView(
+                scrollDirection: Axis.horizontal,
                 child: SegmentedButton<String>(
                   showSelectedIcon: false,
                   segments: const [
@@ -174,8 +202,13 @@ class _CatalogueScreenState extends State<CatalogueScreen> {
                     ButtonSegment(value: 'encode', label: Text('Encodés')),
                   ],
                   selected: {controller.statusFilter},
-                  onSelectionChanged: (selection) =>
-                      controller.setStatusFilter(selection.first),
+                  onSelectionChanged: (selection) {
+                    if (_tab == 'unencoded') {
+                      setState(() => _tab = 'all');
+                      controller.catalogueWorkList = 'all';
+                    }
+                    controller.setStatusFilter(selection.first);
+                  },
                 ),
               ),
             ],
@@ -183,7 +216,11 @@ class _CatalogueScreenState extends State<CatalogueScreen> {
         ),
         if (_working) const LinearProgressIndicator(minHeight: 2),
         Expanded(
-          child: controller.books.isEmpty
+          child: _tab == 'duplicates'
+              ? DuplicateReview(controller: controller)
+              : _tab == 'retro'
+              ? IsbnImportPanel(controller: controller)
+              : controller.books.isEmpty
               ? const Center(child: Text('Aucun livre trouvé.'))
               : RefreshIndicator(
                   onRefresh: controller.loadBooks,
@@ -305,8 +342,17 @@ class _BookCard extends StatelessWidget {
               book.accession,
               style: const TextStyle(fontFamily: 'monospace', fontSize: 12),
             ),
+            if (book.catalogDraft) const Text('Brouillon · notice à vérifier'),
             Text(
-              book.shelf.isEmpty ? 'Localisation non renseignée' : book.shelf,
+              [
+                    book.location,
+                    book.shelf,
+                  ].where((value) => value.isNotEmpty).join(' · ').isEmpty
+                  ? 'Localisation non renseignée'
+                  : [
+                      book.location,
+                      book.shelf,
+                    ].where((value) => value.isNotEmpty).join(' · '),
               maxLines: 2,
               overflow: TextOverflow.ellipsis,
               style: Theme.of(context).textTheme.bodySmall,

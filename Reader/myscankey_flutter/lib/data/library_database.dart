@@ -5,6 +5,8 @@ import 'package:path/path.dart' as path;
 import 'package:sqflite/sqflite.dart';
 
 import '../core/epc.dart';
+import '../core/isbn.dart';
+import '../core/catalogue_text.dart';
 import '../core/password.dart';
 import '../models/book.dart';
 import '../models/lending.dart';
@@ -22,7 +24,7 @@ class LibraryDatabase {
     final directory = await getDatabasesPath();
     _database = await openDatabase(
       path.join(directory, 'biblio_rfid.db'),
-      version: 8,
+      version: 11,
       onConfigure: (database) => database.execute('PRAGMA foreign_keys = ON'),
       onCreate: (database, version) async {
         await database.execute('''
@@ -33,9 +35,22 @@ class LibraryDatabase {
             tid TEXT UNIQUE,
             title TEXT NOT NULL,
             author TEXT NOT NULL DEFAULT '',
+            subtitle TEXT NOT NULL DEFAULT '',
             isbn TEXT NOT NULL DEFAULT '',
             publisher TEXT NOT NULL DEFAULT '',
             publication_year TEXT NOT NULL DEFAULT '',
+            collection TEXT NOT NULL DEFAULT '',
+            collection_number TEXT NOT NULL DEFAULT '',
+            language TEXT NOT NULL DEFAULT '',
+            original_language TEXT NOT NULL DEFAULT '',
+            summary TEXT NOT NULL DEFAULT '',
+            subjects TEXT NOT NULL DEFAULT '',
+            dewey TEXT NOT NULL DEFAULT '',
+            edition TEXT NOT NULL DEFAULT '',
+            page_count TEXT NOT NULL DEFAULT '',
+            source_notice TEXT NOT NULL DEFAULT '',
+            source_identifier TEXT NOT NULL DEFAULT '',
+            retrieved_at TEXT,
             category TEXT NOT NULL DEFAULT '',
             shelf TEXT NOT NULL DEFAULT '',
             notes TEXT NOT NULL DEFAULT '',
@@ -70,6 +85,9 @@ class LibraryDatabase {
         await _addLendingSync(database);
         await _createUsers(database);
         await _createGateTables(database);
+        await _addBookNoticeFields(database);
+        await _addBookCopyFields(database);
+        await _addCatalogueOperations(database);
       },
       onUpgrade: (database, oldVersion, newVersion) async {
         if (oldVersion < 2) {
@@ -100,6 +118,9 @@ class LibraryDatabase {
         if (oldVersion < 6) await _addLendingSync(database);
         if (oldVersion < 7) await _createUsers(database);
         if (oldVersion < 8) await _createGateTables(database);
+        if (oldVersion < 9) await _addBookNoticeFields(database);
+        if (oldVersion < 10) await _addBookCopyFields(database);
+        if (oldVersion < 11) await _addCatalogueOperations(database);
       },
     );
     return _database!;
@@ -108,23 +129,16 @@ class LibraryDatabase {
   Future<List<Book>> listBooks({
     String search = '',
     String status = 'tous',
+    String workList = 'all',
     int limit = 200,
     int offset = 0,
   }) async {
     final db = await database;
-    final where = <String>[];
-    final args = <Object?>[];
-    if (search.trim().isNotEmpty) {
-      where.add(
-        '(title LIKE ? OR author LIKE ? OR isbn LIKE ? OR accession LIKE ? OR epc LIKE ?)',
-      );
-      final term = '%${search.trim()}%';
-      args.addAll(List.filled(5, term));
-    }
-    if (const ['a_encoder', 'encode', 'indisponible'].contains(status)) {
-      where.add('status = ?');
-      args.add(status);
-    }
+    final (where, args) = catalogueFilter(
+      search: search,
+      status: status,
+      workList: workList,
+    );
     final rows = await db.query(
       'books',
       where: where.isEmpty ? null : where.join(' AND '),
@@ -228,21 +242,17 @@ class LibraryDatabase {
     return rows.map(CatalogEntry.fromMap).toList();
   }
 
-  Future<int> countBooks({String search = '', String status = 'tous'}) async {
+  Future<int> countBooks({
+    String search = '',
+    String status = 'tous',
+    String workList = 'all',
+  }) async {
     final db = await database;
-    final terms = <String>[];
-    final args = <Object?>[];
-    if (search.trim().isNotEmpty) {
-      terms.add(
-        '(title LIKE ? OR author LIKE ? OR isbn LIKE ? OR accession LIKE ? OR epc LIKE ?)',
-      );
-      final term = '%${search.trim()}%';
-      args.addAll(List.filled(5, term));
-    }
-    if (const ['a_encoder', 'encode', 'indisponible'].contains(status)) {
-      terms.add('status = ?');
-      args.add(status);
-    }
+    final (terms, args) = catalogueFilter(
+      search: search,
+      status: status,
+      workList: workList,
+    );
     final where = terms.isEmpty ? '' : ' WHERE ${terms.join(' AND ')}';
     final result = await db.rawQuery(
       'SELECT COUNT(*) AS total FROM books$where',
@@ -276,12 +286,40 @@ class LibraryDatabase {
     return rows.isEmpty ? null : Book.fromMap(rows.first);
   }
 
-  Future<Book> createBook(Map<String, Object?> values) async {
+  Future<List<Book>> findBooksByIsbn(String isbn13) async {
+    if (!Isbn.isValid(isbn13)) return [];
+    final rows = await (await database).query(
+      'books',
+      where: 'isbn13 = ?',
+      whereArgs: [Isbn.toIsbn13(isbn13)],
+      orderBy: 'accession',
+    );
+    return rows.map(Book.fromMap).toList();
+  }
+
+  Future<Book> createBook(
+    Map<String, Object?> values, {
+    String? importJobId,
+    int? importRowNumber,
+  }) async {
     final title = _clean(values['title'], 240);
     if (title.isEmpty) throw ArgumentError('Le titre est obligatoire.');
     final db = await database;
     final now = DateTime.now().toUtc().toIso8601String();
     return db.transaction((transaction) async {
+      if (importJobId != null) {
+        final row = (await transaction.query(
+          'isbn_import_rows',
+          where: 'job_id = ? AND row_number = ?',
+          whereArgs: [importJobId, importRowNumber],
+        )).first;
+        if (row['state'] == 'found' && row['book_id'] is int) {
+          return _bookIn(transaction, row['book_id'] as int);
+        }
+        if (row['state'] != 'pending') {
+          throw StateError('Cette ligne a déjà été traitée.');
+        }
+      }
       final placeholder = 'PENDING-${DateTime.now().microsecondsSinceEpoch}';
       final id = await transaction.insert('books', {
         'accession': '$placeholder-A',
@@ -321,6 +359,19 @@ class LibraryDatabase {
         )).first,
       );
       await _queueBook(transaction, book);
+      if (importJobId != null) {
+        await transaction.update(
+          'isbn_import_rows',
+          {
+            'state': 'found',
+            'book_id': book.id,
+            'detail':
+                '${book.sourceNotice} · ${book.accession} · brouillon à vérifier',
+          },
+          where: 'job_id = ? AND row_number = ?',
+          whereArgs: [importJobId, importRowNumber],
+        );
+      }
       return book;
     });
   }
@@ -333,7 +384,8 @@ class LibraryDatabase {
       await transaction.update(
         'books',
         {
-          ..._bookFields(values),
+          ...(_bookFields(values)
+            ..removeWhere((key, _) => !values.containsKey(key))),
           'title': title,
           'updated_at': DateTime.now().toUtc().toIso8601String(),
           'sync_state': 'pending',
@@ -1728,6 +1780,17 @@ class LibraryDatabase {
             whereArgs: [serverId],
           );
         }
+        final indexedRows = await transaction.query(
+          'books',
+          where: 'server_id = ?',
+          whereArgs: [serverId],
+        );
+        if (indexedRows.isNotEmpty) {
+          await indexCatalogueBook(
+            transaction,
+            Book.fromMap(indexedRows.first),
+          );
+        }
       }
       await _retryDeferred(transaction);
       await transaction.insert('sync_meta', {
@@ -2434,14 +2497,216 @@ class LibraryDatabase {
       .substring(0, (value?.toString() ?? '').trim().length.clamp(0, limit));
 
   static Map<String, Object?> _bookFields(Map<String, Object?> values) => {
+    'catalog_draft':
+        values['catalog_draft'] == true || values['catalog_draft'] == 1 ? 1 : 0,
     'author': _clean(values['author'], 240),
+    'subtitle': _clean(values['subtitle'], 240),
     'isbn': _clean(values['isbn'], 240),
     'publisher': _clean(values['publisher'], 240),
     'publication_year': _clean(values['publication_year'], 240),
+    'collection': _clean(values['collection'], 240),
+    'collection_number': _clean(values['collection_number'], 80),
+    'language': _clean(values['language'], 80),
+    'original_language': _clean(values['original_language'], 80),
+    'summary': _clean(values['summary'], 4000),
+    'subjects': _clean(values['subjects'], 2000),
+    'dewey': _clean(values['dewey'], 80),
+    'edition': _clean(values['edition'], 240),
+    'page_count': _clean(values['page_count'], 80),
+    'source_notice': _clean(values['source_notice'], 120),
+    'source_identifier': _clean(values['source_identifier'], 240),
+    'retrieved_at': _clean(values['retrieved_at'], 80).isEmpty
+        ? null
+        : _clean(values['retrieved_at'], 80),
     'category': _clean(values['category'], 240),
+    'document_type': _clean(values['document_type'], 80),
+    'location': _clean(values['location'], 240),
+    'item_status': _clean(values['item_status'] ?? 'Disponible', 80),
     'shelf': _clean(values['shelf'], 240),
     'notes': _clean(values['notes'], 2000),
   };
+
+  /// Les trigraphes utilisent uniquement SQLite standard : pas de module FTS
+  /// dépendant de la version d'Android. Le texte complet confirme le candidat.
+  static (List<String>, List<Object?>) catalogueFilter({
+    String search = '',
+    String status = 'tous',
+    String workList = 'all',
+  }) {
+    final where = <String>[];
+    final args = <Object?>[];
+    final term = Isbn.isValid(search)
+        ? Isbn.toIsbn13(search)
+        : foldCatalogueText(search);
+    if (term.isNotEmpty) {
+      final grams = catalogueTrigrams(term).toList();
+      if (grams.isNotEmpty) {
+        // Trois clés espacées suffisent à restreindre les candidats ; instr
+        // confirme ensuite toute la chaîne, sans faux résultat de trigramme.
+        final keys = {
+          grams.first,
+          grams[grams.length ~/ 2],
+          grams.last,
+        }.toList();
+        where.add(
+          'id IN (SELECT book_id FROM catalog_search_grams WHERE gram IN (${List.filled(keys.length, '?').join(',')}) GROUP BY book_id HAVING COUNT(*) = ?)',
+        );
+        args.addAll([...keys, keys.length]);
+      }
+      where.add('instr(search_text, ?) > 0');
+      args.add(term);
+    }
+    if (const ['a_encoder', 'encode', 'indisponible'].contains(status)) {
+      where.add('status = ?');
+      args.add(status);
+    }
+    if (workList == 'incomplete') where.add('catalog_incomplete = 1');
+    if (workList == 'drafts') where.add('catalog_draft = 1');
+    if (workList == 'unencoded') where.add("status = 'a_encoder'");
+    return (where, args);
+  }
+
+  static Future<void> _addCatalogueOperations(DatabaseExecutor db) async {
+    final columns = (await db.rawQuery(
+      'PRAGMA table_info(books)',
+    )).map((row) => row['name']).toSet();
+    for (final entry in const {
+      'search_text': "TEXT NOT NULL DEFAULT ''",
+      'isbn13': "TEXT NOT NULL DEFAULT ''",
+      'catalog_incomplete': 'INTEGER NOT NULL DEFAULT 1',
+      'catalog_draft': 'INTEGER NOT NULL DEFAULT 0',
+    }.entries) {
+      if (!columns.contains(entry.key)) {
+        await db.execute(
+          'ALTER TABLE books ADD COLUMN ${entry.key} ${entry.value}',
+        );
+      }
+    }
+    await db.execute(
+      'CREATE TABLE IF NOT EXISTS catalog_search_grams (gram TEXT NOT NULL, book_id INTEGER NOT NULL REFERENCES books(id) ON DELETE CASCADE, PRIMARY KEY(gram, book_id))',
+    );
+    await db.execute(
+      'CREATE INDEX IF NOT EXISTS idx_catalog_grams_book ON catalog_search_grams(book_id)',
+    );
+    await db.execute(
+      'CREATE INDEX IF NOT EXISTS idx_books_isbn13 ON books(isbn13)',
+    );
+    await db.execute(
+      'CREATE INDEX IF NOT EXISTS idx_books_status_id ON books(status, id DESC)',
+    );
+    await db.execute(
+      'CREATE INDEX IF NOT EXISTS idx_books_incomplete_id ON books(catalog_incomplete, id DESC)',
+    );
+    await db.execute(
+      'CREATE INDEX IF NOT EXISTS idx_books_draft_id ON books(catalog_draft, id DESC)',
+    );
+    await db.execute(
+      'CREATE TABLE IF NOT EXISTS catalog_duplicate_ignored (first_id INTEGER NOT NULL REFERENCES books(id) ON DELETE CASCADE, second_id INTEGER NOT NULL REFERENCES books(id) ON DELETE CASCADE, fingerprint TEXT NOT NULL, PRIMARY KEY(first_id, second_id))',
+    );
+    await db.execute(
+      'CREATE TABLE IF NOT EXISTS isbn_import_jobs (id TEXT PRIMARY KEY, filename TEXT NOT NULL, created_at TEXT NOT NULL)',
+    );
+    await db.execute(
+      'CREATE TABLE IF NOT EXISTS isbn_import_rows (job_id TEXT NOT NULL REFERENCES isbn_import_jobs(id) ON DELETE CASCADE, row_number INTEGER NOT NULL, raw_isbn TEXT NOT NULL, isbn13 TEXT NOT NULL DEFAULT \'\', state TEXT NOT NULL DEFAULT \'pending\', detail TEXT NOT NULL DEFAULT \'\', book_id INTEGER REFERENCES books(id) ON DELETE SET NULL, PRIMARY KEY(job_id, row_number))',
+    );
+    for (final row in await db.query('books')) {
+      await indexCatalogueBook(db, Book.fromMap(row));
+    }
+  }
+
+  static Future<void> indexCatalogueBook(DatabaseExecutor db, Book book) async {
+    String isbn13 = '';
+    if (Isbn.isValid(book.isbn)) isbn13 = Isbn.toIsbn13(book.isbn);
+    final text = [
+      book.title,
+      book.author,
+      book.isbn,
+      isbn13,
+      book.accession,
+      book.epc,
+      book.subjects,
+      book.shelf,
+      book.dewey,
+    ].map(foldCatalogueText).join('\u001f');
+    final incomplete = [
+      book.title,
+      book.author,
+      book.publisher,
+      book.publicationYear,
+      book.documentType,
+    ].any((value) => value.trim().isEmpty);
+    final previous = (await db.query(
+      'books',
+      columns: ['search_text'],
+      where: 'id = ?',
+      whereArgs: [book.id],
+    )).first;
+    await db.update(
+      'books',
+      {
+        'search_text': text,
+        'isbn13': isbn13,
+        'catalog_incomplete': incomplete ? 1 : 0,
+      },
+      where: 'id = ?',
+      whereArgs: [book.id],
+    );
+    if (previous['search_text'] == text) return;
+    await db.delete(
+      'catalog_search_grams',
+      where: 'book_id = ?',
+      whereArgs: [book.id],
+    );
+    final batch = db.batch();
+    for (final gram in catalogueTrigrams(text)) {
+      batch.insert('catalog_search_grams', {'gram': gram, 'book_id': book.id});
+    }
+    await batch.commit(noResult: true);
+  }
+
+  static Future<void> _addBookCopyFields(DatabaseExecutor database) async {
+    final columns = (await database.rawQuery(
+      'PRAGMA table_info(books)',
+    )).map((row) => row['name']).toSet();
+    for (final entry in const {
+      'document_type': "TEXT NOT NULL DEFAULT ''",
+      'location': "TEXT NOT NULL DEFAULT ''",
+      'item_status': "TEXT NOT NULL DEFAULT 'Disponible'",
+    }.entries) {
+      if (!columns.contains(entry.key)) {
+        await database.execute(
+          'ALTER TABLE books ADD COLUMN ${entry.key} ${entry.value}',
+        );
+      }
+    }
+  }
+
+  static Future<void> _addBookNoticeFields(DatabaseExecutor database) async {
+    final existing = (await database.rawQuery(
+      'PRAGMA table_info(books)',
+    )).map((row) => row['name']?.toString()).whereType<String>().toSet();
+    for (final column in const {
+      'subtitle': "TEXT NOT NULL DEFAULT ''",
+      'collection': "TEXT NOT NULL DEFAULT ''",
+      'collection_number': "TEXT NOT NULL DEFAULT ''",
+      'language': "TEXT NOT NULL DEFAULT ''",
+      'original_language': "TEXT NOT NULL DEFAULT ''",
+      'summary': "TEXT NOT NULL DEFAULT ''",
+      'subjects': "TEXT NOT NULL DEFAULT ''",
+      'dewey': "TEXT NOT NULL DEFAULT ''",
+      'edition': "TEXT NOT NULL DEFAULT ''",
+      'page_count': "TEXT NOT NULL DEFAULT ''",
+      'source_notice': "TEXT NOT NULL DEFAULT ''",
+      'source_identifier': "TEXT NOT NULL DEFAULT ''",
+      'retrieved_at': 'TEXT',
+    }.entries) {
+      if (!existing.contains(column.key)) {
+        await database.execute(
+          'ALTER TABLE books ADD COLUMN ${column.key} ${column.value}',
+        );
+      }
+    }
+  }
 
   static Future<void> _createSyncTables(DatabaseExecutor database) async {
     await database.execute('''
@@ -2773,6 +3038,7 @@ class LibraryDatabase {
       );
 
   static Future<void> _queueBook(DatabaseExecutor database, Book book) async {
+    await indexCatalogueBook(database, book);
     final serverId = book.serverId;
     if (serverId == null || serverId.isEmpty) return;
     await database.update(
@@ -2907,29 +3173,55 @@ class LibraryDatabase {
     }, conflictAlgorithm: ConflictAlgorithm.replace);
   }
 
-  static Map<String, Object?> _remoteBookFields(Map<String, Object?> remote) =>
-      {
-        'server_id': remote['serverId'],
-        'accession': remote['accession'] ?? '',
-        'epc': remote['epc'] ?? '',
-        'tid': remote['tid'],
-        'title': remote['title'] ?? 'Sans titre',
-        'author': remote['author'] ?? '',
-        'isbn': remote['isbn'] ?? '',
-        'publisher': remote['publisher'] ?? '',
-        'publication_year': remote['publicationYear'] ?? '',
-        'category': remote['category'] ?? '',
-        'shelf': remote['shelf'] ?? '',
-        'notes': remote['notes'] ?? '',
-        'status': remote['status'] ?? 'a_encoder',
-        'created_at':
-            remote['createdAt'] ?? DateTime.now().toUtc().toIso8601String(),
-        'updated_at':
-            remote['updatedAt'] ?? DateTime.now().toUtc().toIso8601String(),
-        'tagged_at': remote['taggedAt'],
-        'server_revision': remote['revision'] ?? 0,
-        'sync_state': 'synced',
-      };
+  static Map<String, Object?> _remoteBookFields(
+    Map<String, Object?> remote,
+  ) => {
+    'server_id': remote['serverId'],
+    'accession': remote['accession'] ?? '',
+    'epc': remote['epc'] ?? '',
+    'tid': remote['tid'],
+    'title': remote['title'] ?? 'Sans titre',
+    'author': remote['author'] ?? '',
+    if (remote.containsKey('subtitle')) 'subtitle': remote['subtitle'] ?? '',
+    'isbn': remote['isbn'] ?? '',
+    'publisher': remote['publisher'] ?? '',
+    'publication_year': remote['publicationYear'] ?? '',
+    if (remote.containsKey('collection'))
+      'collection': remote['collection'] ?? '',
+    if (remote.containsKey('collectionNumber'))
+      'collection_number': remote['collectionNumber'] ?? '',
+    if (remote.containsKey('language')) 'language': remote['language'] ?? '',
+    if (remote.containsKey('originalLanguage'))
+      'original_language': remote['originalLanguage'] ?? '',
+    if (remote.containsKey('summary')) 'summary': remote['summary'] ?? '',
+    if (remote.containsKey('subjects')) 'subjects': remote['subjects'] ?? '',
+    if (remote.containsKey('dewey')) 'dewey': remote['dewey'] ?? '',
+    if (remote.containsKey('edition')) 'edition': remote['edition'] ?? '',
+    if (remote.containsKey('pageCount'))
+      'page_count': remote['pageCount'] ?? '',
+    if (remote.containsKey('sourceNotice'))
+      'source_notice': remote['sourceNotice'] ?? '',
+    if (remote.containsKey('sourceIdentifier'))
+      'source_identifier': remote['sourceIdentifier'] ?? '',
+    if (remote.containsKey('retrievedAt'))
+      'retrieved_at': remote['retrievedAt'],
+    'category': remote['category'] ?? '',
+    if (remote.containsKey('documentType'))
+      'document_type': remote['documentType'] ?? '',
+    if (remote.containsKey('location')) 'location': remote['location'] ?? '',
+    if (remote.containsKey('itemStatus'))
+      'item_status': remote['itemStatus'] ?? 'Disponible',
+    'shelf': remote['shelf'] ?? '',
+    'notes': remote['notes'] ?? '',
+    'status': remote['status'] ?? 'a_encoder',
+    'created_at':
+        remote['createdAt'] ?? DateTime.now().toUtc().toIso8601String(),
+    'updated_at':
+        remote['updatedAt'] ?? DateTime.now().toUtc().toIso8601String(),
+    'tagged_at': remote['taggedAt'],
+    'server_revision': remote['revision'] ?? 0,
+    'sync_state': 'synced',
+  };
 
   static String _newId() {
     final random = Random.secure();

@@ -173,15 +173,19 @@ class GateBridge(
 	 * Les tags lus sont envoyés par le chemin « router » de la configuration
 	 * des rapports (0 : Ethernet/Wi-Fi, 1 : 4G), au format « jsontype »
 	 * (0 : par défaut). Ce portail était réglé sur la 4G au format
-	 * personnalisé 1 : aucun tag n'arrivait sur la connexion réseau. Les
+	 * personnalisé 1 : aucun tag n'arrivait sur la connexion réseau. Son
+	 * cache de doublons (« clearcache ») est ramené à quelques secondes. Les
 	 * autres paramètres sont conservés. Renvoie l'état pour les logs.
 	 */
 	private fun routeReportsToNetwork(api: N01_Api): String {
 		val current = runCatching { api.N01_GetReportCfg() }.getOrNull()
 		if (current == null || current.size < 6) return "inconnu"
-		if (current[0] == 0 && current[5] == 0) return "réseau"
+		if (current[0] == 0 && current[4] in 1..CLEAR_CACHE_SECONDS && current[5] == 0) return "réseau"
 		val fixed = current.copyOf().apply {
 			this[0] = 0
+			// Cache des tags déjà signalés : à 0, un livre vu une fois n'est
+			// plus jamais renvoyé. L'application filtre elle-même les doublons.
+			this[4] = CLEAR_CACHE_SECONDS
 			this[5] = 0
 		}
 		val status = runCatching { api.N01_SetReportCfg(fixed) }.getOrNull()
@@ -609,5 +613,6 @@ class GateBridge(
 		const val TID_WORDS = 6
 		const val TID_ATTEMPTS = 3
 		const val AUTO_INVENTORY_SECONDS = 3
+		const val CLEAR_CACHE_SECONDS = 1
 	}
 }
