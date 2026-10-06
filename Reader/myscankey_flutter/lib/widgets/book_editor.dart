@@ -1,17 +1,20 @@
+import 'dart:async';
+
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 
 import '../app.dart';
 import '../core/cote.dart';
 import '../core/isbn.dart';
 import '../models/book.dart';
+import '../services/barcode_scanner_service.dart';
 import '../services/cataloguing_preferences.dart';
 import '../services/cote_label.dart';
 import '../services/library_controller.dart';
 import '../services/notice/notice_lookup_service.dart';
 import '../services/notice/notice_source.dart';
 import 'book_details.dart';
-import 'isbn_camera.dart';
 import 'status_pill.dart';
 
 /// Le catalogue enregistre ici ; la station conserve son chaînage existant
@@ -58,6 +61,13 @@ class _BookEditorState extends State<BookEditor> {
   final _isbnForm = GlobalKey<FormState>();
   final _scroll = ScrollController();
   final _isbnFocus = FocusNode();
+  final _scanner = BarcodeScannerService();
+  StreamSubscription<Map<Object?, Object?>>? _scanSubscription;
+  Future<void> _scannerOperations = Future.value();
+  int _scanGeneration = 0;
+  bool _scannerActive = false;
+  bool _scannerReady = false;
+  String? _scannerError;
   late final NoticeLookupService _lookup;
   late final Map<String, TextEditingController> _fields;
   CataloguingPreferences _preferences = const CataloguingPreferences();
@@ -151,6 +161,87 @@ class _BookEditorState extends State<BookEditor> {
     } else {
       _loadPreferences();
     }
+    _syncScanner();
+  }
+
+  bool get _usesNativeScanner =>
+      !kIsWeb && defaultTargetPlatform == TargetPlatform.android;
+
+  void _setStep(_Step step) {
+    _step = step;
+    _syncScanner();
+  }
+
+  void _syncScanner() {
+    final active = _usesNativeScanner && _step == _Step.isbn;
+    if (active == _scannerActive) return;
+    _scannerActive = active;
+    _scannerReady = false;
+    final generation = ++_scanGeneration;
+    widget.controller?.setBarcodeScannerActive(active);
+    if (!active) {
+      unawaited(_scanSubscription?.cancel());
+      _scanSubscription = null;
+      _scannerOperations = _scannerOperations
+          .then((_) => _scanner.close())
+          .catchError((Object error) => debugPrint('Scanner ISBN : $error'));
+      return;
+    }
+    _scannerError = null;
+    _scanSubscription = _scanner.events.listen(
+      _onBarcode,
+      onError: (Object error) => _onScannerError(error, generation),
+    );
+    // Serialize open/close when returning quickly from a notice search.
+    _scannerOperations = _scannerOperations
+        .then<void>((_) async {
+          if (!mounted || !_scannerActive || generation != _scanGeneration) {
+            return;
+          }
+          if (widget.controller?.reader.reading == true) {
+            await widget.controller!.stopInventory();
+          }
+          if (!mounted || !_scannerActive || generation != _scanGeneration) {
+            return;
+          }
+          await _scanner.open();
+          if (mounted && _scannerActive && generation == _scanGeneration) {
+            setState(() => _scannerReady = true);
+          }
+        })
+        .catchError((Object error) => _onScannerError(error, generation));
+  }
+
+  void _onScannerError(Object error, int generation) {
+    if (!mounted || !_scannerActive || generation != _scanGeneration) return;
+    setState(() {
+      _scannerReady = false;
+      _scannerError = error is PlatformException
+          ? error.message ?? 'Scanner optique indisponible.'
+          : 'Scanner optique indisponible.';
+    });
+  }
+
+  void _onBarcode(Map<Object?, Object?> event) {
+    if (!mounted ||
+        !_scannerActive ||
+        _step != _Step.isbn ||
+        ModalRoute.of(context)?.isCurrent != true) {
+      return;
+    }
+    final barcode = event['barcode']?.toString();
+    if (barcode == null) return;
+    final isbn = Isbn.normalize(barcode);
+    if (!Isbn.isValid(isbn) ||
+        (isbn.length == 13 &&
+            !isbn.startsWith('978') &&
+            !isbn.startsWith('979'))) {
+      setState(() => _scannerError = 'Le code lu n’est pas un ISBN valide.');
+      return;
+    }
+    _scannerError = null;
+    _fields['isbn']!.text = Isbn.toIsbn13(isbn);
+    unawaited(_search(fromScanner: true));
   }
 
   Future<void> _loadPreferences() async {
@@ -168,6 +259,9 @@ class _BookEditorState extends State<BookEditor> {
   @override
   void dispose() {
     _lookupGeneration++;
+    if (_scannerActive) {
+      _setStep(_Step.description);
+    }
     widget.controller?.removeListener(_refresh);
     for (final field in _fields.values) {
       field.dispose();
@@ -196,20 +290,21 @@ class _BookEditorState extends State<BookEditor> {
 
   void _description({String? information}) {
     setState(() {
-      _step = _Step.description;
+      _setStep(_Step.description);
       _information = information;
     });
     if (_scroll.hasClients) _scroll.jumpTo(0);
   }
 
-  Future<void> _search() async {
-    if (!_isbnForm.currentState!.validate()) return;
+  Future<void> _search({bool fromScanner = false}) async {
+    if (_step != _Step.isbn) return;
+    if (!fromScanner && _isbnForm.currentState?.validate() != true) return;
     _clearBibliography();
     final generation = ++_lookupGeneration;
     _fields['isbn']!.text = Isbn.toIsbn13(_text('isbn'));
     FocusManager.instance.primaryFocus?.unfocus();
     setState(() {
-      _step = _Step.lookup;
+      _setStep(_Step.lookup);
       _information = null;
     });
     try {
@@ -227,7 +322,7 @@ class _BookEditorState extends State<BookEditor> {
       } else {
         setState(() {
           _results = results;
-          _step = _Step.choice;
+          _setStep(_Step.choice);
         });
       }
     } on NoticeLookupCancelledException {
@@ -245,7 +340,7 @@ class _BookEditorState extends State<BookEditor> {
 
   void _cancelSearch() {
     _lookupGeneration++;
-    setState(() => _step = _Step.isbn);
+    setState(() => _setStep(_Step.isbn));
     _isbnFocus.requestFocus();
   }
 
@@ -288,15 +383,14 @@ class _BookEditorState extends State<BookEditor> {
     _applyValues(values);
   }
 
-  Future<void> _camera() async {
-    final isbn = await Navigator.of(context).push<String>(
-      MaterialPageRoute(
-        builder: (_) => IsbnCamera(controller: widget.controller),
-      ),
-    );
-    if (isbn == null || !mounted) return;
-    _fields['isbn']!.text = isbn;
-    await _search();
+  Future<void> _scanIsbn() async {
+    if (!_scannerReady) return;
+    final generation = _scanGeneration;
+    try {
+      await _scanner.startScan();
+    } catch (error) {
+      _onScannerError(error, generation);
+    }
   }
 
   Map<String, Object?> _values() => {
@@ -423,7 +517,7 @@ class _BookEditorState extends State<BookEditor> {
       _saveError = null;
       _results = [];
       _information = null;
-      _step = _Step.isbn;
+      _setStep(_Step.isbn);
     });
     _isbnFocus.requestFocus();
   }
@@ -689,7 +783,7 @@ class _BookEditorState extends State<BookEditor> {
                                   key: const ValueKey('isbn_input'),
                                   controller: _fields['isbn'],
                                   focusNode: _isbnFocus,
-                                  autofocus: true,
+                                  autofocus: !_usesNativeScanner,
                                   decoration: const InputDecoration(
                                     labelText: 'ISBN',
                                   ),
@@ -699,19 +793,31 @@ class _BookEditorState extends State<BookEditor> {
                                       ? null
                                       : 'Vérifiez les chiffres de l’ISBN, ou choisissez la saisie manuelle.',
                                 ),
+                                if (_scannerError != null)
+                                  Padding(
+                                    padding: const EdgeInsets.only(top: 8),
+                                    child: Text(
+                                      _scannerError!,
+                                      style: TextStyle(
+                                        color: Theme.of(
+                                          context,
+                                        ).colorScheme.error,
+                                      ),
+                                    ),
+                                  ),
                                 const SizedBox(height: 16),
                                 FilledButton.icon(
                                   onPressed: _search,
                                   icon: const Icon(Icons.search),
                                   label: const Text('Récupérer la notice'),
                                 ),
-                                if (!kIsWeb &&
-                                    defaultTargetPlatform ==
-                                        TargetPlatform.android)
+                                if (_usesNativeScanner)
                                   OutlinedButton.icon(
-                                    onPressed: _camera,
-                                    icon: const Icon(Icons.camera_alt_outlined),
-                                    label: const Text('Scanner avec la caméra'),
+                                    onPressed: _scannerReady ? _scanIsbn : null,
+                                    icon: const Icon(Icons.qr_code_scanner),
+                                    label: const Text(
+                                      'Scanner avec le lecteur',
+                                    ),
                                   ),
                                 TextButton(
                                   onPressed: _manualDescription,
@@ -770,7 +876,7 @@ class _BookEditorState extends State<BookEditor> {
                           TextButton(
                             onPressed: _busy
                                 ? null
-                                : () => setState(() => _step = _Step.isbn),
+                                : () => setState(() => _setStep(_Step.isbn)),
                             child: const Text('Retour à l’ISBN'),
                           ),
                         OutlinedButton(

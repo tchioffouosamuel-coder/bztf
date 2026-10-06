@@ -25,6 +25,12 @@ Le lecteur intégré utilise le service Seuic `UHFService` du démonstrateur `An
 
 Le flux RFID lit l’EPC et le TID en continu. Toute écriture ou désécriture exige un seul tag détecté et le TID correspondant; l’EPC est relu avant de modifier le catalogue.
 
+## Scanner ISBN
+
+Sur le CRUISE2 Seuic, le module optique est ouvert automatiquement a l'etape 1 du cataloguage via la bibliotheque systeme `android.scanner.library` (`ScannerAPI.jar`). Un appui sur la gachette lit l'ISBN et lance directement la recherche de la notice. Le bouton *Scanner avec le lecteur* declenche egalement la lecture sur ce meme ecran. `BarcodeScannerBridge.kt` appelle `ScannerFactory.getScanner()`, `open()` et `enable()`, puis `startScan()` / `stopScan()` aux evenements des touches 250 (gachette RFID) et 249 (scan optique). Les codes arrivent directement par `DecodeInfoCallBack`, independamment du mode de saisie clavier de l'outil natif.
+
+Le scanner est ferme a la sortie de l'etape ISBN ou quand l'application passe en arriere-plan. Il est reactive au retour a l'ISBN et pour le livre suivant. Les parametres EAN-13, chiffre de controle, viseur et eclairage sont actives pour la session, puis restaures. Les lectures RFID sont suspendues pendant cette session. Le SDK systeme est facultatif pour permettre le demarrage sur les autres postes.
+
 ## Connexion
 
 L’application ne s’ouvre qu’après identification, comme l’application Windows :

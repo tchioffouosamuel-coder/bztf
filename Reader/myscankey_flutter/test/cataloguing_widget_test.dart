@@ -2,6 +2,7 @@ import 'dart:async';
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:myscankey_flutter/models/book.dart';
 import 'package:myscankey_flutter/services/cataloguing_preferences.dart';
@@ -100,6 +101,127 @@ Future<void> _enter(WidgetTester tester, String key, String text) async {
 }
 
 void main() {
+  const scannerMethods = MethodChannel(
+    'com.bibliorfid.myscankey_flutter/barcode',
+  );
+  const scannerEvents = MethodChannel(
+    'com.bibliorfid.myscankey_flutter/barcode-events',
+  );
+  final scannerCalls = <String>[];
+
+  setUp(() {
+    scannerCalls.clear();
+    final messenger =
+        TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;
+    messenger.setMockMethodCallHandler(scannerMethods, (call) async {
+      scannerCalls.add(call.method);
+      return null;
+    });
+    messenger.setMockMethodCallHandler(scannerEvents, (_) async => null);
+  });
+
+  tearDown(() {
+    final messenger =
+        TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;
+    messenger.setMockMethodCallHandler(scannerMethods, null);
+    messenger.setMockMethodCallHandler(scannerEvents, null);
+  });
+
+  void scan(WidgetTester tester, String barcode) {
+    tester.binding.channelBuffers.push(
+      scannerEvents.name,
+      const StandardMethodCodec().encodeSuccessEnvelope({'barcode': barcode}),
+      (_) {},
+    );
+  }
+
+  testWidgets(
+    'scan direct à l’étape 1 : recherche unique sans ouvrir un autre écran',
+    (tester) async {
+      debugDefaultTargetPlatformOverride = TargetPlatform.android;
+      addTearDown(() => debugDefaultTargetPlatformOverride = null);
+      final pending = Completer<List<NoticeResult>>();
+      final lookup = _Lookup(() => pending.future);
+      await _open(tester, lookup);
+      expect(scannerCalls, ['open']);
+      scan(tester, '9782070360024');
+      scan(tester, '9782070360024');
+      await tester.pump();
+      await tester.pump();
+      expect(lookup.calls, 1);
+      expect(find.text('2 · Récupération de la notice…'), findsOneWidget);
+      expect(find.text('Scanner l’ISBN'), findsNothing);
+      expect(scannerCalls, ['open', 'close']);
+      pending.complete([_notice]);
+      await tester.pumpAndSettle();
+      expect(_value(tester, 'title'), 'L’Étranger');
+      expect(_value(tester, 'isbn'), '9782070360024');
+      debugDefaultTargetPlatformOverride = null;
+    },
+  );
+
+  testWidgets('code invalide refusé et scanner réactivé au retour à l’ISBN', (
+    tester,
+  ) async {
+    debugDefaultTargetPlatformOverride = TargetPlatform.android;
+    addTearDown(() => debugDefaultTargetPlatformOverride = null);
+    final lookup = _Lookup(() async => [_notice]);
+    await _open(tester, lookup);
+    scan(tester, '1234567890123');
+    await tester.pumpAndSettle();
+    expect(lookup.calls, 0);
+    expect(find.text('Le code lu n’est pas un ISBN valide.'), findsOneWidget);
+    expect(scannerCalls, ['open']);
+    scan(tester, '2070360024');
+    await tester.pumpAndSettle();
+    expect(lookup.calls, 1);
+    expect(_value(tester, 'isbn'), '9782070360024');
+    await tester.tap(find.text('Retour à l’ISBN'));
+    await tester.pumpAndSettle();
+    expect(scannerCalls, ['open', 'close', 'open']);
+    scan(tester, '9782070360024');
+    await tester.pumpAndSettle();
+    expect(lookup.calls, 2);
+    expect(scannerCalls, ['open', 'close', 'open', 'close']);
+    debugDefaultTargetPlatformOverride = null;
+  });
+
+  testWidgets('quitter l’étape 1 libère le scanner optique', (tester) async {
+    debugDefaultTargetPlatformOverride = TargetPlatform.android;
+    addTearDown(() => debugDefaultTargetPlatformOverride = null);
+    await _open(tester, _Lookup(() async => []));
+    expect(scannerCalls, ['open']);
+    await tester.pageBack();
+    await tester.pumpAndSettle();
+    expect(scannerCalls, ['open', 'close']);
+    debugDefaultTargetPlatformOverride = null;
+  });
+
+  testWidgets('scanner indisponible : recherche au clavier toujours possible', (
+    tester,
+  ) async {
+    debugDefaultTargetPlatformOverride = TargetPlatform.android;
+    addTearDown(() => debugDefaultTargetPlatformOverride = null);
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+        .setMockMethodCallHandler(scannerMethods, (call) async {
+          scannerCalls.add(call.method);
+          if (call.method == 'open') {
+            throw PlatformException(
+              code: 'BARCODE_SCANNER',
+              message: 'Scanner indisponible.',
+            );
+          }
+          return null;
+        });
+    final lookup = _Lookup(() async => [_notice]);
+    await _open(tester, lookup);
+    expect(find.text('Scanner indisponible.'), findsOneWidget);
+    await _search(tester);
+    expect(lookup.calls, 1);
+    expect(_value(tester, 'title'), 'L’Étranger');
+    debugDefaultTargetPlatformOverride = null;
+  });
+
   testWidgets(
     'ISBN trouvé : notice pré-remplie, source fixe et cote modifiable',
     (tester) async {
@@ -357,15 +479,17 @@ void main() {
     },
   );
 
-  testWidgets('caméra visible uniquement sur Android', (tester) async {
+  testWidgets('scanner matériel visible uniquement sur Android', (
+    tester,
+  ) async {
     debugDefaultTargetPlatformOverride = TargetPlatform.windows;
     addTearDown(() => debugDefaultTargetPlatformOverride = null);
     await _open(tester, _Lookup(() async => []));
-    expect(find.text('Scanner avec la caméra'), findsNothing);
+    expect(find.text('Scanner avec le lecteur'), findsNothing);
     debugDefaultTargetPlatformOverride = TargetPlatform.android;
     await tester.pumpWidget(const SizedBox());
     await _open(tester, _Lookup(() async => []));
-    expect(find.text('Scanner avec la caméra'), findsOneWidget);
+    expect(find.text('Scanner avec le lecteur'), findsOneWidget);
     debugDefaultTargetPlatformOverride = null;
   });
 }

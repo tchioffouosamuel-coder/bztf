@@ -61,6 +61,7 @@ class LibraryController extends ChangeNotifier {
   bool _nativeRfidKeyHeld = false;
   bool _startingNativeRead = false;
   bool _capturingCard = false;
+  bool _barcodeScannerActive = false;
 
   /// Plusieurs tags remontent chacun plusieurs fois par seconde : l'écran
   /// n'est rafraîchi qu'une fois par intervalle, pas à chaque lecture.
@@ -426,6 +427,7 @@ class LibraryController extends ChangeNotifier {
   }
 
   void _handleNativeRfidKey(String action) {
+    if (_barcodeScannerActive) return;
     // Pendant la lecture d'une carte d'abonné ou sur le poste d'emprunt, la
     // gâchette ne change pas d'écran.
     if (_capturingCard || kioskActive) return;
@@ -481,6 +483,13 @@ class LibraryController extends ChangeNotifier {
     final settings = await SharedPreferences.getInstance();
     await settings.setBool('dark_theme', darkTheme);
     notifyListeners();
+  }
+
+  void setBarcodeScannerActive(bool active) {
+    _barcodeScannerActive = active;
+    if (active) {
+      _nativeRfidKeyHeld = false;
+    }
   }
 
   Future<void> connectReader({

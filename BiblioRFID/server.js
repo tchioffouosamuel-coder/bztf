@@ -17,6 +17,8 @@ import {
 } from "./lib/reader-timing.js";
 import { parseCatalogWorkbook } from "./lib/xlsx-import.js";
 import { isBadgeEpc, isCardEpc, isValidEpc } from "./lib/epc.js";
+import { CataloguingService } from "./lib/cataloguing/service.js";
+import { handleCataloguingRequest } from "./lib/cataloguing/routes.js";
 
 const execFileAsync = promisify(execFile);
 const root = path.dirname(fileURLToPath(import.meta.url));
@@ -36,6 +38,9 @@ const dataRoot = process.env.BIBLIORFID_DATA_DIR
 const db = new LibraryDatabase(path.join(dataRoot, "library.db"));
 const syncService = new SyncService(db);
 syncService.initialize();
+const cataloguingService = new CataloguingService(db, { dataRoot });
+// Photos abandonnées lors d'un catalogage interrompu : elles ne servent plus.
+cataloguingService.purgeStaleCaptures(48);
 const marker = "__RFID_JSON__";
 const EMPTY_EPC = "000000000000000000000000";
 let simulatedTag = {
@@ -669,6 +674,18 @@ async function api(request, response, url) {
   request.authUser = user;
   if (request.method === "GET" && pathname === "/api/auth/me")
     return json(response, 200, { authenticated: true, user });
+
+  if (pathname.startsWith("/api/cataloguing"))
+    return handleCataloguingRequest({
+      request,
+      response,
+      url,
+      db,
+      service: cataloguingService,
+      json,
+      readBody,
+      user,
+    });
 
   if (request.method === "GET" && pathname === "/api/dashboard")
     return json(response, 200, db.dashboard());
@@ -1509,6 +1526,9 @@ async function shutdown() {
   for (const client of eventClients) client.end();
   eventClients.clear();
   syncService.close();
+  try {
+    await cataloguingService.close();
+  } catch {}
   try {
     await reader.shutdown();
   } catch {}

@@ -76,6 +76,95 @@ La station garde une seule connexion ouverte avec le lecteur et reçoit les tags
 
 Le mode **Suspendre** ferme seulement le flux d'affichage de la page. Le service RFID local reste prêt, sauf lorsque l'application est arrêtée ou que le type de connexion change.
 
+## Catalogage assisté (OCR, notices, IA)
+
+L'onglet **Catalogage** remplace la saisie manuelle d'une fiche par une chaîne
+photo → OCR → recherche de notice → vérification → encodage du tag.
+
+### Un livre à la fois
+
+1. Photographier la première de couverture, puis la quatrième (et la page de
+   titre si besoin) : webcam, import de fichiers ou glisser-déposer. Chaque
+   photo est réduite dans le navigateur avant envoi (1600 px pour l'OCR,
+   320 px pour la vignette).
+2. L'OCR s'exécute automatiquement sur chaque photo et affiche son taux de
+   confiance.
+3. **Identifier ce livre** cherche l'ISBN dans le texte reconnu — clé de
+   contrôle vérifiée — puis interroge, dans l'ordre, la BnF (SRU, UNIMARC), le
+   SUDOC, Open Library et Google Books. Sans ISBN lisible, la recherche se fait
+   par titre et auteur. Un ISBN déjà présent au catalogue est signalé avant
+   toute création.
+4. La fiche proposée reste modifiable, et une autre notice candidate peut être
+   choisie : la cote, la catégorie et les notes saisies par le catalogueur sont
+   conservées.
+5. **Enregistrer puis encoder le tag** crée la fiche, bascule sur la station et
+   écrit le tag dès qu'un seul tag est posé sur le lecteur. L'écriture reste
+   celle de la station : ciblage du TID et contrôle par relecture.
+
+Les photos sont conservées dans `<données>/covers` et affichées dans la fiche du
+livre. Les photos d'un catalogage abandonné sont purgées après 48 heures.
+
+### En lot
+
+Un lot regroupe plusieurs livres photographiés à la chaîne : on ajoute un livre,
+on le sélectionne, on le photographie, puis on passe au suivant. **Analyser le
+lot** déroule l'OCR, la recherche et l'IA pour chaque livre, livre après livre.
+
+**Aucun tag n'est écrit en lot** : l'écriture suppose un tag unique posé sur le
+lecteur, ce qui ne peut se vérifier que livre par livre. Les fiches rejoignent
+donc le catalogue en **brouillon « à encoder »**, repérées dans la liste du
+catalogue, et sont encodées ensuite à la station.
+
+### Moteur OCR
+
+Dans **Paramètres > Reconnaissance de texte** :
+
+- **Tesseract** (par défaut) : moteur WebAssembly embarqué, données de langue
+  dans `vendor/tessdata`. Fonctionne sans Internet et sans installation.
+- **Google Vision** : plus précis sur les couvertures stylisées ; nécessite une
+  clé API et envoie les photos à Google.
+
+Les langues reconnues se règlent par codes ISO 639-2 séparés par `+`
+(`fra+eng` par défaut). Une seule reconnaissance s'exécute à la fois pour que la
+station RFID reste réactive pendant un catalogage en lot.
+
+### Assistance IA
+
+Désactivée par défaut. Une fois activée dans **Paramètres > Assistance IA**
+(fournisseur Claude, DeepSeek ou ChatGPT, modèle et clé), cinq rôles s'activent
+séparément :
+
+| Rôle | Ce qu'il fait |
+| --- | --- |
+| Structuration OCR | transforme le texte reconnu en champs bibliographiques |
+| Arbitrage | choisit la notice correspondant à l'exemplaire en main |
+| Complétion | propose catégorie, cote, indice Dewey et vedettes matière |
+| Contrôle qualité | signale les incohérences avant enregistrement |
+| Lecture des photos | lit les images quand l'OCR ne rend rien (Claude ou ChatGPT) |
+
+Rien n'est envoyé tant qu'un rôle n'est pas coché : le texte OCR part pour les
+quatre premiers rôles, les photos uniquement pour le dernier. L'IA ne décide
+jamais seule — elle remplit des champs vides et justifie ses choix, la
+validation reste celle du catalogueur. Une panne ou un quota dépassé n'arrête
+pas le catalogage : le rôle concerné est signalé et la chaîne continue.
+
+Les préfixes de cote par genre, utilisés par le rôle de complétion, se règlent
+dans le même écran (`Roman=R`, une ligne par genre).
+
+### Clés et données
+
+Les clés API Google Vision et IA sont stockées dans la base locale et ne sont
+jamais renvoyées au navigateur ni à la synchronisation distante : l'interface
+n'affiche que leur présence. Les champs bibliographiques ajoutés (sous-titre,
+collection, langue, résumé, vedettes matière, Dewey, édition, pagination,
+source de la notice) restent locaux au poste ; le contrat de synchronisation
+avec l'application mobile est inchangé.
+
+### À venir
+
+Le dépôt des photos depuis l'application mobile, puis le pilotage d'un scanner
+à plat (TWAIN/WIA), sont prévus après cette première étape.
+
 ## Import du catalogue XLSX
 
 Dans **Catalogue**, choisir **Importer XLSX**, puis sélectionner le classeur. L'import accepte le format fourni avec les colonnes `BATIMENT`, `SALLE`, `SECTION`, `ETAGERE`, `NUMERO DE BLOC`, `CATEGORIE`, `TITRE`, `AUTEURS`, `SOUS_CATEGORIE`, `DATE_PUBLICATION`, `EDITEUR`, `PAGES`, `ISBN`, `IMAGE`, `TYPE DE DOC`, `LANGUE`, `RESUME` et `RFID`.

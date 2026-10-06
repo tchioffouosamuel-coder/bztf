@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:io';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:path/path.dart' as path;
 import 'package:shared_preferences/shared_preferences.dart';
@@ -107,6 +108,13 @@ void main() {
   late Directory directory;
   late _Reader reader;
   late LibraryController controller;
+  const scannerMethods = MethodChannel(
+    'com.bibliorfid.myscankey_flutter/barcode',
+  );
+  const scannerEvents = MethodChannel(
+    'com.bibliorfid.myscankey_flutter/barcode-events',
+  );
+  final scannerCalls = <String>[];
   setUpAll(() async {
     sqfliteFfiInit();
     databaseFactory = databaseFactoryFfi;
@@ -114,6 +122,14 @@ void main() {
     await databaseFactory.setDatabasesPath(directory.path);
   });
   setUp(() async {
+    scannerCalls.clear();
+    final messenger =
+        TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;
+    messenger.setMockMethodCallHandler(scannerMethods, (call) async {
+      scannerCalls.add(call.method);
+      return null;
+    });
+    messenger.setMockMethodCallHandler(scannerEvents, (_) async => null);
     SharedPreferences.setMockInitialValues({});
     await database.close();
     await databaseFactory.deleteDatabase(
@@ -127,6 +143,10 @@ void main() {
   tearDown(() async {
     controller.dispose();
     await database.close();
+    final messenger =
+        TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;
+    messenger.setMockMethodCallHandler(scannerMethods, null);
+    messenger.setMockMethodCallHandler(scannerEvents, null);
   });
   tearDownAll(() async {
     await directory.delete(recursive: true);
@@ -174,6 +194,7 @@ void main() {
       await tester.tap(_next);
       await _finishSave(tester);
       expect(find.byKey(const ValueKey('isbn_input')), findsOneWidget);
+      expect(scannerCalls, ['open', 'close', 'open']);
       final books = (await tester.runAsync(() => database.listBooks()))!;
       expect(books, hasLength(1));
       expect(books.single.status, 'encode');

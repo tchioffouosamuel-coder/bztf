@@ -56,10 +56,14 @@ class MainActivity : FlutterActivity() {
 	private var gate: GateBridge? = null
 	private var heading: HeadingBridge? = null
 	private var logs: LogBridge? = null
+	private var barcodeScanner: BarcodeScannerBridge? = null
 
 	override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
 		super.configureFlutterEngine(flutterEngine)
 		initializeScanSound()
+		barcodeScanner = BarcodeScannerBridge(
+			flutterEngine.dartExecutor.binaryMessenger, applicationContext, mainHandler,
+		)
 		// Lecteur de bureau du poste d'emprunt : son SDK (reader.jar) ne doit
 		// jamais empêcher l'application de démarrer, notamment sur un terminal
 		// Seuic dont les bibliothèques système partagent des classes avec lui.
@@ -174,6 +178,11 @@ class MainActivity : FlutterActivity() {
 			RFID_HANDLE_KEY_CODE,
 			onKeyDown = down@{ keyCode ->
 				if (keyCode != RFID_HANDLE_KEY_CODE) return@down
+				if (barcodeScanner?.active == true) {
+					rfidKeyHeld.set(false)
+					barcodeScanner?.trigger(true)
+					return@down
+				}
 				val now = SystemClock.elapsedRealtime()
 				if (!rfidKeyHeld.compareAndSet(false, true)) return@down
 				if (now - lastRfidKeyPressAt.get() < RFID_KEY_DEBOUNCE_MS) {
@@ -187,6 +196,11 @@ class MainActivity : FlutterActivity() {
 			},
 			onKeyUp = up@{ keyCode ->
 				if (keyCode != RFID_HANDLE_KEY_CODE) return@up
+				if (barcodeScanner?.active == true) {
+					rfidKeyHeld.set(false)
+					barcodeScanner?.trigger(false)
+					return@up
+				}
 				if (!rfidKeyHeld.compareAndSet(true, false)) return@up
 				mainHandler.post {
 					keyEventSink?.success(mapOf("action" to "up", "scanCode" to keyCode))
@@ -212,10 +226,12 @@ class MainActivity : FlutterActivity() {
 	override fun onResume() {
 		super.onResume()
 		registerRfidKey()
+		barcodeScanner?.resume()
 	}
 
 	override fun onPause() {
 		unregisterRfidKey()
+		barcodeScanner?.pause()
 		super.onPause()
 	}
 
@@ -592,6 +608,8 @@ class MainActivity : FlutterActivity() {
 
 	override fun onDestroy() {
 		unregisterRfidKey()
+		barcodeScanner?.dispose()
+		barcodeScanner = null
 		closeReader()
 		runCatching { deskReader?.dispose() }
 		deskReader = null

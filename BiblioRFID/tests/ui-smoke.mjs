@@ -1,8 +1,48 @@
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
+import zlib from "node:zlib";
 import { fileURLToPath } from "node:url";
 import { chromium } from "playwright-core";
+
+const crcTable = Array.from({ length: 256 }, (_, index) => {
+  let value = index;
+  for (let bit = 0; bit < 8; bit += 1)
+    value = value & 1 ? 0xedb88320 ^ (value >>> 1) : value >>> 1;
+  return value >>> 0;
+});
+
+function crc32(buffer) {
+  let crc = 0xffffffff;
+  for (const byte of buffer) crc = crcTable[(crc ^ byte) & 0xff] ^ (crc >>> 8);
+  return (crc ^ 0xffffffff) >>> 0;
+}
+
+/** PNG blanc valide, pour éprouver la capture sans dépendance d'image. */
+function buildPng(width, height) {
+  const stride = width * 3 + 1;
+  const raw = Buffer.alloc(stride * height, 0xff);
+  for (let y = 0; y < height; y += 1) raw[y * stride] = 0;
+  const chunk = (type, data) => {
+    const length = Buffer.alloc(4);
+    length.writeUInt32BE(data.length);
+    const body = Buffer.concat([Buffer.from(type, "ascii"), data]);
+    const crc = Buffer.alloc(4);
+    crc.writeUInt32BE(crc32(body));
+    return Buffer.concat([length, body, crc]);
+  };
+  const header = Buffer.alloc(13);
+  header.writeUInt32BE(width, 0);
+  header.writeUInt32BE(height, 4);
+  header[8] = 8;
+  header[9] = 2;
+  return Buffer.concat([
+    Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+    chunk("IHDR", header),
+    chunk("IDAT", zlib.deflateSync(raw)),
+    chunk("IEND", Buffer.alloc(0)),
+  ]);
+}
 
 const root = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 const edge = "C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe";
@@ -100,6 +140,225 @@ try {
     buffer: Buffer.from("test-xlsx-interface")
   });
   await desktop.waitForSelector('.toast:has-text("12 importé(s)")');
+
+  // --- Catalogage assisté : capture, notices, puis lot ---
+  const notices = [
+    {
+      title: "Le vieil homme et la mer",
+      subtitle: "",
+      authors: [{ name: "Hemingway Ernest", role: "auteur" }],
+      publisher: "Gallimard",
+      publicationDate: "1972",
+      collection: "Folio",
+      collectionNumber: "7",
+      subjects: ["Pêche -- Cuba"],
+      classification: "813.52",
+      summary: "Un pêcheur cubain affronte un espadon.",
+      sourceNotice: "BnF",
+      sourceIdentifier: "FRBNF123",
+      isbn: "9782070408504",
+    },
+    {
+      title: "Le vieil homme et la mer",
+      subtitle: "",
+      authors: [{ name: "Hemingway Ernest", role: "auteur" }],
+      publisher: "Gallimard Jeunesse",
+      publicationDate: "2003",
+      collection: "",
+      collectionNumber: "",
+      subjects: [],
+      classification: "",
+      summary: "",
+      sourceNotice: "Google Books",
+      sourceIdentifier: "gb-1",
+      isbn: "9782070408504",
+    },
+  ];
+  await desktop.route("**/api/cataloguing/identify", (route) =>
+    route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        alreadyCatalogued: false,
+        books: [],
+        notices,
+        selected: 0,
+        isbn: "9782070408504",
+        searchError: "",
+        unavailableSources: ["SUDOC"],
+        hints: {},
+        fields: {
+          title: "Le vieil homme et la mer",
+          author: "Hemingway Ernest",
+          isbn: "9782070408504",
+          publisher: "Gallimard",
+          publication_year: "1972",
+          dewey: "813.52",
+          source_notice: "BnF",
+          source_identifier: "FRBNF123",
+        },
+        ai: {
+          used: ["arbitrate", "quality"],
+          warnings: [
+            {
+              role: "structure",
+              message: "Le rôle « structure » de l’IA a échoué : quota dépassé.",
+            },
+          ],
+          arbitrate: { index: 0, confidence: 91, reason: "Édition Folio de 1972." },
+          quality: {
+            issues: [
+              {
+                field: "shelf",
+                severity: "avertissement",
+                message: "La cote n’est pas renseignée.",
+              },
+            ],
+          },
+        },
+      }),
+    }),
+  );
+  // Les enregistrements sont simulés : l'interface est éprouvée sans rien
+  // écrire dans le catalogue du poste.
+  await desktop.route("**/api/cataloguing/commit", (route) =>
+    route.fulfill({
+      status: 201,
+      contentType: "application/json",
+      body: JSON.stringify({
+        book: {
+          id: 950,
+          accession: "BCM-2026-000950",
+          title: "Le vieil homme et la mer",
+          epc: "",
+          status: "a_encoder",
+        },
+        covers: [],
+      }),
+    }),
+  );
+
+  await desktop.click('[data-view="cataloguing"]');
+  await desktop.waitForSelector("#view-cataloguing.active");
+  assert.equal(await desktop.locator("#catalog-pane-single").isVisible(), true);
+  assert.equal(
+    await desktop.locator("#capture-shoot").isDisabled(),
+    true,
+    "Pas de prise de vue sans webcam active.",
+  );
+  await desktop.locator("#capture-file-input").setInputFiles({
+    name: "couverture.png",
+    mimeType: "image/png",
+    buffer: buildPng(260, 90),
+  });
+  await desktop.waitForSelector(".capture-thumb");
+  assert.equal(await desktop.locator(".capture-thumb").count(), 1);
+  await desktop.waitForFunction(
+    () =>
+      !/OCR en cours/.test(
+        document.querySelector(".capture-thumb figcaption small")?.textContent || "",
+      ),
+    null,
+    { timeout: 120000 },
+  );
+
+  await desktop.fill("#catalog-isbn", "9782070408504");
+  await desktop.click("#catalog-identify");
+  await desktop.waitForSelector(".catalog-candidate");
+  assert.equal(await desktop.locator(".catalog-candidate").count(), 2);
+  assert.equal(await desktop.locator(".catalog-candidate.selected").count(), 1);
+  const aiNotes = await desktop.locator("#catalog-ai-notes").innerText();
+  assert.match(aiNotes, /Édition Folio de 1972/, "La justification de l'IA doit être affichée.");
+  assert.match(aiNotes, /quota dépassé/, "Un rôle d'IA en échec doit être signalé.");
+  assert.match(aiNotes, /cote n’est pas renseignée/, "Le contrôle qualité doit être affiché.");
+  assert.match(await desktop.locator("#catalog-search-hint").innerText(), /SUDOC/);
+  assert.equal(
+    await desktop.locator('#catalog-form [name="title"]').inputValue(),
+    "Le vieil homme et la mer",
+  );
+  assert.equal(await desktop.locator('#catalog-form [name="dewey"]').inputValue(), "813.52");
+  await desktop.screenshot({
+    path: path.join(output, "cataloguing-single.png"),
+    fullPage: true,
+  });
+
+  await desktop.locator('#catalog-form [name="shelf"]').fill("R HEM");
+  await desktop.locator(".catalog-candidate").nth(1).click();
+  assert.equal(
+    await desktop.locator('#catalog-form [name="publisher"]').inputValue(),
+    "Gallimard Jeunesse",
+    "Changer de notice doit changer la description bibliographique.",
+  );
+  assert.equal(
+    await desktop.locator('#catalog-form [name="shelf"]').inputValue(),
+    "R HEM",
+    "La cote saisie par le catalogueur est conservée.",
+  );
+  await desktop.click("#catalog-save");
+  await desktop.waitForSelector('.toast:has-text("BCM-2026-000950")');
+  assert.equal(
+    await desktop.locator(".capture-thumb").count(),
+    0,
+    "L'atelier est vidé après enregistrement.",
+  );
+
+  await desktop.locator('#cataloguing-mode button[data-mode="batch"]').click();
+  await desktop.waitForSelector("#catalog-pane-batch:not(.hidden)");
+  await desktop.fill("#batch-label", "Carton interface");
+  await desktop.click("#batch-new");
+  await desktop.waitForSelector('.toast:has-text("Lot créé")');
+  await desktop.click("#batch-add-item");
+  await desktop.waitForSelector(".batch-card");
+  assert.match(await desktop.locator("#capture-target-hint").innerText(), /livre 1 du lot/);
+  await desktop.locator('.batch-card [data-field="title"]').fill("Livre du lot");
+  await desktop.locator('.batch-card [data-field="author"]').focus();
+  await desktop.waitForSelector(".batch-badge.ready");
+  await desktop.locator("#capture-file-input").setInputFiles({
+    name: "lot-couverture.png",
+    mimeType: "image/png",
+    buffer: buildPng(200, 70),
+  });
+  await desktop.waitForSelector(".batch-photos img", { timeout: 120000 });
+  await desktop.screenshot({
+    path: path.join(output, "cataloguing-batch.png"),
+    fullPage: true,
+  });
+
+  const batchSession = await desktop.evaluate(async () => {
+    const list = await (await fetch("/api/cataloguing/sessions")).json();
+    const id = list.sessions[0].id;
+    return (await (await fetch(`/api/cataloguing/sessions/${id}`)).json()).session;
+  });
+  assert.equal(batchSession.items.length, 1);
+  assert.equal(batchSession.items[0].captures.length, 1, "La photo est rattachée au livre du lot.");
+  await desktop.route("**/api/cataloguing/sessions/*/commit", (route) =>
+    route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        session: {
+          ...batchSession,
+          items: batchSession.items.map((item) => ({ ...item, status: "enregistre" })),
+        },
+        saved: batchSession.items.map((item) => ({
+          id: item.id,
+          bookId: 951,
+          accession: "BCM-2026-000951",
+          title: item.fields.title,
+        })),
+        skipped: [],
+      }),
+    }),
+  );
+  await desktop.click("#batch-commit");
+  await desktop.click(".swal2-confirm");
+  await desktop.waitForSelector('.toast:has-text("brouillon")');
+  await desktop.waitForSelector(".batch-badge.saved");
+  // Le lot d'essai et ses photos ne restent pas sur le poste.
+  await desktop.evaluate(
+    (id) => fetch(`/api/cataloguing/sessions/${id}`, { method: "DELETE" }),
+    batchSession.id,
+  );
 
   await desktop.click('[data-view="settings"]');
   await desktop.waitForSelector("#view-settings.active");

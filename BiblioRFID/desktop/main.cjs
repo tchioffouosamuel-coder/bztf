@@ -129,6 +129,27 @@ async function startServer() {
   throw new Error("Le service local Bibliotèque ZTF ne répond pas.");
 }
 
+/**
+ * La webcam du catalogage est la seule permission accordée, et seulement à
+ * l'interface locale servie par le serveur intégré.
+ */
+function restrictPermissions(windowSession) {
+  const allowed = new Set(["media"]);
+  const fromLocalApp = (url) => {
+    try {
+      return new URL(url).origin === new URL(serverUrl).origin;
+    } catch {
+      return false;
+    }
+  };
+  windowSession.setPermissionRequestHandler((contents, permission, callback) =>
+    callback(allowed.has(permission) && fromLocalApp(contents.getURL())),
+  );
+  windowSession.setPermissionCheckHandler((contents, permission, origin) =>
+    allowed.has(permission) && fromLocalApp(origin || contents?.getURL() || ""),
+  );
+}
+
 function createWindow() {
   mainWindow = new BrowserWindow({
     title: "Bibliotèque ZTF",
@@ -150,6 +171,8 @@ function createWindow() {
       sandbox: true,
     },
   });
+
+  restrictPermissions(mainWindow.webContents.session);
 
   mainWindow.webContents.setWindowOpenHandler(({ url }) => {
     if (url.startsWith(serverUrl)) return { action: "allow" };

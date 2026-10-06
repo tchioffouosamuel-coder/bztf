@@ -9,9 +9,13 @@ import BookDashed from "/vendor/lucide/icons/book-dashed.js";
 import BookOpen from "/vendor/lucide/icons/book-open.js";
 import BookPlus from "/vendor/lucide/icons/book-plus.js";
 import Cable from "/vendor/lucide/icons/cable.js";
+import Camera from "/vendor/lucide/icons/camera.js";
 import CalendarPlus from "/vendor/lucide/icons/calendar-plus.js";
 import CircleAlert from "/vendor/lucide/icons/circle-alert.js";
 import CircleCheck from "/vendor/lucide/icons/circle-check.js";
+import CircleX from "/vendor/lucide/icons/circle-x.js";
+import Cloud from "/vendor/lucide/icons/cloud.js";
+import Cpu from "/vendor/lucide/icons/cpu.js";
 import Clock3 from "/vendor/lucide/icons/clock-3.js";
 import Download from "/vendor/lucide/icons/download.js";
 import FlaskConical from "/vendor/lucide/icons/flask-conical.js";
@@ -19,8 +23,10 @@ import HandHelping from "/vendor/lucide/icons/hand-helping.js";
 import HistoryIcon from "/vendor/lucide/icons/history.js";
 import DoorOpen from "/vendor/lucide/icons/door-open.js";
 import IdCard from "/vendor/lucide/icons/id-card.js";
+import ImagePlus from "/vendor/lucide/icons/image-plus.js";
 import IdCardLanyard from "/vendor/lucide/icons/id-card-lanyard.js";
 import Inbox from "/vendor/lucide/icons/inbox.js";
+import Layers from "/vendor/lucide/icons/layers.js";
 import LayoutDashboard from "/vendor/lucide/icons/layout-dashboard.js";
 import Library from "/vendor/lucide/icons/library.js";
 import LibraryBig from "/vendor/lucide/icons/library-big.js";
@@ -38,9 +44,11 @@ import RadioTower from "/vendor/lucide/icons/radio-tower.js";
 import RefreshCw from "/vendor/lucide/icons/refresh-cw.js";
 import Save from "/vendor/lucide/icons/save.js";
 import ScanLine from "/vendor/lucide/icons/scan-line.js";
+import ScanText from "/vendor/lucide/icons/scan-text.js";
 import Search from "/vendor/lucide/icons/search.js";
 import Settings2 from "/vendor/lucide/icons/settings-2.js";
 import ShieldCheck from "/vendor/lucide/icons/shield-check.js";
+import Sparkles from "/vendor/lucide/icons/sparkles.js";
 import Siren from "/vendor/lucide/icons/siren.js";
 import Sun from "/vendor/lucide/icons/sun.js";
 import Trash2 from "/vendor/lucide/icons/trash-2.js";
@@ -54,6 +62,7 @@ import UserRound from "/vendor/lucide/icons/user-round.js";
 import Users from "/vendor/lucide/icons/users.js";
 import UsersRound from "/vendor/lucide/icons/users-round.js";
 import X from "/vendor/lucide/icons/x.js";
+import { initCataloguing } from "/cataloguing.js";
 
 const lucideIcons = {
   activity: Activity,
@@ -67,8 +76,12 @@ const lucideIcons = {
   "book-plus": BookPlus,
   cable: Cable,
   "calendar-plus": CalendarPlus,
+  camera: Camera,
   "circle-alert": CircleAlert,
   "circle-check": CircleCheck,
+  "circle-x": CircleX,
+  cloud: Cloud,
+  cpu: Cpu,
   "clock-3": Clock3,
   "door-open": DoorOpen,
   download: Download,
@@ -77,7 +90,9 @@ const lucideIcons = {
   history: HistoryIcon,
   "id-card": IdCard,
   "id-card-lanyard": IdCardLanyard,
+  "image-plus": ImagePlus,
   inbox: Inbox,
+  layers: Layers,
   "layout-dashboard": LayoutDashboard,
   library: Library,
   "library-big": LibraryBig,
@@ -95,10 +110,12 @@ const lucideIcons = {
   "refresh-cw": RefreshCw,
   save: Save,
   "scan-line": ScanLine,
+  "scan-text": ScanText,
   search: Search,
   "settings-2": Settings2,
   "shield-check": ShieldCheck,
   siren: Siren,
+  sparkles: Sparkles,
   sun: Sun,
   "trash-2": Trash2,
   "triangle-alert": TriangleAlert,
@@ -112,6 +129,8 @@ const lucideIcons = {
   "users-round": UsersRound,
   x: X,
 };
+
+let cataloguing = null;
 
 const $ = (selector, root = document) => root.querySelector(selector);
 const $$ = (selector, root = document) => [...root.querySelectorAll(selector)];
@@ -173,6 +192,7 @@ const state = {
 const viewMeta = {
   dashboard: ["Vue d’ensemble", "Tableau de bord"],
   catalogue: ["Gestion du fonds", "Catalogue"],
+  cataloguing: ["Gestion du fonds", "Catalogage assisté"],
   subscribers: ["Lecteurs inscrits", "Abonnés"],
   subscriptions: ["Lecteurs inscrits", "Abonnements"],
   loans: ["Circulation", "Emprunts"],
@@ -366,6 +386,8 @@ function setView(name) {
   if (!viewMeta[name]) return;
   if (state.activeView === "station" && name !== "station")
     stopAutoReading(false);
+  if (state.activeView === "cataloguing" && name !== "cataloguing")
+    cataloguing?.deactivate();
   state.activeView = name;
   $$(".view").forEach((view) =>
     view.classList.toggle("active", view.id === `view-${name}`),
@@ -386,7 +408,11 @@ function setView(name) {
   if (name === "gate") loadGate();
   if (name === "station") startAutoReading();
   if (name === "history") loadHistory();
-  if (name === "settings") loadSyncStatus(false);
+  if (name === "cataloguing") cataloguing?.activate();
+  if (name === "settings") {
+    loadSyncStatus(false);
+    cataloguing?.loadSettingsForm();
+  }
 }
 
 function emptyBlock(text) {
@@ -436,7 +462,7 @@ function bookTableRows(books) {
     <td><div class="table-book"><span class="book-glyph"><i data-lucide="book-open"></i></span><div><strong>${escapeHtml(book.title)}</strong><small>${escapeHtml(book.author || "Auteur non renseigné")}</small></div></div></td>
     <td><div class="mono">${escapeHtml(book.accession)}</div><div class="cell-subtle">${escapeHtml(book.isbn || "Sans ISBN")}</div></td>
     <td>${escapeHtml(book.shelf || "—")}<div class="cell-subtle">${escapeHtml(book.category || "Non classé")}</div></td>
-    <td><span class="status-badge ${book.status}">${statusLabel(book.status)}</span></td>
+    <td><span class="status-badge ${book.status}">${statusLabel(book.status)}</span>${book.catalog_draft ? `<div class="cell-subtle">Brouillon de catalogage</div>` : ""}</td>
     <td><div class="table-actions">
       <button class="icon-button" data-action="encode" data-id="${book.id}" title="Ouvrir dans la station" aria-label="Ouvrir dans la station"><i data-lucide="radio-tower"></i></button>
       ${book.status === "encode" ? `<button class="icon-button" data-action="unencode" data-id="${book.id}" title="Désencoder le tag" aria-label="Désencoder le tag"><i data-lucide="badge-minus"></i></button>` : ""}
@@ -709,12 +735,27 @@ async function handleTableAction(event) {
 
 const DETAIL_FIELDS = [
   { name: "title", label: "Titre", maxlength: 240, wide: true },
+  { name: "subtitle", label: "Sous-titre", maxlength: 240, wide: true },
   { name: "author", label: "Auteur", maxlength: 240 },
   { name: "isbn", label: "ISBN", maxlength: 32 },
   { name: "publisher", label: "Éditeur", maxlength: 240 },
   { name: "publication_year", label: "Année de publication", maxlength: 4 },
+  { name: "collection", label: "Collection", maxlength: 240 },
+  { name: "collection_number", label: "N° de collection", maxlength: 60 },
+  { name: "edition", label: "Édition", maxlength: 120 },
+  { name: "page_count", label: "Pages", maxlength: 60 },
+  { name: "language", label: "Langue", maxlength: 60 },
+  { name: "dewey", label: "Indice Dewey", maxlength: 60 },
   { name: "category", label: "Catégorie", maxlength: 120 },
   { name: "shelf", label: "Rayon / cote", maxlength: 120 },
+  { name: "subjects", label: "Vedettes matière", maxlength: 1000, wide: true },
+  {
+    name: "summary",
+    label: "Résumé",
+    maxlength: 4000,
+    wide: true,
+    multiline: true,
+  },
   {
     name: "notes",
     label: "Notes",
@@ -730,6 +771,7 @@ async function openBookDetails(id) {
     state.detailBook = details.book;
     state.detailLoan = details.activeLoan;
     renderBookDetails();
+    cataloguing?.renderCovers(details.book.id);
     const dialog = $("#book-detail-dialog");
     if (!dialog.open) dialog.showModal();
   } catch (error) {
@@ -2885,7 +2927,45 @@ async function handleScanResult(result) {
   if (shouldRender) await renderVisualTags(true);
 }
 
+/**
+ * Enchaîne le catalogage et l'encodage : la station attend qu'un seul tag soit
+ * posé, puis écrit la fiche qui vient d'être créée.
+ */
+async function encodeTagForBook(book) {
+  setView("station");
+  selectBook(book);
+  setWriteStatus(
+    "En attente du tag",
+    `Posez « ${book.title} » seul sur le lecteur pour l'encoder.`,
+  );
+  const deadline = Date.now() + 25000;
+  while (Date.now() < deadline) {
+    if (state.activeView !== "station") return;
+    if (state.visualTags.size === 1) {
+      await writeBookToTag(book);
+      return;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 300));
+  }
+  setWriteStatus(
+    "Encodage à reprendre",
+    `${book.accession} est au catalogue : encodez-le depuis la station dès que le tag est posé.`,
+  );
+}
+
 function bindEvents() {
+  cataloguing = initCataloguing({
+    $,
+    $$,
+    api,
+    toast,
+    icons,
+    escapeHtml,
+    confirmAction,
+    encodeTagForBook,
+    afterBookSaved: () => Promise.all([loadDashboard(), loadBooks()]),
+    goToView: setView,
+  });
   $("#auth-form").addEventListener("submit", submitAuth);
   $("#logout-button").addEventListener("click", logout);
   $$(".nav-item").forEach((button) =>

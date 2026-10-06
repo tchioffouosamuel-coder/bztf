@@ -87,6 +87,9 @@
           <button class="nav-item" data-view="catalogue">
             <i data-lucide="library"></i><span>Catalogue</span>
           </button>
+          <button class="nav-item" data-view="cataloguing">
+            <i data-lucide="scan-text"></i><span>Catalogage</span>
+          </button>
           <button class="nav-item" data-view="subscribers">
             <i data-lucide="users"></i><span>Abonnés</span>
           </button>
@@ -330,6 +333,199 @@
                 >
                   <i data-lucide="refresh-cw"></i><span>Charger plus</span>
                 </button>
+              </div>
+            </div>
+          </section>
+
+          <section class="view" id="view-cataloguing">
+            <div class="section-heading">
+              <div>
+                <h2>Catalogage assisté</h2>
+                <p id="cataloguing-subtitle">
+                  Photo, OCR, recherche de notice puis encodage du tag.
+                </p>
+              </div>
+              <div class="heading-actions">
+                <div
+                  class="segmented"
+                  id="cataloguing-mode"
+                  aria-label="Mode de catalogage"
+                >
+                  <button class="active" data-mode="single">Un livre</button>
+                  <button data-mode="batch">En lot</button>
+                </div>
+              </div>
+            </div>
+
+            <div class="catalog-status" id="cataloguing-status" aria-live="polite">
+              <span class="catalog-status-dot"></span>
+              <div>
+                <strong id="cataloguing-status-title">OCR prêt</strong>
+                <p id="cataloguing-status-detail">
+                  Tesseract embarqué, français et anglais.
+                </p>
+              </div>
+              <button class="text-button" data-view-link="settings" type="button">
+                Paramètres du catalogage
+              </button>
+            </div>
+
+            <div class="catalog-card" id="catalog-capture-card">
+              <header>
+                <h3>1. Photographier le livre</h3>
+                <span class="catalog-hint" id="capture-target-hint"></span>
+                <div
+                  class="segmented small"
+                  id="capture-kind"
+                  aria-label="Face photographiée"
+                >
+                  <button class="active" data-kind="front">1re de couv.</button>
+                  <button data-kind="back">4e de couv.</button>
+                  <button data-kind="title">Page de titre</button>
+                  <button data-kind="other">Autre</button>
+                </div>
+              </header>
+              <div class="capture-body">
+                <div class="capture-stage" id="capture-dropzone">
+                  <video id="capture-video" playsinline muted></video>
+                  <div class="capture-placeholder" id="capture-placeholder">
+                    <i data-lucide="camera"></i>
+                    <p>
+                      Activez la webcam, importez des fichiers ou déposez ici
+                      les photos du livre (JPEG, PNG ou WebP).
+                    </p>
+                  </div>
+                </div>
+                <div class="capture-side">
+                  <div class="capture-controls">
+                    <select id="capture-device" aria-label="Caméra"></select>
+                    <button class="button secondary" id="capture-start" type="button">
+                      <i data-lucide="camera"></i><span>Activer la webcam</span>
+                    </button>
+                    <button class="button primary" id="capture-shoot" type="button" disabled>
+                      <i data-lucide="scan-line"></i><span>Prendre la photo</span>
+                    </button>
+                    <button class="button secondary" id="capture-import" type="button">
+                      <i data-lucide="image-plus"></i><span>Importer des fichiers</span>
+                    </button>
+                    <input
+                      class="hidden"
+                      id="capture-file-input"
+                      type="file"
+                      accept="image/jpeg,image/png,image/webp"
+                      multiple
+                    />
+                  </div>
+                  <div class="capture-strip" id="capture-strip"></div>
+                </div>
+              </div>
+            </div>
+
+            <div class="catalog-pane" id="catalog-pane-single">
+              <div class="catalog-card">
+                <header><h3>2. Rechercher la notice</h3></header>
+                <div class="catalog-search-grid">
+                  <label class="field"
+                    ><span>ISBN</span
+                    ><input
+                      id="catalog-isbn"
+                      type="text"
+                      inputmode="numeric"
+                      placeholder="Lu sur la 4e de couverture"
+                  /></label>
+                  <label class="field"
+                    ><span>Titre</span
+                    ><input
+                      id="catalog-search-title"
+                      type="text"
+                      placeholder="Si aucun ISBN lisible"
+                  /></label>
+                  <label class="field"
+                    ><span>Auteur</span
+                    ><input
+                      id="catalog-search-author"
+                      type="text"
+                      placeholder="Nom de l’auteur"
+                  /></label>
+                </div>
+                <div class="catalog-actions">
+                  <button class="button primary" id="catalog-identify" type="button">
+                    <i data-lucide="search"></i><span>Identifier ce livre</span>
+                  </button>
+                  <button class="button secondary" id="catalog-reset" type="button">
+                    <i data-lucide="undo-2"></i><span>Recommencer</span>
+                  </button>
+                  <span class="catalog-hint" id="catalog-search-hint"></span>
+                </div>
+                <div class="catalog-candidates hidden" id="catalog-candidates"></div>
+                <div class="catalog-notes hidden" id="catalog-ai-notes"></div>
+              </div>
+
+              <div class="catalog-card catalog-form-card">
+                <header>
+                  <h3>3. Vérifier et enregistrer</h3>
+                  <span class="catalog-hint" id="catalog-source-hint"></span>
+                </header>
+                <form id="catalog-form" class="catalog-form"></form>
+                <div class="catalog-actions">
+                  <button class="button primary" id="catalog-save-and-encode" type="button">
+                    <i data-lucide="radio-tower"></i
+                    ><span>Enregistrer puis encoder le tag</span>
+                  </button>
+                  <button class="button secondary" id="catalog-save" type="button">
+                    <i data-lucide="save"></i><span>Enregistrer sans encoder</span>
+                  </button>
+                </div>
+              </div>
+            </div>
+
+            <div class="catalog-pane hidden" id="catalog-pane-batch">
+              <div class="catalog-card">
+                <header>
+                  <h3>Lot en cours</h3>
+                  <span class="catalog-hint"
+                    >En lot, les fiches partent en brouillon « à encoder » :
+                    l’écriture des tags reste livre par livre à la station.</span
+                  >
+                </header>
+                <div class="catalog-batch-controls">
+                  <label class="field"
+                    ><span>Nom du lot</span
+                    ><input
+                      id="batch-label"
+                      type="text"
+                      maxlength="120"
+                      placeholder="Carton 1, don Dupont…"
+                  /></label>
+                  <label class="field"
+                    ><span>Lot</span
+                    ><select id="batch-session" aria-label="Lot existant"></select
+                  ></label>
+                  <div class="catalog-actions">
+                    <button class="button secondary" id="batch-new" type="button">
+                      <i data-lucide="layers"></i><span>Nouveau lot</span>
+                    </button>
+                    <button class="button secondary" id="batch-add-item" type="button">
+                      <i data-lucide="book-plus"></i><span>Ajouter un livre</span>
+                    </button>
+                    <button class="button secondary" id="batch-process" type="button">
+                      <i data-lucide="scan-text"></i><span>Analyser le lot</span>
+                    </button>
+                    <button class="button primary" id="batch-commit" type="button">
+                      <i data-lucide="save"></i><span>Enregistrer les brouillons</span>
+                    </button>
+                  </div>
+                </div>
+                <p class="catalog-hint" id="batch-progress"></p>
+                <div class="batch-grid" id="batch-grid"></div>
+                <div class="empty-state" id="batch-empty">
+                  <i data-lucide="layers"></i>
+                  <h3>Aucun lot ouvert</h3>
+                  <p>
+                    Créez un lot, puis photographiez les livres l’un après
+                    l’autre.
+                  </p>
+                </div>
               </div>
             </div>
           </section>
@@ -900,6 +1096,127 @@
                 </div>
               </div>
             </form>
+            <form class="settings-form" id="cataloguing-settings-form">
+              <div class="settings-section">
+                <div class="settings-copy">
+                  <h3>Reconnaissance de texte (OCR)</h3>
+                  <p>
+                    Lecture des photos de couverture avant la recherche de
+                    notice.
+                  </p>
+                </div>
+                <div class="catalog-settings-fields">
+                  <label class="switch-field"
+                    ><input id="ocr-enabled" type="checkbox" checked /><span
+                      >Activer l’OCR au catalogage</span
+                    ></label
+                  >
+                  <div class="segmented" id="ocr-engine" aria-label="Moteur OCR">
+                    <label
+                      ><input type="radio" name="ocrEngine" value="tesseract" checked /><span
+                        ><i data-lucide="cpu"></i>Tesseract (hors ligne)</span
+                      ></label
+                    >
+                    <label
+                      ><input type="radio" name="ocrEngine" value="google_vision" /><span
+                        ><i data-lucide="cloud"></i>Google Vision</span
+                      ></label
+                    >
+                  </div>
+                  <label class="field"
+                    ><span>Langues reconnues</span
+                    ><input id="ocr-languages" type="text" maxlength="40" placeholder="fra+eng"
+                  /></label>
+                  <label class="field" id="vision-key-field"
+                    ><span>Clé API Google Vision</span
+                    ><input
+                      id="vision-api-key"
+                      type="password"
+                      autocomplete="new-password"
+                      placeholder="Laisser vide pour conserver la clé"
+                  /></label>
+                  <p class="catalog-hint" id="ocr-settings-hint"></p>
+                </div>
+              </div>
+              <div class="settings-section">
+                <div class="settings-copy">
+                  <h3>Assistance IA</h3>
+                  <p>
+                    Facultative. Les photos et le texte OCR ne quittent le poste
+                    que pour les rôles cochés ci-contre.
+                  </p>
+                </div>
+                <div class="catalog-settings-fields">
+                  <label class="switch-field"
+                    ><input id="ai-enabled" type="checkbox" /><span
+                      >Activer l’assistance IA</span
+                    ></label
+                  >
+                  <div class="catalog-settings-row">
+                    <label class="field"
+                      ><span>Fournisseur</span
+                      ><select id="ai-provider">
+                        <option value="claude">Claude (Anthropic)</option>
+                        <option value="deepseek">DeepSeek</option>
+                        <option value="chatgpt">ChatGPT (OpenAI)</option>
+                      </select></label
+                    >
+                    <label class="field"
+                      ><span>Modèle</span
+                      ><input id="ai-model" type="text" maxlength="120" placeholder="Modèle par défaut"
+                    /></label>
+                    <label class="field"
+                      ><span>Clé API</span
+                      ><input
+                        id="ai-key"
+                        type="password"
+                        autocomplete="new-password"
+                        placeholder="Laisser vide pour conserver la clé"
+                    /></label>
+                  </div>
+                  <fieldset class="catalog-roles">
+                    <legend>Rôles confiés à l’IA</legend>
+                    <label
+                      ><input type="checkbox" name="aiRole" value="structure" /><span
+                        >Structurer le texte OCR en champs</span
+                      ></label
+                    >
+                    <label
+                      ><input type="checkbox" name="aiRole" value="arbitrate" /><span
+                        >Arbitrer entre notices candidates</span
+                      ></label
+                    >
+                    <label
+                      ><input type="checkbox" name="aiRole" value="complete" /><span
+                        >Proposer catégorie, cote, Dewey et matières</span
+                      ></label
+                    >
+                    <label
+                      ><input type="checkbox" name="aiRole" value="quality" /><span
+                        >Contrôler la cohérence de la fiche</span
+                      ></label
+                    >
+                    <label
+                      ><input type="checkbox" name="aiRole" value="vision" /><span
+                        >Lire les photos quand l’OCR échoue (Claude ou ChatGPT)</span
+                      ></label
+                    >
+                  </fieldset>
+                  <label class="field wide"
+                    ><span>Préfixes de cote (un par ligne, « Genre=Préfixe »)</span
+                    ><textarea id="cote-prefixes" rows="4" placeholder="Roman=R"></textarea
+                  ></label>
+                  <p class="catalog-hint" id="ai-settings-hint"></p>
+                </div>
+              </div>
+              <div class="settings-actions">
+                <button class="button secondary" type="button" id="ai-test">
+                  <i data-lucide="activity"></i><span>Tester la clé IA</span></button
+                ><button class="button primary" type="submit">
+                  <i data-lucide="save"></i><span>Enregistrer</span>
+                </button>
+              </div>
+            </form>
             <form class="settings-form" id="settings-form">
               <div class="settings-section">
                 <div class="settings-copy">
@@ -1153,6 +1470,7 @@
           </button>
         </div>
         <div class="book-detail-summary" id="book-detail-summary"></div>
+        <div class="book-covers hidden" id="book-detail-covers"></div>
         <div class="book-loan-summary hidden" id="book-loan-summary"></div>
         <div class="book-detail-fields" id="book-detail-fields"></div>
         <div class="dialog-actions book-detail-actions">

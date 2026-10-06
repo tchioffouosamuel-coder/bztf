@@ -1,5 +1,6 @@
 data/*.db
 data/*.db-*
+data/covers/
 bridge/bin/
 node_modules/
 *.log

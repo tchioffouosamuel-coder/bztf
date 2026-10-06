@@ -16,6 +16,7 @@ import {
   isBadgeEpc,
   isCardEpc,
 } from "./epc.js";
+import { normalizeIsbn, toIsbn10 } from "./cataloguing/isbn.js";
 
 const BOOK_FIELDS = [
   "title",
@@ -27,6 +28,28 @@ const BOOK_FIELDS = [
   "shelf",
   "notes",
 ];
+
+/**
+ * Champs issus des notices bibliographiques (catalogage assisté). Ils restent
+ * locaux : `toSyncBook` n'envoie que les champs du contrat de synchronisation.
+ * Les noms reprennent ceux de l'application mobile.
+ */
+const CATALOGUE_FIELDS = {
+  subtitle: 240,
+  collection: 240,
+  collection_number: 60,
+  language: 60,
+  original_language: 60,
+  summary: 4000,
+  subjects: 1000,
+  dewey: 60,
+  edition: 120,
+  page_count: 60,
+  document_type: 60,
+  source_notice: 60,
+  source_identifier: 120,
+  retrieved_at: 40,
+};
 
 function cleanText(value, maxLength = 500) {
   return String(value ?? "")
@@ -216,6 +239,16 @@ export class LibraryDatabase {
       this.db.exec(
         "ALTER TABLE books ADD COLUMN sync_state TEXT NOT NULL DEFAULT 'pending';",
       );
+    for (const column of Object.keys(CATALOGUE_FIELDS))
+      if (!bookColumns.has(column))
+        this.db.exec(
+          `ALTER TABLE books ADD COLUMN ${column} TEXT NOT NULL DEFAULT '';`,
+        );
+    // Brouillon de catalogage : la fiche existe mais n'a pas été validée.
+    if (!bookColumns.has("catalog_draft"))
+      this.db.exec(
+        "ALTER TABLE books ADD COLUMN catalog_draft INTEGER NOT NULL DEFAULT 0;",
+      );
     this.db.exec(
       "CREATE UNIQUE INDEX IF NOT EXISTS idx_books_import_key ON books(import_key) WHERE import_key IS NOT NULL;",
     );
@@ -356,6 +389,65 @@ export class LibraryDatabase {
       CREATE INDEX IF NOT EXISTS idx_staff_passages_at ON staff_passages(passed_at);
       CREATE INDEX IF NOT EXISTS idx_staff_passages_staff ON staff_passages(staff_server_id, passed_at);
     `);
+
+    // Catalogage assisté : photos de couverture, lots en cours et cache des
+    // notices. Tout est local au poste et ignoré par la synchronisation.
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS catalog_sessions (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        label TEXT NOT NULL DEFAULT '',
+        status TEXT NOT NULL DEFAULT 'ouverte' CHECK(status IN ('ouverte', 'terminee')),
+        user_id INTEGER,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE SET NULL
+      );
+      CREATE TABLE IF NOT EXISTS catalog_items (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        session_id INTEGER NOT NULL,
+        position INTEGER NOT NULL DEFAULT 0,
+        status TEXT NOT NULL DEFAULT 'capture'
+          CHECK(status IN ('capture', 'ocr', 'recherche', 'pret', 'enregistre', 'ignore', 'echec')),
+        ocr_text TEXT NOT NULL DEFAULT '',
+        hints TEXT NOT NULL DEFAULT '{}',
+        candidates TEXT NOT NULL DEFAULT '[]',
+        fields TEXT NOT NULL DEFAULT '{}',
+        ai TEXT NOT NULL DEFAULT '{}',
+        message TEXT NOT NULL DEFAULT '',
+        book_id INTEGER,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        FOREIGN KEY(session_id) REFERENCES catalog_sessions(id) ON DELETE CASCADE,
+        FOREIGN KEY(book_id) REFERENCES books(id) ON DELETE SET NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_catalog_items_session ON catalog_items(session_id, position);
+      CREATE TABLE IF NOT EXISTS captures (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        uuid TEXT NOT NULL UNIQUE,
+        kind TEXT NOT NULL DEFAULT 'front'
+          CHECK(kind IN ('front', 'back', 'title', 'spine', 'other')),
+        path TEXT NOT NULL,
+        thumb_path TEXT NOT NULL DEFAULT '',
+        bytes INTEGER NOT NULL DEFAULT 0,
+        source TEXT NOT NULL DEFAULT 'webcam',
+        ocr_text TEXT NOT NULL DEFAULT '',
+        ocr_engine TEXT NOT NULL DEFAULT '',
+        ocr_confidence REAL NOT NULL DEFAULT 0,
+        ocr_at TEXT,
+        book_id INTEGER,
+        item_id INTEGER,
+        created_at TEXT NOT NULL,
+        FOREIGN KEY(book_id) REFERENCES books(id) ON DELETE SET NULL,
+        FOREIGN KEY(item_id) REFERENCES catalog_items(id) ON DELETE SET NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_captures_book ON captures(book_id, kind);
+      CREATE INDEX IF NOT EXISTS idx_captures_item ON captures(item_id, kind);
+      CREATE TABLE IF NOT EXISTS notice_cache (
+        isbn13 TEXT PRIMARY KEY,
+        payload TEXT NOT NULL,
+        created_at TEXT NOT NULL
+      );
+    `);
   }
 
   listBooks({ search = "", status = "tous", limit = null, offset = 0 } = {}) {
@@ -481,6 +573,7 @@ export class LibraryDatabase {
       this.db
         .prepare("UPDATE books SET accession=?, epc=?, server_id=? WHERE id=?")
         .run(accession, epc, randomUUID(), next);
+      this.applyCatalogueFields(next, input);
       this.addActivity(
         "catalogue",
         "succes",
@@ -592,6 +685,7 @@ export class LibraryDatabase {
     `,
       )
       .run({ ...values, updated_at: new Date().toISOString(), id: Number(id) });
+    this.applyCatalogueFields(id, input);
     const updated = this.getBook(id);
     this.queueBookMutation(updated);
     return updated;
@@ -2459,11 +2553,24 @@ export class LibraryDatabase {
     }
   }
 
+  /** Les clés secrètes ne sortent jamais de la base : seule leur présence. */
   settings() {
-    const rows = this.db
-      .prepare("SELECT key, value FROM settings WHERE key <> 'sync_api_key'")
-      .all();
-    return Object.fromEntries(rows.map((row) => [row.key, row.value]));
+    const secrets = [
+      "sync_api_key",
+      "cataloguing_vision_api_key",
+      "cataloguing_ai_key",
+    ];
+    const rows = this.db.prepare("SELECT key, value FROM settings").all();
+    const values = Object.fromEntries(
+      rows
+        .filter((row) => !secrets.includes(row.key))
+        .map((row) => [row.key, row.value]),
+    );
+    for (const secret of secrets)
+      values[`${secret}_set`] = Boolean(
+        rows.find((row) => row.key === secret)?.value,
+      );
+    return values;
   }
 
   authStatus() {
@@ -2573,6 +2680,308 @@ export class LibraryDatabase {
       email: user.email,
       role: user.role,
     };
+  }
+
+  // --- Catalogage assisté (OCR, notices, IA) -------------------------------
+
+  /**
+   * Écrit les champs bibliographiques fournis. Les champs absents de `input`
+   * ne sont pas touchés : un formulaire partiel n'efface pas une notice.
+   */
+  applyCatalogueFields(id, input = {}) {
+    const assignments = [];
+    const values = { id: Number(id) };
+    for (const [field, maxLength] of Object.entries(CATALOGUE_FIELDS)) {
+      if (!(field in input)) continue;
+      assignments.push(`${field}=@${field}`);
+      values[field] = cleanText(input[field], maxLength);
+    }
+    if ("catalog_draft" in input) {
+      assignments.push("catalog_draft=@catalog_draft");
+      values.catalog_draft = input.catalog_draft ? 1 : 0;
+    }
+    if (!assignments.length) return;
+    this.db
+      .prepare(`UPDATE books SET ${assignments.join(", ")} WHERE id=@id`)
+      .run(values);
+  }
+
+  /** Lève le marqueur de brouillon après validation explicite. */
+  markCatalogued(id) {
+    this.db
+      .prepare("UPDATE books SET catalog_draft=0, updated_at=? WHERE id=?")
+      .run(new Date().toISOString(), Number(id));
+    return this.getBook(id);
+  }
+
+  findBooksByIsbn(isbn13) {
+    const normalized = normalizeIsbn(cleanText(isbn13, 32));
+    if (!normalized) return [];
+    // Un exemplaire peut avoir été saisi en ISBN-10 : les deux formes comptent,
+    // mais seule la forme exacte, clé de contrôle comprise.
+    const isbn10 = toIsbn10(normalized) || "";
+    return this.db
+      .prepare(
+        `SELECT * FROM books
+           WHERE UPPER(REPLACE(REPLACE(isbn, '-', ''), ' ', '')) IN (?, ?)
+           ORDER BY id DESC`,
+      )
+      .all(normalized, isbn10 || normalized);
+  }
+
+  readNoticeCache(isbn13, maximumAgeMs = 30 * 24 * 3600 * 1000) {
+    const row = this.db
+      .prepare("SELECT payload, created_at FROM notice_cache WHERE isbn13 = ?")
+      .get(cleanText(isbn13, 32));
+    if (!row) return [];
+    if (Date.now() - new Date(row.created_at).getTime() > maximumAgeMs) {
+      this.db.prepare("DELETE FROM notice_cache WHERE isbn13 = ?").run(cleanText(isbn13, 32));
+      return [];
+    }
+    try {
+      const payload = JSON.parse(row.payload);
+      return Array.isArray(payload) ? payload : [];
+    } catch {
+      return [];
+    }
+  }
+
+  writeNoticeCache(isbn13, notices) {
+    this.db
+      .prepare(
+        `INSERT INTO notice_cache (isbn13, payload, created_at) VALUES (?, ?, ?)
+         ON CONFLICT(isbn13) DO UPDATE SET payload=excluded.payload, created_at=excluded.created_at`,
+      )
+      .run(cleanText(isbn13, 32), JSON.stringify(notices), new Date().toISOString());
+  }
+
+  createCapture({
+    uuid,
+    kind = "front",
+    path: filePath,
+    thumbPath = "",
+    bytes = 0,
+    source = "webcam",
+    itemId = null,
+    bookId = null,
+  }) {
+    const result = this.db
+      .prepare(
+        `INSERT INTO captures (uuid, kind, path, thumb_path, bytes, source, item_id, book_id, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        cleanText(uuid, 64),
+        ["front", "back", "title", "spine", "other"].includes(kind) ? kind : "other",
+        cleanText(filePath, 400),
+        cleanText(thumbPath, 400),
+        Number(bytes) || 0,
+        cleanText(source, 40),
+        itemId ? Number(itemId) : null,
+        bookId ? Number(bookId) : null,
+        new Date().toISOString(),
+      );
+    return this.getCapture(Number(result.lastInsertRowid));
+  }
+
+  getCapture(id) {
+    return this.db.prepare("SELECT * FROM captures WHERE id = ?").get(Number(id));
+  }
+
+  getCaptureByUuid(uuid) {
+    return this.db
+      .prepare("SELECT * FROM captures WHERE uuid = ?")
+      .get(cleanText(uuid, 64));
+  }
+
+  saveCaptureOcr(id, { text = "", engine = "", confidence = 0 }) {
+    this.db
+      .prepare(
+        "UPDATE captures SET ocr_text=?, ocr_engine=?, ocr_confidence=?, ocr_at=? WHERE id=?",
+      )
+      .run(
+        String(text || "").slice(0, 20000),
+        cleanText(engine, 40),
+        Number(confidence) || 0,
+        new Date().toISOString(),
+        Number(id),
+      );
+    return this.getCapture(id);
+  }
+
+  capturesForBook(bookId) {
+    return this.db
+      .prepare("SELECT * FROM captures WHERE book_id = ? ORDER BY id")
+      .all(Number(bookId));
+  }
+
+  capturesForItem(itemId) {
+    return this.db
+      .prepare("SELECT * FROM captures WHERE item_id = ? ORDER BY id")
+      .all(Number(itemId));
+  }
+
+  attachCaptures(ids, { bookId = null, itemId = null }) {
+    const update = this.db.prepare(
+      "UPDATE captures SET book_id=COALESCE(?, book_id), item_id=COALESCE(?, item_id) WHERE id=?",
+    );
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      for (const id of ids)
+        update.run(bookId ? Number(bookId) : null, itemId ? Number(itemId) : null, Number(id));
+      this.db.exec("COMMIT");
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
+  }
+
+  deleteCapture(id) {
+    const capture = this.getCapture(id);
+    if (!capture) return null;
+    this.db.prepare("DELETE FROM captures WHERE id = ?").run(Number(id));
+    return capture;
+  }
+
+  /** Captures orphelines : ni livre, ni lot, et plus vieilles que `hours`. */
+  staleCaptures(hours = 24) {
+    const limit = new Date(Date.now() - hours * 3600 * 1000).toISOString();
+    return this.db
+      .prepare(
+        "SELECT * FROM captures WHERE book_id IS NULL AND item_id IS NULL AND created_at < ?",
+      )
+      .all(limit);
+  }
+
+  createCatalogSession({ label = "", userId = null } = {}) {
+    const now = new Date().toISOString();
+    const result = this.db
+      .prepare(
+        "INSERT INTO catalog_sessions (label, user_id, created_at, updated_at) VALUES (?, ?, ?, ?)",
+      )
+      .run(cleanText(label, 120), userId ? Number(userId) : null, now, now);
+    return this.getCatalogSession(Number(result.lastInsertRowid));
+  }
+
+  getCatalogSession(id) {
+    const session = this.db
+      .prepare("SELECT * FROM catalog_sessions WHERE id = ?")
+      .get(Number(id));
+    if (!session) return null;
+    return { ...session, items: this.catalogItems(session.id) };
+  }
+
+  listCatalogSessions(limit = 20) {
+    return this.db
+      .prepare(
+        `SELECT s.*,
+            (SELECT COUNT(*) FROM catalog_items i WHERE i.session_id = s.id) AS items,
+            (SELECT COUNT(*) FROM catalog_items i WHERE i.session_id = s.id AND i.status = 'enregistre') AS saved
+         FROM catalog_sessions s ORDER BY s.id DESC LIMIT ?`,
+      )
+      .all(Math.max(1, Math.min(Number(limit) || 20, 100)));
+  }
+
+  closeCatalogSession(id) {
+    this.db
+      .prepare("UPDATE catalog_sessions SET status='terminee', updated_at=? WHERE id=?")
+      .run(new Date().toISOString(), Number(id));
+    return this.getCatalogSession(id);
+  }
+
+  deleteCatalogSession(id) {
+    const session = this.getCatalogSession(id);
+    if (!session) return null;
+    this.db.prepare("DELETE FROM catalog_sessions WHERE id = ?").run(Number(id));
+    return session;
+  }
+
+  createCatalogItem(sessionId) {
+    const now = new Date().toISOString();
+    const position = Number(
+      this.db
+        .prepare(
+          "SELECT COALESCE(MAX(position), 0) + 1 AS next FROM catalog_items WHERE session_id = ?",
+        )
+        .get(Number(sessionId)).next,
+    );
+    const result = this.db
+      .prepare(
+        "INSERT INTO catalog_items (session_id, position, created_at, updated_at) VALUES (?, ?, ?, ?)",
+      )
+      .run(Number(sessionId), position, now, now);
+    this.db
+      .prepare("UPDATE catalog_sessions SET updated_at=? WHERE id=?")
+      .run(now, Number(sessionId));
+    return this.getCatalogItem(Number(result.lastInsertRowid));
+  }
+
+  getCatalogItem(id) {
+    const item = this.db
+      .prepare("SELECT * FROM catalog_items WHERE id = ?")
+      .get(Number(id));
+    return item ? this.hydrateCatalogItem(item) : null;
+  }
+
+  catalogItems(sessionId) {
+    return this.db
+      .prepare("SELECT * FROM catalog_items WHERE session_id = ? ORDER BY position")
+      .all(Number(sessionId))
+      .map((item) => this.hydrateCatalogItem(item));
+  }
+
+  hydrateCatalogItem(item) {
+    const parse = (value, fallback) => {
+      try {
+        return JSON.parse(value);
+      } catch {
+        return fallback;
+      }
+    };
+    return {
+      ...item,
+      hints: parse(item.hints, {}),
+      candidates: parse(item.candidates, []),
+      fields: parse(item.fields, {}),
+      ai: parse(item.ai, {}),
+      captures: this.capturesForItem(item.id),
+    };
+  }
+
+  updateCatalogItem(id, patch = {}) {
+    const assignments = [];
+    const values = { id: Number(id), updated_at: new Date().toISOString() };
+    const columns = {
+      status: (value) => String(value),
+      ocr_text: (value) => String(value || "").slice(0, 40000),
+      message: (value) => cleanText(value, 400),
+      book_id: (value) => (value ? Number(value) : null),
+    };
+    for (const [column, convert] of Object.entries(columns)) {
+      if (!(column in patch)) continue;
+      assignments.push(`${column}=@${column}`);
+      values[column] = convert(patch[column]);
+    }
+    for (const column of ["hints", "candidates", "fields", "ai"]) {
+      if (!(column in patch)) continue;
+      assignments.push(`${column}=@${column}`);
+      values[column] = JSON.stringify(patch[column] ?? null);
+    }
+    if (assignments.length) {
+      this.db
+        .prepare(
+          `UPDATE catalog_items SET ${assignments.join(", ")}, updated_at=@updated_at WHERE id=@id`,
+        )
+        .run(values);
+    }
+    return this.getCatalogItem(id);
+  }
+
+  deleteCatalogItem(id) {
+    const item = this.getCatalogItem(id);
+    if (!item) return null;
+    this.db.prepare("DELETE FROM catalog_items WHERE id = ?").run(Number(id));
+    return item;
   }
 
   close() {
