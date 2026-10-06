@@ -108,9 +108,12 @@ void main() {
     'com.bibliorfid.myscankey_flutter/barcode-events',
   );
   final scannerCalls = <String>[];
+  const soundMethods = MethodChannel('com.bibliorfid.myscankey_flutter/reader');
+  final soundCalls = <String>[];
 
   setUp(() {
     scannerCalls.clear();
+    soundCalls.clear();
     final messenger =
         TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;
     messenger.setMockMethodCallHandler(scannerMethods, (call) async {
@@ -118,6 +121,10 @@ void main() {
       return null;
     });
     messenger.setMockMethodCallHandler(scannerEvents, (_) async => null);
+    messenger.setMockMethodCallHandler(soundMethods, (call) async {
+      soundCalls.add(call.method);
+      return null;
+    });
   });
 
   tearDown(() {
@@ -125,6 +132,7 @@ void main() {
         TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;
     messenger.setMockMethodCallHandler(scannerMethods, null);
     messenger.setMockMethodCallHandler(scannerEvents, null);
+    messenger.setMockMethodCallHandler(soundMethods, null);
   });
 
   void scan(WidgetTester tester, String barcode) {
@@ -149,6 +157,7 @@ void main() {
       await tester.pump();
       await tester.pump();
       expect(lookup.calls, 1);
+      expect(soundCalls, ['playScanBeep']);
       expect(find.text('2 · Récupération de la notice…'), findsOneWidget);
       expect(find.text('Scanner l’ISBN'), findsNothing);
       expect(scannerCalls, ['open', 'close']);
@@ -170,6 +179,7 @@ void main() {
     scan(tester, '1234567890123');
     await tester.pumpAndSettle();
     expect(lookup.calls, 0);
+    expect(soundCalls, isEmpty);
     expect(find.text('Le code lu n’est pas un ISBN valide.'), findsOneWidget);
     expect(scannerCalls, ['open']);
     scan(tester, '2070360024');
@@ -182,7 +192,32 @@ void main() {
     scan(tester, '9782070360024');
     await tester.pumpAndSettle();
     expect(lookup.calls, 2);
+    expect(soundCalls, ['playScanBeep', 'playScanBeep']);
     expect(scannerCalls, ['open', 'close', 'open', 'close']);
+    debugDefaultTargetPlatformOverride = null;
+  });
+
+  testWidgets('un son indisponible ne bloque pas la recherche apres un scan', (
+    tester,
+  ) async {
+    debugDefaultTargetPlatformOverride = TargetPlatform.android;
+    addTearDown(() => debugDefaultTargetPlatformOverride = null);
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+        .setMockMethodCallHandler(soundMethods, (call) async {
+          soundCalls.add(call.method);
+          throw PlatformException(
+            code: 'SCAN_SOUND',
+            message: 'Son indisponible.',
+          );
+        });
+    final lookup = _Lookup(() async => [_notice]);
+    await _open(tester, lookup);
+    scan(tester, '9782070360024');
+    await tester.pumpAndSettle();
+    expect(soundCalls, ['playScanBeep']);
+    expect(lookup.calls, 1);
+    expect(_value(tester, 'title'), 'L’Étranger');
+    expect(tester.takeException(), isNull);
     debugDefaultTargetPlatformOverride = null;
   });
 

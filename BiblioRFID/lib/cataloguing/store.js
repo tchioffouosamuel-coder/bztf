@@ -16,6 +16,11 @@ const ALLOWED_TYPES = new Map([
 
 export const MAX_IMAGE_BYTES = 8 * 1024 * 1024;
 
+export function captureImageUrl(capture, { thumb = false } = {}) {
+  const version = encodeURIComponent(capture.uuid);
+  return `/api/cataloguing/captures/${capture.id}/image?v=${version}${thumb && capture.thumb_path ? "&thumb=1" : ""}`;
+}
+
 export function imageExtension(contentType) {
   return ALLOWED_TYPES.get(String(contentType || "").toLowerCase()) || "";
 }

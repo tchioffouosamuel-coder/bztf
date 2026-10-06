@@ -2738,6 +2738,90 @@ dialog::backdrop {
   border: 1px solid var(--line);
 }
 
+#phone-camera-dialog {
+  width: min(720px, calc(100vw - 28px));
+}
+
+.phone-camera-body {
+  display: grid;
+  gap: 12px;
+  padding: 18px 20px;
+}
+
+.phone-camera-share {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 176px;
+  gap: 12px;
+  align-items: stretch;
+}
+
+.phone-camera-link {
+  display: grid;
+  grid-template-columns: 34px minmax(0, 1fr);
+  gap: 12px;
+  align-items: center;
+  padding: 12px 14px;
+  background: var(--surface-soft);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+}
+
+.phone-camera-qr {
+  display: grid;
+  place-items: center;
+  min-height: 176px;
+  padding: 8px;
+  background: #fff;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+}
+
+.phone-camera-qr canvas {
+  width: 160px;
+  height: 160px;
+  image-rendering: pixelated;
+}
+
+.phone-camera-qr span {
+  color: var(--muted);
+  font-size: 12px;
+  text-align: center;
+}
+
+.phone-camera-link > svg {
+  color: var(--primary);
+}
+
+.phone-camera-link strong,
+.phone-camera-link a,
+.phone-camera-alternates strong,
+.phone-camera-alternates a {
+  display: block;
+}
+
+.phone-camera-link a,
+.phone-camera-alternates a {
+  margin-top: 4px;
+  color: var(--primary);
+  overflow-wrap: anywhere;
+}
+
+.phone-camera-alternates {
+  display: grid;
+  gap: 5px;
+  font-size: 12px;
+}
+
+.phone-camera-alternates strong {
+  color: var(--muted);
+}
+
+@media (max-width: 640px) {
+  .phone-camera-share {
+    grid-template-columns: 1fr;
+  }
+}
+
 .catalog-settings-fields {
   display: grid;
   gap: 12px;

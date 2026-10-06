@@ -27,7 +27,7 @@ import { extractHints } from "./extract.js";
 import { NoticeLookupService } from "./lookup.js";
 import { noticeToBookFields } from "./notice.js";
 import { OcrService, normalizeOcrEngine, normalizeOcrLanguages } from "./ocr.js";
-import { CaptureStore } from "./store.js";
+import { captureImageUrl, CaptureStore } from "./store.js";
 
 const BOOK_FIELD_NAMES = [
   "title",
@@ -472,10 +472,8 @@ export class CataloguingService {
     return this.database.capturesForBook(bookId).map((capture) => ({
       id: capture.id,
       kind: capture.kind,
-      url: `/api/cataloguing/captures/${capture.id}/image`,
-      thumbUrl: capture.thumb_path
-        ? `/api/cataloguing/captures/${capture.id}/image?thumb=1`
-        : `/api/cataloguing/captures/${capture.id}/image`,
+      url: captureImageUrl(capture),
+      thumbUrl: captureImageUrl(capture, { thumb: true }),
       ocrEngine: capture.ocr_engine,
       ocrConfidence: capture.ocr_confidence,
     }));

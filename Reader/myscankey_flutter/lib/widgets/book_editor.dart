@@ -241,6 +241,7 @@ class _BookEditorState extends State<BookEditor> {
     }
     _scannerError = null;
     _fields['isbn']!.text = Isbn.toIsbn13(isbn);
+    unawaited(_scanner.playScanBeep());
     unawaited(_search(fromScanner: true));
   }
 

@@ -62,11 +62,11 @@ class _IsbnScannerState extends State<IsbnScanner> {
   }
 
   void _onScan(Map<Object?, Object?> event) {
-    if (!mounted) return;
+    if (!mounted || _accepted) return;
     final barcode = event['barcode']?.toString();
     if (barcode != null) {
       _field.text = barcode;
-      _tryAccept(barcode);
+      _tryAccept(barcode, fromScanner: true);
     } else {
       setState(() {
         _status = event['state'] == 'scanning' ? 'Lecture en cours' : 'Prêt';
@@ -107,7 +107,11 @@ class _IsbnScannerState extends State<IsbnScanner> {
 
   void _submit() => _tryAccept(_field.text);
 
-  void _tryAccept(String value, {bool quiet = false}) {
+  void _tryAccept(
+    String value, {
+    bool quiet = false,
+    bool fromScanner = false,
+  }) {
     if (_accepted) return;
     final digits = _digits(value);
     if (Isbn.isValid(digits) &&
@@ -115,6 +119,7 @@ class _IsbnScannerState extends State<IsbnScanner> {
             digits.startsWith('978') ||
             digits.startsWith('979'))) {
       _accepted = true;
+      if (fromScanner) unawaited(_scanner.playScanBeep());
       Navigator.pop(context, Isbn.toIsbn13(digits));
       return;
     }

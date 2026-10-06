@@ -40,6 +40,7 @@ import {
 } from "../lib/cataloguing/ocr.js";
 import { CataloguingService, mergeFields } from "../lib/cataloguing/service.js";
 import { CaptureStore, sniffImageType } from "../lib/cataloguing/store.js";
+import { handleCataloguingRequest } from "../lib/cataloguing/routes.js";
 import { parseUnimarcNotices } from "../lib/cataloguing/unimarc.js";
 
 const JPEG = Buffer.concat([
@@ -750,6 +751,38 @@ test("Service : la validation crée la fiche et y rattache les photos", () => {
   );
   assert.equal(database.getCapture(front.id).book_id, book.id);
   cleanup();
+});
+
+test("Photos : une autre photo au meme identifiant ne reprend pas l'ancienne vignette", async () => {
+  const { database, service, cleanup } = temporaryService();
+  try {
+    const first = service.addCapture({ buffer: JPEG, thumbBuffer: PNG });
+    const book = service.commit({ fields: { title: "Photos" }, captureIds: [first.id] });
+    const previous = service.coversFor(book.id)[0];
+    const stored = service.store.save({ buffer: PNG, thumbBuffer: JPEG });
+    database.db.prepare("UPDATE captures SET uuid = ?, path = ?, thumb_path = ? WHERE id = ?")
+      .run(stored.uuid, stored.relativePath, stored.thumbRelativePath, first.id);
+    const current = service.coversFor(book.id)[0];
+    assert.notEqual(current.url, previous.url);
+    assert.notEqual(current.thumbUrl, previous.thumbUrl);
+    assert.equal(new URL(current.thumbUrl, "http://localhost").searchParams.get("v"), stored.uuid);
+    let headers;
+    let body;
+    await handleCataloguingRequest({
+      request: { method: "GET" },
+      response: {
+        writeHead(status, values) { assert.equal(status, 200); headers = values; },
+        end(value) { body = value; },
+      },
+      url: new URL(current.thumbUrl, "http://localhost"),
+      db: database,
+      service,
+    });
+    assert.deepEqual(body, JPEG);
+    assert.match(headers["Cache-Control"], /no-store/);
+  } finally {
+    cleanup();
+  }
 });
 
 test("Service : le lot enregistre des brouillons, jamais de tag", () => {

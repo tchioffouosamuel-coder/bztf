@@ -408,11 +408,15 @@
                     <button class="button secondary" id="capture-import" type="button">
                       <i data-lucide="image-plus"></i><span>Importer des fichiers</span>
                     </button>
+                    <button class="button secondary" id="capture-phone" type="button">
+                      <i data-lucide="smartphone"></i><span>Caméra téléphone</span>
+                    </button>
                     <input
                       class="hidden"
                       id="capture-file-input"
                       type="file"
                       accept="image/jpeg,image/png,image/webp"
+                      capture="environment"
                       multiple
                     />
                   </div>
@@ -1452,6 +1456,56 @@
       </form>
     </dialog>
 
+    <dialog id="phone-camera-dialog">
+      <form method="dialog" class="dialog-shell phone-camera-shell">
+        <div class="dialog-heading">
+          <div>
+            <p class="eyebrow">Caméra téléphone</p>
+            <h2>Photographier depuis un téléphone</h2>
+          </div>
+          <button
+            class="icon-button"
+            value="cancel"
+            formnovalidate
+            title="Fermer"
+            aria-label="Fermer"
+          >
+            <i data-lucide="x"></i>
+          </button>
+        </div>
+        <div class="phone-camera-body">
+          <div class="phone-camera-share">
+            <div class="phone-camera-link">
+              <i data-lucide="smartphone"></i>
+              <div>
+                <strong>Lien temporaire</strong>
+                <a id="phone-camera-url" href="#" target="_blank" rel="noreferrer"></a>
+              </div>
+            </div>
+            <div class="phone-camera-qr">
+              <canvas
+                id="phone-camera-qr-code"
+                width="176"
+                height="176"
+                aria-label="QR code du lien temporaire"
+              ></canvas>
+              <span id="phone-camera-qr-fallback" class="hidden">QR code indisponible</span>
+            </div>
+          </div>
+          <p id="phone-camera-status" class="catalog-hint"></p>
+          <div class="phone-camera-alternates" id="phone-camera-alternates"></div>
+        </div>
+        <div class="dialog-actions">
+          <button class="button secondary" id="phone-camera-copy" type="button">
+            <i data-lucide="copy"></i><span>Copier le lien</span>
+          </button>
+          <button class="button primary" value="default">
+            <i data-lucide="check"></i><span>Terminer</span>
+          </button>
+        </div>
+      </form>
+    </dialog>
+
     <dialog id="book-detail-dialog">
       <form method="dialog" class="dialog-shell book-detail-shell" id="book-detail-form">
         <div class="dialog-heading">
@@ -1836,6 +1890,7 @@
 
     <div class="toast-region" id="toast-region" aria-live="polite"></div>
     <script src="/vendor/sweetalert2/sweetalert2.all.min.js"></script>
-    <script type="module" src="/app.js?v=25"></script>
+    <script src="/vendor/qrcode/qrcode.js"></script>
+    <script type="module" src="/app.js?v=27"></script>
   </body>
 </html>

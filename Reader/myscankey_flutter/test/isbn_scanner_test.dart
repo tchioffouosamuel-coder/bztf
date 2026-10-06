@@ -7,25 +7,33 @@ const _methods = MethodChannel('com.bibliorfid.myscankey_flutter/barcode');
 const _events = MethodChannel(
   'com.bibliorfid.myscankey_flutter/barcode-events',
 );
+const _soundMethods = MethodChannel('com.bibliorfid.myscankey_flutter/reader');
 
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
   final calls = <String>[];
+  final soundCalls = <String>[];
   final messenger =
       TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;
 
   setUp(() {
     calls.clear();
+    soundCalls.clear();
     messenger.setMockMethodCallHandler(_methods, (call) async {
       calls.add(call.method);
       return null;
     });
     messenger.setMockMethodCallHandler(_events, (_) async => null);
+    messenger.setMockMethodCallHandler(_soundMethods, (call) async {
+      soundCalls.add(call.method);
+      return null;
+    });
   });
 
   tearDown(() {
     messenger.setMockMethodCallHandler(_methods, null);
     messenger.setMockMethodCallHandler(_events, null);
+    messenger.setMockMethodCallHandler(_soundMethods, null);
   });
 
   Future<void> emit(WidgetTester tester, Map<String, String> event) async {
@@ -67,6 +75,7 @@ void main() {
     await emit(tester, {'barcode': '9782070360024'});
     expect(result, '9782070360024');
     expect(calls, contains('close'));
+    expect(soundCalls, ['playScanBeep']);
   });
 
   testWidgets('un code invalide permet une nouvelle lecture', (tester) async {
@@ -74,6 +83,7 @@ void main() {
     await tester.pumpAndSettle();
     await emit(tester, {'barcode': '1234567890123'});
     expect(find.text('ISBN invalide.'), findsOneWidget);
+    expect(soundCalls, isEmpty);
     expect(find.byType(IsbnScanner), findsOneWidget);
     await emit(tester, {'state': 'ready'});
     await tester.tap(find.byTooltip('Scanner'));
@@ -111,6 +121,37 @@ void main() {
           .onPressed,
       isNull,
     );
+    await tester.pumpWidget(const SizedBox());
+    await tester.pumpAndSettle();
+  });
+
+  testWidgets('la saisie au clavier ne joue pas le bip du scanner', (
+    tester,
+  ) async {
+    String? result;
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Builder(
+          builder: (context) => TextButton(
+            onPressed: () async {
+              result = await Navigator.of(context).push<String>(
+                MaterialPageRoute(builder: (_) => const IsbnScanner()),
+              );
+            },
+            child: const Text('Ouvrir'),
+          ),
+        ),
+      ),
+    );
+    await tester.tap(find.text('Ouvrir'));
+    await tester.pumpAndSettle();
+    await tester.enterText(
+      find.byKey(const ValueKey('isbn_scanner_input')),
+      '9782070360024',
+    );
+    await tester.pumpAndSettle();
+    expect(result, '9782070360024');
+    expect(soundCalls, isEmpty);
     await tester.pumpWidget(const SizedBox());
     await tester.pumpAndSettle();
   });

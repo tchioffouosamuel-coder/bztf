@@ -4,7 +4,7 @@
  */
 import { AiUnavailableError } from "./ai.js";
 import { NoticeNotFoundError, NoticeNetworkError } from "./notice.js";
-import { contentTypeFor, MAX_IMAGE_BYTES } from "./store.js";
+import { captureImageUrl, contentTypeFor, MAX_IMAGE_BYTES } from "./store.js";
 
 const MAX_UPLOAD_BYTES = 14 * 1024 * 1024;
 
@@ -126,7 +126,7 @@ export async function handleCataloguingRequest({
     response.writeHead(200, {
       "Content-Type": contentTypeFor(image.relativePath),
       "Content-Length": image.buffer.length,
-      "Cache-Control": "private, max-age=86400",
+      "Cache-Control": "private, no-store",
     });
     response.end(image.buffer);
     return true;
@@ -329,9 +329,7 @@ function publicCapture(capture) {
     ocrText: capture.ocr_text,
     ocrEngine: capture.ocr_engine,
     ocrConfidence: capture.ocr_confidence,
-    url: `/api/cataloguing/captures/${capture.id}/image`,
-    thumbUrl: capture.thumb_path
-      ? `/api/cataloguing/captures/${capture.id}/image?thumb=1`
-      : `/api/cataloguing/captures/${capture.id}/image`,
+    url: captureImageUrl(capture),
+    thumbUrl: captureImageUrl(capture, { thumb: true }),
   };
 }

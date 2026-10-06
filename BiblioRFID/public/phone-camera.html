@@ -1,0 +1,43 @@
+<!doctype html>
+<html lang="fr">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="theme-color" content="#0b659e" />
+    <title>Caméra téléphone · Bibliotèque ZTF</title>
+    <link rel="stylesheet" href="/phone-camera.css" />
+  </head>
+  <body>
+    <main class="phone-shell">
+      <header>
+        <p>Bibliotèque ZTF</p>
+        <h1>Caméra téléphone</h1>
+      </header>
+
+      <section class="capture-panel">
+        <div class="segmented" id="capture-kind">
+          <button class="active" type="button" data-kind="front">1re couv.</button>
+          <button type="button" data-kind="back">4e couv.</button>
+          <button type="button" data-kind="title">Titre</button>
+          <button type="button" data-kind="other">Autre</button>
+        </div>
+
+        <button class="primary" id="capture-button" type="button">
+          Prendre une photo
+        </button>
+        <input
+          id="capture-input"
+          type="file"
+          accept="image/jpeg,image/png,image/webp"
+          capture="environment"
+          multiple
+        />
+
+        <p class="status" id="status">Le téléphone enverra les photos au poste de catalogage.</p>
+        <div class="preview-list" id="preview-list"></div>
+      </section>
+    </main>
+
+    <script type="module" src="/phone-camera.js"></script>
+  </body>
+</html>

@@ -94,9 +94,11 @@ async function blobToDataUrl(blob) {
 
 /** Réduit une image en conservant ses proportions. */
 async function scaleToDataUrl(bitmap, maxSide, quality) {
-  const ratio = Math.min(1, maxSide / Math.max(bitmap.width, bitmap.height));
-  const width = Math.max(1, Math.round(bitmap.width * ratio));
-  const height = Math.max(1, Math.round(bitmap.height * ratio));
+  const sourceWidth = bitmap.videoWidth || bitmap.naturalWidth || bitmap.width;
+  const sourceHeight = bitmap.videoHeight || bitmap.naturalHeight || bitmap.height;
+  const ratio = Math.min(1, maxSide / Math.max(sourceWidth, sourceHeight));
+  const width = Math.max(1, Math.round(sourceWidth * ratio));
+  const height = Math.max(1, Math.round(sourceHeight * ratio));
   const canvas = document.createElement("canvas");
   canvas.width = width;
   canvas.height = height;
@@ -109,11 +111,29 @@ async function scaleToDataUrl(bitmap, maxSide, quality) {
   return blobToDataUrl(blob);
 }
 
+async function bitmapFromSource(source) {
+  if ("createImageBitmap" in window) {
+    if (source instanceof Blob) {
+      try {
+        return await createImageBitmap(source, { imageOrientation: "from-image" });
+      } catch {
+        return createImageBitmap(source);
+      }
+    }
+    return createImageBitmap(source);
+  }
+  if (source instanceof Blob) {
+    const image = new Image();
+    image.src = URL.createObjectURL(source);
+    await image.decode();
+    image.close = () => URL.revokeObjectURL(image.src);
+    return image;
+  }
+  return source;
+}
+
 async function prepareImage(source) {
-  const bitmap =
-    source instanceof Blob
-      ? await createImageBitmap(source, { imageOrientation: "from-image" })
-      : await createImageBitmap(source);
+  const bitmap = await bitmapFromSource(source);
   try {
     return {
       image: await scaleToDataUrl(bitmap, 1600, 0.85),
@@ -147,6 +167,8 @@ export function initCataloguing({
     settings: null,
     stream: null,
     session: null,
+    phoneSession: null,
+    phonePollTimer: null,
     activeItemId: null,
     busy: false,
   };
@@ -274,30 +296,26 @@ export function initCataloguing({
     await addImages(images, "fichier");
   }
 
-  /** Envoie les images, puis lance l'OCR de chacune si le moteur est prêt. */
-  async function addImages(sources, origin) {
+  async function storePreparedImages(
+    entries,
+    origin,
+    itemId = local.mode === "batch" ? local.activeItemId : null,
+  ) {
     if (local.busy) return;
     local.busy = true;
     setCaptureBusy(true);
     try {
-      for (const entry of sources) {
-        let prepared;
-        try {
-          prepared = await prepareImage(entry.source);
-        } catch (error) {
-          toast(`${entry.name} : ${error.message}`, "error");
-          continue;
-        }
+      for (const entry of entries) {
         let capture;
         try {
           const payload = await api("/api/cataloguing/captures", {
             method: "POST",
             body: JSON.stringify({
-              image: prepared.image,
-              thumb: prepared.thumb,
-              kind: local.kind,
+              image: entry.image,
+              thumb: entry.thumb,
+              kind: entry.kind || local.kind,
               source: origin,
-              itemId: local.mode === "batch" ? local.activeItemId : null,
+              itemId,
             }),
           });
           capture = payload.capture;
@@ -318,10 +336,191 @@ export function initCataloguing({
     }
   }
 
+  /** Envoie les images, puis lance l'OCR de chacune si le moteur est prêt. */
+  async function addImages(sources, origin) {
+    const preparedEntries = [];
+    for (const entry of sources) {
+      try {
+        const prepared = await prepareImage(entry.source);
+        preparedEntries.push({
+          ...prepared,
+          kind: entry.kind || local.kind,
+          name: entry.name,
+        });
+      } catch (error) {
+        toast(`${entry.name} : ${error.message}`, "error");
+      }
+    }
+    if (preparedEntries.length) await storePreparedImages(preparedEntries, origin);
+  }
+
   function setCaptureBusy(busy) {
-    for (const selector of ["#capture-shoot", "#capture-import", "#capture-start"]) {
+    for (const selector of [
+      "#capture-shoot",
+      "#capture-import",
+      "#capture-start",
+      "#capture-phone",
+    ]) {
       const button = $(selector);
       if (button) button.disabled = busy || (selector === "#capture-shoot" && !local.stream);
+    }
+  }
+
+  async function openPhoneCamera() {
+    if (local.mode === "batch" && !local.activeItemId) {
+      toast("Sélectionnez d’abord le livre du lot à photographier.", "error");
+      return;
+    }
+    try {
+      const session = await api("/api/phone-camera", {
+        method: "POST",
+        body: "{}",
+      });
+      local.phoneSession = {
+        ...session,
+        targetMode: local.mode,
+        targetItemId: local.mode === "batch" ? local.activeItemId : null,
+      };
+      renderPhoneCameraDialog();
+      $("#phone-camera-dialog").showModal();
+      startPhonePolling();
+    } catch (error) {
+      toast(error.message, "error");
+    }
+  }
+
+  function renderPhoneCameraDialog() {
+    const session = local.phoneSession;
+    if (!session) return;
+    const link = $("#phone-camera-url");
+    link.href = session.url;
+    link.textContent = session.url;
+    renderPhoneQr(session.url);
+    const target =
+      session.targetMode === "batch"
+        ? local.session?.items.find((item) => item.id === session.targetItemId)
+        : null;
+    $("#phone-camera-status").textContent = target
+      ? `Les photos reçues seront ajoutées au livre ${target.position} du lot.`
+      : "Les photos reçues seront ajoutées à cette fiche de catalogage.";
+    const alternates = $("#phone-camera-alternates");
+    const otherUrls = (session.urls || []).filter((url) => url !== session.url);
+    alternates.innerHTML = otherUrls.length
+      ? `<strong>Autres adresses possibles</strong>${otherUrls
+          .map(
+            (url) =>
+              `<a href="${escapeHtml(url)}" target="_blank" rel="noreferrer">${escapeHtml(url)}</a>`,
+          )
+          .join("")}`
+      : "";
+    icons();
+  }
+
+  function renderPhoneQr(url) {
+    const canvas = $("#phone-camera-qr-code");
+    const fallback = $("#phone-camera-qr-fallback");
+    if (!canvas) return;
+    fallback?.classList.add("hidden");
+    const qrFactory = window.qrcode;
+    if (typeof qrFactory !== "function") {
+      fallback?.classList.remove("hidden");
+      return;
+    }
+    const cssSize = 160;
+    const dpr = Math.max(1, window.devicePixelRatio || 1);
+    canvas.width = cssSize * dpr;
+    canvas.height = cssSize * dpr;
+    canvas.style.width = `${cssSize}px`;
+    canvas.style.height = `${cssSize}px`;
+    const context = canvas.getContext("2d");
+    context.setTransform(dpr, 0, 0, dpr, 0, 0);
+    context.fillStyle = "#ffffff";
+    context.fillRect(0, 0, cssSize, cssSize);
+    try {
+      const qr = qrFactory(0, "M");
+      qr.addData(url);
+      qr.make();
+      const modules = qr.getModuleCount();
+      const quietZone = 4;
+      const cell = Math.floor(cssSize / (modules + quietZone * 2));
+      const qrSize = modules * cell;
+      const offset = Math.floor((cssSize - qrSize) / 2);
+      context.fillStyle = "#111827";
+      for (let row = 0; row < modules; row += 1) {
+        for (let column = 0; column < modules; column += 1) {
+          if (qr.isDark(row, column))
+            context.fillRect(offset + column * cell, offset + row * cell, cell, cell);
+        }
+      }
+    } catch {
+      fallback?.classList.remove("hidden");
+    }
+  }
+
+  function startPhonePolling() {
+    stopPhonePolling({ closeSession: false });
+    local.phonePollTimer = window.setInterval(pollPhoneUploads, 2000);
+    pollPhoneUploads();
+  }
+
+  function stopPhonePolling({ closeSession = true } = {}) {
+    if (local.phonePollTimer) {
+      window.clearInterval(local.phonePollTimer);
+      local.phonePollTimer = null;
+    }
+    if (closeSession && local.phoneSession) {
+      api(`/api/phone-camera/${encodeURIComponent(local.phoneSession.token)}/uploads`, {
+        method: "DELETE",
+      }).catch(() => {});
+      local.phoneSession = null;
+    }
+  }
+
+  async function pollPhoneUploads() {
+    const session = local.phoneSession;
+    if (!session || local.busy) return;
+    try {
+      const payload = await api(
+        `/api/phone-camera/${encodeURIComponent(session.token)}/uploads`,
+      );
+      if (!payload.uploads?.length) return;
+      await storePreparedImages(
+        payload.uploads,
+        "téléphone",
+        session.targetMode === "batch" ? session.targetItemId : null,
+      );
+      toast(`${payload.uploads.length} photo(s) reçue(s) du téléphone.`);
+    } catch (error) {
+      stopPhonePolling({ closeSession: false });
+      $("#phone-camera-status").textContent = error.message;
+      toast(error.message, "error");
+    }
+  }
+
+  async function copyPhoneLink() {
+    const url = local.phoneSession?.url;
+    if (!url) return;
+    try {
+      await navigator.clipboard.writeText(url);
+      toast("Lien caméra copié.");
+      return;
+    } catch {}
+    const textarea = document.createElement("textarea");
+    textarea.value = url;
+    textarea.setAttribute("readonly", "");
+    textarea.style.position = "fixed";
+    textarea.style.opacity = "0";
+    textarea.style.pointerEvents = "none";
+    document.body.append(textarea);
+    textarea.focus();
+    textarea.select();
+    const copied = document.execCommand("copy");
+    textarea.remove();
+    if (copied) {
+      toast("Lien caméra copié.");
+    } else {
+      $("#phone-camera-url")?.focus();
+      toast("Copie impossible : sélectionnez le lien manuellement.", "error");
     }
   }
 
@@ -826,7 +1025,7 @@ export function initCataloguing({
           ? item.captures
               .map(
                 (capture) =>
-                  `<img src="/api/cataloguing/captures/${capture.id}/image?thumb=1" alt="${escapeHtml(
+                  `<img src="/api/cataloguing/captures/${capture.id}/image?thumb=1&amp;v=${encodeURIComponent(capture.uuid)}" alt="${escapeHtml(
                     CAPTURE_KINDS[capture.kind] || capture.kind,
                   )}" title="${escapeHtml(CAPTURE_KINDS[capture.kind] || capture.kind)}" />`,
               )
@@ -1048,6 +1247,7 @@ export function initCataloguing({
 
   function deactivate() {
     stopCamera();
+    stopPhonePolling();
   }
 
   function bind() {
@@ -1070,6 +1270,9 @@ export function initCataloguing({
     $("#capture-import").addEventListener("click", () =>
       $("#capture-file-input").click(),
     );
+    $("#capture-phone").addEventListener("click", openPhoneCamera);
+    $("#phone-camera-copy").addEventListener("click", copyPhoneLink);
+    $("#phone-camera-dialog").addEventListener("close", () => stopPhonePolling());
     $("#capture-file-input").addEventListener("change", async (event) => {
       await importFiles(event.target.files);
       event.target.value = "";

@@ -1,7 +1,9 @@
 import http from "node:http";
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { randomBytes } from "node:crypto";
 import { execFile, spawnSync } from "node:child_process";
 import { promisify } from "node:util";
 import { LibraryDatabase } from "./lib/database.js";
@@ -69,6 +71,8 @@ let readerTiming = normalizeReaderTiming({
   ),
   rearmDelayMs: configuredRearmDelayMs,
 });
+const phoneCameraSessions = new Map();
+const phoneCameraLifetimeMs = 30 * 60 * 1000;
 if (db.getSetting("beep_rearm_ms", "") !== String(configuredRearmDelayMs))
   db.setSettings({ beep_rearm_ms: String(configuredRearmDelayMs) });
 let beepRearmTimeoutMs = readerTiming.rearmDelayMs;
@@ -531,12 +535,16 @@ function normalizeConnection(input = {}) {
   return { type, endpoint };
 }
 
-async function readBody(request) {
+async function readJsonBody(
+  request,
+  maximumSize = 1024 * 1024,
+  message = "Requête trop volumineuse.",
+) {
   const chunks = [];
   let size = 0;
   for await (const chunk of request) {
     size += chunk.length;
-    if (size > 1024 * 1024) throw new Error("Requête trop volumineuse.");
+    if (size > maximumSize) throw new Error(message);
     chunks.push(chunk);
   }
   if (!chunks.length) return {};
@@ -545,6 +553,10 @@ async function readBody(request) {
   } catch {
     throw new Error("Corps JSON invalide.");
   }
+}
+
+async function readBody(request) {
+  return readJsonBody(request);
 }
 
 async function readBinaryBody(request, maximumSize = 25 * 1024 * 1024) {
@@ -617,6 +629,10 @@ function serveStatic(request, response, pathname) {
     ".js": "text/javascript",
     ".svg": "image/svg+xml",
     ".png": "image/png",
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".webp": "image/webp",
+    ".ico": "image/x-icon",
   };
   const extension = path.extname(fullPath);
   response.writeHead(200, {
@@ -629,8 +645,109 @@ function serveStatic(request, response, pathname) {
   return true;
 }
 
+function cleanupPhoneCameraSessions() {
+  const now = Date.now();
+  for (const [token, session] of phoneCameraSessions)
+    if (session.expiresAt <= now) phoneCameraSessions.delete(token);
+}
+
+function networkHosts() {
+  const hosts = [];
+  for (const entries of Object.values(os.networkInterfaces())) {
+    for (const entry of entries || []) {
+      if (entry.family !== "IPv4" || entry.internal) continue;
+      hosts.push(entry.address);
+    }
+  }
+  return [...new Set(hosts)];
+}
+
+function phoneCameraUrl(host, token) {
+  return `http://${host}/phone-camera.html?token=${encodeURIComponent(token)}`;
+}
+
+function phoneCameraUrls(request, token) {
+  const currentHost = String(request.headers.host || `127.0.0.1:${port}`);
+  const hosts = [
+    ...networkHosts().map((address) => `${address}:${port}`),
+    currentHost,
+  ];
+  return [...new Set(hosts)].map((host) => phoneCameraUrl(host, token));
+}
+
+function createPhoneCameraSession(request, user) {
+  cleanupPhoneCameraSessions();
+  const token = randomBytes(24).toString("base64url");
+  const now = Date.now();
+  const session = {
+    token,
+    userId: user.id,
+    createdAt: now,
+    expiresAt: now + phoneCameraLifetimeMs,
+    uploads: [],
+  };
+  phoneCameraSessions.set(token, session);
+  const urls = phoneCameraUrls(request, token);
+  return {
+    token,
+    url: urls[0],
+    urls,
+    expiresAt: new Date(session.expiresAt).toISOString(),
+  };
+}
+
+function phoneCameraSession(token) {
+  cleanupPhoneCameraSessions();
+  return phoneCameraSessions.get(String(token || "")) || null;
+}
+
+function isAcceptedImageDataUrl(value) {
+  return /^data:image\/(?:jpeg|png|webp);base64,[a-z0-9+/=\s]+$/i.test(
+    String(value || ""),
+  );
+}
+
+async function handlePhoneCameraPublicRequest(request, response, url) {
+  const match = url.pathname.match(
+    /^\/api\/cataloguing\/phone-camera\/([^/]+)\/uploads$/,
+  );
+  if (!match || request.method !== "POST") return false;
+  const session = phoneCameraSession(decodeURIComponent(match[1]));
+  if (!session)
+    return json(response, 404, { error: "Lien caméra expiré ou inconnu." });
+  try {
+    const input = await readJsonBody(
+      request,
+      14 * 1024 * 1024,
+      "L’image envoyée est trop volumineuse.",
+    );
+    if (!isAcceptedImageDataUrl(input.image))
+      throw new Error("Image JPEG, PNG ou WebP attendue.");
+    if (input.thumb && !isAcceptedImageDataUrl(input.thumb))
+      throw new Error("Vignette JPEG, PNG ou WebP attendue.");
+    if (session.uploads.length >= 20)
+      throw new Error("Trop de photos en attente sur ce lien.");
+    const kind = ["front", "back", "title", "other"].includes(input.kind)
+      ? input.kind
+      : "front";
+    session.uploads.push({
+      id: randomBytes(12).toString("base64url"),
+      kind,
+      image: input.image,
+      thumb: input.thumb || input.image,
+      name: String(input.name || "telephone").slice(0, 120),
+      uploadedAt: new Date().toISOString(),
+    });
+    return json(response, 201, { ok: true, pending: session.uploads.length });
+  } catch (error) {
+    return json(response, 400, { error: error.message });
+  }
+}
+
 async function api(request, response, url) {
   const pathname = url.pathname;
+
+  if (await handlePhoneCameraPublicRequest(request, response, url)) return;
 
   if (request.method === "GET" && pathname === "/api/auth/status") {
     const user = db.userForSession(sessionToken(request));
@@ -686,6 +803,26 @@ async function api(request, response, url) {
       readBody,
       user,
     });
+
+  if (request.method === "POST" && pathname === "/api/phone-camera")
+    return json(response, 201, createPhoneCameraSession(request, user));
+
+  const phoneUploads = pathname.match(/^\/api\/phone-camera\/([^/]+)\/uploads$/);
+  if (phoneUploads && request.method === "GET") {
+    const session = phoneCameraSession(decodeURIComponent(phoneUploads[1]));
+    if (!session || session.userId !== user.id)
+      return json(response, 404, { error: "Lien caméra expiré ou inconnu." });
+    const uploads = session.uploads.splice(0, session.uploads.length);
+    return json(response, 200, {
+      uploads,
+      expiresAt: new Date(session.expiresAt).toISOString(),
+    });
+  }
+  if (phoneUploads && request.method === "DELETE") {
+    const session = phoneCameraSession(decodeURIComponent(phoneUploads[1]));
+    if (session?.userId === user.id) phoneCameraSessions.delete(session.token);
+    return json(response, 200, { ok: true });
+  }
 
   if (request.method === "GET" && pathname === "/api/dashboard")
     return json(response, 200, db.dashboard());
@@ -1471,6 +1608,19 @@ const server = http.createServer(async (request, response) => {
       });
       return fs.createReadStream(assetPath).pipe(response);
     }
+    if (url.pathname === "/vendor/qrcode/qrcode.js") {
+      const assetPath = path.join(
+        root,
+        "node_modules",
+        "qrcode-generator",
+        "qrcode.js",
+      );
+      response.writeHead(200, {
+        "Content-Type": "text/javascript; charset=utf-8",
+        "Cache-Control": "public, max-age=86400",
+      });
+      return fs.createReadStream(assetPath).pipe(response);
+    }
     if (url.pathname.startsWith("/vendor/lucide/")) {
       const relative = url.pathname.slice("/vendor/lucide/".length);
       const lucideRoot = path.resolve(
@@ -1504,18 +1654,21 @@ const server = http.createServer(async (request, response) => {
 });
 
 let port = Number(process.env.PORT) || 4310;
+const listenHost = process.env.BIBLIORFID_HOST || "0.0.0.0";
 server.on("error", (error) => {
   if (error.code === "EADDRINUSE" && port < 4320) {
     port += 1;
-    server.listen(port, "127.0.0.1");
+    server.listen(port, listenHost);
   } else {
     throw error;
   }
 });
-server.on("listening", () =>
-  console.log(`Bibliotèque ZTF disponible sur http://127.0.0.1:${port}`),
-);
-server.listen(port, "127.0.0.1");
+server.on("listening", () => {
+  const urls = [`http://127.0.0.1:${port}`];
+  for (const address of networkHosts()) urls.push(`http://${address}:${port}`);
+  console.log(`Bibliotèque ZTF disponible sur ${urls.join(" et ")}`);
+});
+server.listen(port, listenHost);
 
 let shuttingDown = false;
 async function shutdown() {
