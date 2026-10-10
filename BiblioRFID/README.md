@@ -69,26 +69,31 @@ autorités, exemplaires, circulation, abonnés, statistiques — sans quitter
 l’application. Tout ce qui demande le lecteur RFID (station, encodage,
 inventaire, portail, poste d’emprunt) reste dans les onglets du poste.
 
-Le paquet Angular est livré dans l’exécutable et servi par le serveur local
-sous `/ilms/`. Ses appels d’API passent par `/gateway/`, relayés vers la
-passerelle ILMS : l’interface reste donc sur l’origine du poste, sans question
-de CORS, avec un seul endroit où signaler une coupure réseau. Renseigner
-l’adresse de la passerelle dans **Paramètres > Interface ILMS**
-(`https://gateway.bibliotheque-ztf.org`).
+L’application Angular appelle son API par des chemins relatifs à sa propre
+origine (`/api/library-service/…`, `/api/auth-service/…`), jamais par une
+adresse absolue : en production, un proxy placé devant elle sert le paquet et
+relaie `/api/**` vers la passerelle. Le poste reproduit ce montage sur un
+**second serveur local**, lié à la seule boucle locale : le paquet y est servi
+à la racine et les appels d’API sont relayés vers la passerelle, le préfixe
+`/api` retiré pour retrouver les routes de celle-ci (`/library-service/**`).
 
-L’onglet et le relais exigent la session du poste, comme les routes d’API : le
-serveur écoute aussi sur le réseau local, et le relais ne doit pas être ouvert
-à un poste non authentifié. Le jeton de l’ILMS, lui, circule inchangé et n’est
-jamais journalisé.
+C’est ce qui permet d’embarquer l’ILMS **sans modifier une ligne de son code**,
+et sans empiéter sur `/api/`, déjà occupé par l’API du poste. Le port est choisi
+automatiquement (celui du poste + 10, puis le suivant s’il est pris) et peut
+être imposé par `BIBLIORFID_ILMS_PORT`.
+
+Renseigner l’adresse de la passerelle dans **Paramètres > Interface ILMS**
+(`https://gateway.bibliotheque-ztf.org`). Le jeton de l’ILMS circule inchangé
+et n’est jamais journalisé ; le relais n’écoute pas sur le réseau, à la
+différence du serveur du poste.
 
 Trois situations sont annoncées explicitement plutôt que par un écran vide :
 exécutable produit sans le module, passerelle non renseignée, passerelle
 injoignable. Le relais ne transporte que HTTP ; les canaux WebSocket de la
 passerelle doivent être contactés à leur adresse publique.
 
-La préparation du paquet est décrite dans [`ilms/README.md`](ilms/README.md) :
-`ng build --base-href /ilms/` et `apiUrl: "/gateway"` côté ILMS. Sans ce
-paquet, l’application se construit et fonctionne normalement.
+La préparation du paquet est décrite dans [`ilms/README.md`](ilms/README.md).
+Sans ce paquet, l’application se construit et fonctionne normalement.
 
 ## Premier essai
 

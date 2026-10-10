@@ -1,12 +1,20 @@
 import fs from "node:fs";
+import http from "node:http";
 import path from "node:path";
 
 /**
- * Interface ILMS embarquée dans l'application : le paquet Angular est servi
- * par le serveur local sous `/ilms/`, et ses appels d'API passent par le
- * proxy `/gateway/`. Les deux partagent ainsi l'origine du poste, ce qui
- * évite toute question de CORS et donne un seul endroit pour signaler une
- * coupure réseau.
+ * Interface ILMS embarquée dans l'application.
+ *
+ * L'application Angular appelle son API par des chemins relatifs à sa propre
+ * origine (`/api/library-service/...`, `/api/auth-service/...`), jamais par
+ * une adresse absolue : en production, un proxy placé devant elle sert le
+ * paquet et relaie `/api/**` vers la passerelle. Le poste reproduit
+ * exactement ce montage sur un second serveur local, lié à la seule boucle
+ * locale : le paquet est servi à la racine de ce port et les appels d'API
+ * sont relayés vers la passerelle.
+ *
+ * C'est ce qui permet d'embarquer l'ILMS sans modifier une seule ligne de son
+ * code, et sans empiéter sur l'API du poste, qui occupe déjà `/api/`.
  */
 
 const HOP_BY_HOP = new Set([
@@ -48,6 +56,9 @@ const CONTENT_TYPES = {
 // `ng build` hache les noms des fichiers qu'il produit ; ceux copiés depuis
 // `src/assets` gardent le leur et peuvent changer sans changer d'URL.
 const HASHED_NAME = /-[A-Z0-9]{8,}\.[a-z0-9]+$/;
+
+/** Préfixes que l'application Angular adresse à son API, et non au paquet. */
+export const RELAYED_PREFIXES = ["/api/", "/ilms-auth-service/"];
 
 /**
  * Emplacement du paquet Angular, dans cet ordre : variable d'environnement,
@@ -121,74 +132,6 @@ export function offlinePayload(message) {
 }
 
 /**
- * Sert `/ilms/**` depuis [ilmsRoot]. Un chemin inconnu retombe sur
- * l'`index.html` du paquet — et non sur celui du poste — pour que les liens
- * profonds de l'application Angular fonctionnent.
- */
-export function serveIlms(response, pathname, ilmsRoot, method = "GET") {
-  if (pathname === "/ilms") {
-    response.writeHead(302, { Location: "/ilms/" });
-    response.end();
-    return true;
-  }
-  if (!pathname.startsWith("/ilms/")) return false;
-  if (method !== "GET" && method !== "HEAD") {
-    const body = JSON.stringify({ error: "Méthode non autorisée." });
-    response.writeHead(405, {
-      "Content-Type": "application/json; charset=utf-8",
-      Allow: "GET, HEAD",
-    });
-    response.end(body);
-    return true;
-  }
-  if (!ilmsRoot) {
-    const page = missingBundlePage();
-    response.writeHead(503, {
-      "Content-Type": "text/html; charset=utf-8",
-      "Content-Length": Buffer.byteLength(page),
-      "Cache-Control": "no-store",
-    });
-    response.end(method === "HEAD" ? undefined : page);
-    return true;
-  }
-
-  const base = path.resolve(ilmsRoot);
-  const index = path.join(base, "index.html");
-  let relative = "";
-  try {
-    relative = decodeURIComponent(pathname.slice("/ilms/".length));
-  } catch {
-    relative = "";
-  }
-  let file = path.resolve(base, relative || "index.html");
-  // Un chemin sortant du paquet est traité comme introuvable, jamais servi.
-  if (file !== base && !file.startsWith(base + path.sep)) file = index;
-  let stats = null;
-  try {
-    const candidate = fs.statSync(file);
-    if (candidate.isFile()) stats = candidate;
-  } catch {
-    stats = null;
-  }
-  if (!stats) {
-    file = index;
-    stats = fs.statSync(file);
-  }
-
-  response.writeHead(200, {
-    "Content-Type": contentTypeOf(file),
-    "Content-Length": stats.size,
-    "Cache-Control": cacheControlOf(file),
-  });
-  if (method === "HEAD") {
-    response.end();
-    return true;
-  }
-  fs.createReadStream(file).pipe(response);
-  return true;
-}
-
-/**
  * Normalise l'adresse de la passerelle ILMS. Renvoie une chaîne vide quand le
  * champ est vidé, et refuse tout ce qui n'est pas une adresse HTTP(S).
  */
@@ -206,6 +149,50 @@ export function normalizeGatewayUrl(value) {
   return `${url.origin}${url.pathname.replace(/\/+$/, "")}`;
 }
 
+/** Sert un fichier du paquet. Renvoie `false` si le chemin n'en est pas un. */
+function serveBundleFile(response, pathname, ilmsRoot, method) {
+  const base = path.resolve(ilmsRoot);
+  let relative = "";
+  try {
+    relative = decodeURIComponent(pathname.slice(1));
+  } catch {
+    relative = "";
+  }
+  const file = path.resolve(base, relative || "index.html");
+  // Un chemin sortant du paquet n'est jamais servi.
+  if (file !== base && !file.startsWith(base + path.sep)) return false;
+  let stats = null;
+  try {
+    const candidate = fs.statSync(file);
+    if (candidate.isFile()) stats = candidate;
+  } catch {
+    stats = null;
+  }
+  if (!stats) return false;
+
+  response.writeHead(200, {
+    "Content-Type": contentTypeOf(file),
+    "Content-Length": stats.size,
+    "Cache-Control": cacheControlOf(file),
+  });
+  if (method === "HEAD") response.end();
+  else fs.createReadStream(file).pipe(response);
+  return true;
+}
+
+/** Sert l'`index.html` du paquet : liens profonds de l'application Angular. */
+function serveBundleIndex(response, ilmsRoot, method) {
+  const index = path.join(path.resolve(ilmsRoot), "index.html");
+  const stats = fs.statSync(index);
+  response.writeHead(200, {
+    "Content-Type": "text/html; charset=utf-8",
+    "Content-Length": stats.size,
+    "Cache-Control": "no-cache, no-store, must-revalidate",
+  });
+  if (method === "HEAD") response.end();
+  else fs.createReadStream(index).pipe(response);
+}
+
 function forwardedRequestHeaders(headers) {
   const result = {};
   for (const [name, value] of Object.entries(headers)) {
@@ -221,7 +208,19 @@ function forwardedRequestHeaders(headers) {
 }
 
 /**
- * Relaie `/gateway/**` vers la passerelle ILMS. Le jeton d'authentification
+ * Adresse visée sur la passerelle. Le préfixe `/api` que l'application ajoute
+ * à ses appels est retiré : les routes de la passerelle sont nommées d'après
+ * le service (`/library-service/**`), comme le fait le proxy de production.
+ */
+export function gatewayTarget(baseUrl, pathname, search = "") {
+  const suffix = pathname.startsWith("/api/")
+    ? pathname.slice("/api".length)
+    : pathname;
+  return `${baseUrl}${suffix}${search}`;
+}
+
+/**
+ * Relaie un appel d'API vers la passerelle ILMS. Le jeton d'authentification
  * circule inchangé ; rien n'est journalisé.
  */
 export function createGatewayProxy({
@@ -245,8 +244,7 @@ export function createGatewayProxy({
       );
     }
 
-    const suffix = url.pathname.slice("/gateway".length) || "/";
-    const destination = `${target}${suffix}${url.search}`;
+    const destination = gatewayTarget(target, url.pathname, url.search);
     const hasBody = request.method !== "GET" && request.method !== "HEAD";
     try {
       const upstream = await fetchImpl(destination, {
@@ -295,4 +293,83 @@ export function createGatewayProxy({
       );
     }
   };
+}
+
+/**
+ * Gestionnaire du serveur ILMS local : un fichier du paquet, sinon un appel
+ * d'API relayé, sinon l'`index.html` pour les liens profonds d'Angular.
+ */
+export function createIlmsHandler({ ilmsRoot = null, proxy = null } = {}) {
+  return async function handle(request, response) {
+    const url = new URL(request.url, "http://localhost");
+    const method = request.method || "GET";
+
+    const relayed = RELAYED_PREFIXES.some((prefix) =>
+      url.pathname.startsWith(prefix),
+    );
+    if (relayed && proxy) return proxy(request, response, url);
+
+    if (!ilmsRoot) {
+      const page = missingBundlePage();
+      response.writeHead(503, {
+        "Content-Type": "text/html; charset=utf-8",
+        "Content-Length": Buffer.byteLength(page),
+        "Cache-Control": "no-store",
+      });
+      return response.end(method === "HEAD" ? undefined : page);
+    }
+    if (method !== "GET" && method !== "HEAD") {
+      const body = JSON.stringify({ error: "Méthode non autorisée." });
+      response.writeHead(405, {
+        "Content-Type": "application/json; charset=utf-8",
+        Allow: "GET, HEAD",
+      });
+      return response.end(body);
+    }
+    if (serveBundleFile(response, url.pathname, ilmsRoot, method)) return;
+    return serveBundleIndex(response, ilmsRoot, method);
+  };
+}
+
+/**
+ * Démarre le serveur local de l'interface ILMS. Il n'écoute que sur la boucle
+ * locale : le relais de la passerelle ne doit pas être joignable depuis le
+ * réseau, contrairement au serveur du poste.
+ */
+export function startIlmsServer({
+  ilmsRoot = null,
+  baseUrl = () => "",
+  port = 4311,
+  maxPort = 4320,
+  host = "127.0.0.1",
+} = {}) {
+  const proxy = createGatewayProxy({ baseUrl });
+  const server = http.createServer((request, response) => {
+    createIlmsHandler({ ilmsRoot, proxy })(request, response).catch(() => {
+      if (!response.headersSent) response.writeHead(500);
+      response.end();
+    });
+  });
+
+  return new Promise((resolve) => {
+    let candidate = port;
+    const attempt = () => {
+      server.once("error", (error) => {
+        if (error.code === "EADDRINUSE" && candidate < maxPort) {
+          candidate += 1;
+          attempt();
+          return;
+        }
+        // L'onglet ILMS est accessoire : son indisponibilité ne doit jamais
+        // empêcher le poste de démarrer.
+        resolve({ server: null, port: null, origin: "" });
+      });
+      server.listen(candidate, host, () => {
+        // `port: 0` laisse le système choisir : lire le port réellement ouvert.
+        const actual = server.address().port;
+        resolve({ server, port: actual, origin: `http://${host}:${actual}` });
+      });
+    };
+    attempt();
+  });
 }

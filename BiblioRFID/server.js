@@ -22,10 +22,9 @@ import { isBadgeEpc, isCardEpc, isValidEpc } from "./lib/epc.js";
 import { CataloguingService } from "./lib/cataloguing/service.js";
 import { handleCataloguingRequest } from "./lib/cataloguing/routes.js";
 import {
-  createGatewayProxy,
   normalizeGatewayUrl,
   resolveIlmsRoot,
-  serveIlms,
+  startIlmsServer,
 } from "./lib/ilms.js";
 
 const execFileAsync = promisify(execFile);
@@ -49,15 +48,15 @@ syncService.initialize();
 const cataloguingService = new CataloguingService(db, { dataRoot });
 // Photos abandonnées lors d'un catalogage interrompu : elles ne servent plus.
 cataloguingService.purgeStaleCaptures(48);
-// Interface ILMS embarquée : paquet Angular servi sous `/ilms/`, ses appels
-// d'API relayés par `/gateway/` pour rester sur l'origine du poste.
+// Interface ILMS embarquée. Elle tourne sur son propre serveur local parce
+// que l'application Angular appelle son API en chemins relatifs (`/api/...`),
+// là où le poste a déjà son API : lui donner son port, c'est reproduire le
+// montage de production sans modifier une ligne de l'ILMS.
 const ilmsRoot = resolveIlmsRoot({
   root,
   override: process.env.BIBLIORFID_ILMS_DIR || "",
 });
-const gatewayProxy = createGatewayProxy({
-  baseUrl: () => db.getSetting("ilms_gateway_url", ""),
-});
+let ilmsOrigin = "";
 
 /** Ce que l'interface du poste doit savoir pour proposer l'onglet ILMS. */
 function ilmsStatus() {
@@ -65,7 +64,8 @@ function ilmsStatus() {
   return {
     available: Boolean(ilmsRoot),
     gatewayUrl,
-    configured: Boolean(ilmsRoot && gatewayUrl),
+    origin: ilmsOrigin,
+    configured: Boolean(ilmsRoot && gatewayUrl && ilmsOrigin),
   };
 }
 const marker = "__RFID_JSON__";
@@ -605,24 +605,6 @@ function json(response, status, payload) {
     "Cache-Control": "no-store",
   });
   response.end(body);
-}
-
-/** Message du cadre ILMS quand la session du poste manque ou a expiré. */
-function ilmsSignInPage() {
-  return `<!doctype html>
-<html lang="fr"><head><meta charset="utf-8">
-<title>Session requise</title>
-<style>
-  body { margin: 0; display: grid; place-items: center; min-height: 100vh;
-    font: 15px/1.6 "Segoe UI", system-ui, sans-serif; color: #153047;
-    background: #f4f7fa; }
-  div { max-width: 30rem; padding: 2rem; text-align: center; }
-  h1 { font-size: 1.25rem; margin: 0 0 0.75rem; }
-</style></head>
-<body><div>
-  <h1>Session du poste requise</h1>
-  <p>Connectez-vous à Bibliotèque ZTF pour ouvrir l'interface ILMS.</p>
-</div></body></html>`;
 }
 
 const sessionCookieName = "bibliorfid_session";
@@ -1643,25 +1625,6 @@ const server = http.createServer(async (request, response) => {
   try {
     if (url.pathname.startsWith("/api/"))
       return await api(request, response, url);
-    // Le poste écoute aussi sur le réseau : l'interface ILMS et le relais de
-    // sa passerelle exigent la session locale, comme les routes d'API.
-    if (url.pathname === "/gateway" || url.pathname.startsWith("/gateway/")) {
-      if (!db.userForSession(sessionToken(request)))
-        return json(response, 401, { error: "Authentification requise." });
-      return await gatewayProxy(request, response, url);
-    }
-    if (url.pathname === "/ilms" || url.pathname.startsWith("/ilms/")) {
-      if (!db.userForSession(sessionToken(request))) {
-        const page = ilmsSignInPage();
-        response.writeHead(401, {
-          "Content-Type": "text/html; charset=utf-8",
-          "Content-Length": Buffer.byteLength(page),
-          "Cache-Control": "no-store",
-        });
-        return response.end(page);
-      }
-      return serveIlms(response, url.pathname, ilmsRoot, request.method);
-    }
     if (
       url.pathname === "/vendor/sweetalert2/sweetalert2.all.min.js" ||
       url.pathname === "/vendor/sweetalert2/sweetalert2.min.css"
@@ -1745,6 +1708,16 @@ server.on("listening", () => {
 });
 server.listen(port, listenHost);
 
+// Second serveur, sur la boucle locale uniquement : l'interface ILMS et le
+// relais de sa passerelle n'ont pas à être joignables depuis le réseau.
+const ilmsServer = await startIlmsServer({
+  ilmsRoot,
+  baseUrl: () => db.getSetting("ilms_gateway_url", ""),
+  port: Number(process.env.BIBLIORFID_ILMS_PORT) || port + 10,
+});
+ilmsOrigin = ilmsServer.origin;
+if (ilmsOrigin) console.log(`Interface ILMS disponible sur ${ilmsOrigin}`);
+
 let shuttingDown = false;
 async function shutdown() {
   if (shuttingDown) return;
@@ -1760,6 +1733,7 @@ async function shutdown() {
   try {
     await reader.shutdown();
   } catch {}
+  ilmsServer.server?.close();
   server.close(() => {
     db.close();
     process.exit(0);

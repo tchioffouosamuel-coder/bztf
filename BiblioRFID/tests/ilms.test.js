@@ -6,9 +6,10 @@ import os from "node:os";
 import path from "node:path";
 import {
   createGatewayProxy,
+  gatewayTarget,
   normalizeGatewayUrl,
   resolveIlmsRoot,
-  serveIlms,
+  startIlmsServer,
 } from "../lib/ilms.js";
 
 function listen(server) {
@@ -18,7 +19,7 @@ function listen(server) {
 }
 
 function close(server) {
-  return new Promise((resolve) => server.close(resolve));
+  return new Promise((resolve) => (server ? server.close(resolve) : resolve()));
 }
 
 /** Paquet Angular minimal : un index, un script haché, un asset non haché. */
@@ -32,16 +33,6 @@ function bundle() {
   fs.mkdirSync(path.join(directory, "assets"));
   fs.writeFileSync(path.join(directory, "assets", "logo.svg"), "<svg/>");
   return directory;
-}
-
-async function withServer(handler, visit) {
-  const server = http.createServer(handler);
-  const port = await listen(server);
-  try {
-    return await visit(`http://127.0.0.1:${port}`);
-  } finally {
-    await close(server);
-  }
 }
 
 test("trouve le paquet ILMS par variable d’environnement puis par le dépôt", () => {
@@ -60,67 +51,127 @@ test("trouve le paquet ILMS par variable d’environnement puis par le dépôt",
   );
 });
 
-test("sert le paquet, ses liens profonds et refuse d’en sortir", async () => {
-  const directory = bundle();
-  const stationIndex = "PAGE DU POSTE";
-  await withServer(
-    (request, response) => {
-      const url = new URL(request.url, "http://localhost");
-      if (serveIlms(response, url.pathname, directory, request.method)) return;
-      response.writeHead(200, { "Content-Type": "text/html" });
-      response.end(stationIndex);
-    },
-    async (origin) => {
-      const redirect = await fetch(`${origin}/ilms`, { redirect: "manual" });
-      assert.equal(redirect.status, 302);
-      assert.equal(redirect.headers.get("location"), "/ilms/");
-
-      const index = await fetch(`${origin}/ilms/`);
-      assert.equal(index.status, 200);
-      assert.match(index.headers.get("content-type"), /text\/html/);
-      assert.match(index.headers.get("cache-control"), /no-store/);
-      assert.match(await index.text(), /app-root/);
-
-      const script = await fetch(`${origin}/ilms/main-ABCD1234.js`);
-      assert.equal(script.headers.get("content-type"), "text/javascript; charset=utf-8");
-      assert.match(script.headers.get("cache-control"), /immutable/);
-
-      // Les assets copiés tels quels peuvent changer sans changer de nom.
-      const logo = await fetch(`${origin}/ilms/assets/logo.svg`);
-      assert.equal(logo.headers.get("content-type"), "image/svg+xml; charset=utf-8");
-      assert.equal(logo.headers.get("cache-control"), "no-cache");
-
-      // Lien profond Angular : l'index du paquet, jamais celui du poste.
-      const deep = await fetch(`${origin}/ilms/admin/libraries/42/dashboard`);
-      assert.equal(deep.status, 200);
-      const deepBody = await deep.text();
-      assert.match(deepBody, /app-root/);
-      assert.doesNotMatch(deepBody, /PAGE DU POSTE/);
-
-      // Remontée de dossier : traitée comme introuvable.
-      const escape = await fetch(`${origin}/ilms/..%2f..%2fserver.js`);
-      assert.equal(escape.status, 200);
-      assert.match(await escape.text(), /app-root/);
-
-      const posted = await fetch(`${origin}/ilms/`, { method: "POST" });
-      assert.equal(posted.status, 405);
-    },
+test("retire le préfixe /api que l’application ajoute à ses appels", () => {
+  const base = "https://gateway.exemple.org";
+  // Les routes de la passerelle sont nommées d'après le service.
+  assert.equal(
+    gatewayTarget(base, "/api/library-service/api/v1/libraries", "?limit=2"),
+    "https://gateway.exemple.org/library-service/api/v1/libraries?limit=2",
+  );
+  assert.equal(
+    gatewayTarget(base, "/api/auth-service/api/v1/auth/login"),
+    "https://gateway.exemple.org/auth-service/api/v1/auth/login",
+  );
+  // Un chemin hors /api est relayé tel quel.
+  assert.equal(
+    gatewayTarget(base, "/ilms-auth-service/oauth/token"),
+    "https://gateway.exemple.org/ilms-auth-service/oauth/token",
   );
 });
 
+test("sert le paquet à la racine de son port et relaie son API", async () => {
+  const directory = bundle();
+  const calls = [];
+  const upstream = http.createServer((request, response) => {
+    calls.push({
+      url: request.url,
+      authorization: request.headers.authorization,
+      origin: request.headers.origin,
+    });
+    response.writeHead(200, { "Content-Type": "application/json" });
+    response.end(JSON.stringify({ ok: true }));
+  });
+  const upstreamPort = await listen(upstream);
+  const ilms = await startIlmsServer({
+    ilmsRoot: directory,
+    baseUrl: () => `http://127.0.0.1:${upstreamPort}`,
+    port: 0,
+    maxPort: 0,
+  });
+
+  try {
+    assert.ok(ilms.origin, "le serveur ILMS doit démarrer");
+
+    const index = await fetch(`${ilms.origin}/`);
+    assert.equal(index.status, 200);
+    assert.match(index.headers.get("content-type"), /text\/html/);
+    assert.match(await index.text(), /app-root/);
+
+    const script = await fetch(`${ilms.origin}/main-ABCD1234.js`);
+    assert.equal(
+      script.headers.get("content-type"),
+      "text/javascript; charset=utf-8",
+    );
+    assert.match(script.headers.get("cache-control"), /immutable/);
+
+    // Les assets copiés tels quels peuvent changer sans changer de nom.
+    const logo = await fetch(`${ilms.origin}/assets/logo.svg`);
+    assert.equal(logo.headers.get("cache-control"), "no-cache");
+
+    // Lien profond Angular : l'index du paquet.
+    const deep = await fetch(`${ilms.origin}/admin/libraries/42/dashboard`);
+    assert.equal(deep.status, 200);
+    assert.match(await deep.text(), /app-root/);
+
+    // Remontée de dossier : traitée comme un lien profond, jamais servie.
+    const escape = await fetch(`${ilms.origin}/..%2f..%2fserver.js`);
+    assert.equal(escape.status, 200);
+    assert.match(await escape.text(), /app-root/);
+
+    const relayed = await fetch(
+      `${ilms.origin}/api/library-service/api/v1/stats?limit=3`,
+      {
+        method: "POST",
+        headers: {
+          Authorization: "Bearer jeton-de-test",
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ q: 1 }),
+      },
+    );
+    assert.equal(relayed.status, 200);
+    assert.deepEqual(await relayed.json(), { ok: true });
+  } finally {
+    await close(ilms.server);
+    await close(upstream);
+  }
+
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].url, "/library-service/api/v1/stats?limit=3");
+  assert.equal(calls[0].authorization, "Bearer jeton-de-test");
+  // L'origine du poste n'a pas de sens pour la passerelle.
+  assert.equal(calls[0].origin, undefined);
+});
+
+test("n’écoute que sur la boucle locale", async () => {
+  const ilms = await startIlmsServer({
+    ilmsRoot: bundle(),
+    baseUrl: () => "",
+    port: 0,
+    maxPort: 0,
+  });
+  try {
+    assert.equal(ilms.server.address().address, "127.0.0.1");
+  } finally {
+    await close(ilms.server);
+  }
+});
+
 test("annonce clairement un exécutable produit sans le module ILMS", async () => {
-  await withServer(
-    (request, response) => {
-      const url = new URL(request.url, "http://localhost");
-      serveIlms(response, url.pathname, null, request.method);
-    },
-    async (origin) => {
-      const response = await fetch(`${origin}/ilms/`);
-      assert.equal(response.status, 503);
-      assert.match(response.headers.get("content-type"), /text\/html/);
-      assert.match(await response.text(), /Module ILMS absent/);
-    },
-  );
+  const ilms = await startIlmsServer({
+    ilmsRoot: null,
+    baseUrl: () => "",
+    port: 0,
+    maxPort: 0,
+  });
+  try {
+    const response = await fetch(`${ilms.origin}/`);
+    assert.equal(response.status, 503);
+    assert.match(response.headers.get("content-type"), /text\/html/);
+    assert.match(await response.text(), /Module ILMS absent/);
+  } finally {
+    await close(ilms.server);
+  }
 });
 
 test("normalise l’adresse de la passerelle et refuse les autres schémas", () => {
@@ -138,83 +189,37 @@ test("normalise l’adresse de la passerelle et refuse les autres schémas", () 
   assert.throws(() => normalizeGatewayUrl("pas une adresse"), /invalide/);
 });
 
-test("relaie la passerelle en conservant le jeton et sans l’origine du poste", async () => {
-  const received = [];
-  const upstream = http.createServer((request, response) => {
-    received.push({
-      method: request.method,
-      url: request.url,
-      authorization: request.headers.authorization,
-      origin: request.headers.origin,
-      host: request.headers.host,
-    });
-    response.writeHead(201, { "Content-Type": "application/json" });
-    response.end(JSON.stringify({ ok: true }));
-  });
-  const upstreamPort = await listen(upstream);
-  const base = `http://127.0.0.1:${upstreamPort}`;
-  const proxy = createGatewayProxy({ baseUrl: () => base });
-
-  try {
-    await withServer(
-      (request, response) =>
-        proxy(request, response, new URL(request.url, "http://localhost")),
-      async (origin) => {
-        const response = await fetch(
-          `${origin}/gateway/library-service/api/v1/libraries?limit=2`,
-          {
-            method: "POST",
-            headers: {
-              Authorization: "Bearer jeton-de-test",
-              Origin: origin,
-              "Content-Type": "application/json",
-            },
-            body: JSON.stringify({ name: "Test" }),
-          },
-        );
-        assert.equal(response.status, 201);
-        assert.deepEqual(await response.json(), { ok: true });
-      },
-    );
-  } finally {
-    await close(upstream);
-  }
-
-  assert.equal(received.length, 1);
-  assert.equal(received[0].method, "POST");
-  assert.equal(received[0].url, "/library-service/api/v1/libraries?limit=2");
-  assert.equal(received[0].authorization, "Bearer jeton-de-test");
-  assert.equal(received[0].origin, undefined);
-  assert.equal(received[0].host, `127.0.0.1:${upstreamPort}`);
-});
-
 test("explique la coupure réseau au lieu d’un échec brut", async () => {
-  const unreachable = createGatewayProxy({
+  const proxy = createGatewayProxy({
     baseUrl: () => "http://127.0.0.1:1",
     timeoutMs: 500,
   });
-  await withServer(
-    (request, response) =>
-      unreachable(request, response, new URL(request.url, "http://localhost")),
-    async (origin) => {
-      const response = await fetch(`${origin}/gateway/health`);
-      assert.equal(response.status, 504);
-      const payload = await response.json();
-      assert.equal(payload.offline, true);
-      assert.match(payload.error, /injoignable|à temps/);
-    },
+  const server = http.createServer((request, response) =>
+    proxy(request, response, new URL(request.url, "http://localhost")),
   );
+  const port = await listen(server);
+  try {
+    const response = await fetch(`http://127.0.0.1:${port}/api/health`);
+    assert.equal(response.status, 504);
+    const payload = await response.json();
+    assert.equal(payload.offline, true);
+    assert.match(payload.error, /injoignable|à temps/);
+  } finally {
+    await close(server);
+  }
 
   const unset = createGatewayProxy({ baseUrl: () => "" });
-  await withServer(
-    (request, response) =>
-      unset(request, response, new URL(request.url, "http://localhost")),
-    async (origin) => {
-      const response = await fetch(`${origin}/gateway/health`);
-      assert.equal(response.status, 503);
-      const payload = await response.json();
-      assert.equal(payload.offline, true);
-      assert.match(payload.error, /non configurée/);
-    },
+  const bare = http.createServer((request, response) =>
+    unset(request, response, new URL(request.url, "http://localhost")),
   );
+  const barePort = await listen(bare);
+  try {
+    const response = await fetch(`http://127.0.0.1:${barePort}/api/health`);
+    assert.equal(response.status, 503);
+    const payload = await response.json();
+    assert.equal(payload.offline, true);
+    assert.match(payload.error, /non configurée/);
+  } finally {
+    await close(bare);
+  }
 });

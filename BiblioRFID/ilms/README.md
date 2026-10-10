@@ -10,23 +10,19 @@ n'est pas versionné ici.
 Dans une copie du dépôt ILMS :
 
 ```powershell
-npm install --legacy-peer-deps
-npx ng build --base-href /ilms/ --configuration production
+npm ci --force
+npm run build:desktop
 ```
 
 Puis copier le contenu de `dist/wcl/browser/` dans ce dossier, de sorte que
 `ilms/index.html` existe.
 
-Deux réglages sont indispensables côté ILMS :
-
-- `--base-href /ilms/` : le poste sert l'application sous ce préfixe, et non à
-  la racine (le dépôt ILMS a `<base href="/">` pour son déploiement nginx) ;
-- `apiUrl: "/gateway"` dans l'environnement utilisé pour cette compilation, au
-  lieu de l'adresse absolue de la passerelle. Les appels passent alors par le
-  relais du poste, restent sur son origine — donc sans CORS — et bénéficient du
-  message d'indisponibilité quand Internet est coupé. Prévoir pour cela un
-  `src/environments/environment.desktop.ts` et une configuration `desktop` dans
-  `angular.json`.
+La configuration `desktop` de l'ILMS produit exactement le même paquet que la
+production : **aucune adaptation n'est nécessaire**. L'application appelle son
+API par des chemins relatifs à son origine, et le poste la sert à la racine
+d'un port local dédié, où il relaie `/api/**` vers la passerelle — le même
+montage que le proxy de production. Ni `--base-href`, ni variable d'API à
+changer.
 
 ## Sans ce paquet
 
@@ -36,6 +32,6 @@ poste restent disponibles.
 
 ## WebSocket
 
-Le relais `/gateway/` ne transporte que HTTP. Les canaux WebSocket de la
-passerelle (`/library-service/ws/**`, `/notification-service/ws/**`) doivent
-être contactés directement à leur adresse publique.
+Le relais ne transporte que HTTP. Les canaux WebSocket de la passerelle
+(`/library-service/ws/**`, `/notification-service/ws/**`) doivent être
+contactés directement à leur adresse publique.

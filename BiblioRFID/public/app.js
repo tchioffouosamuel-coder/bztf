@@ -2143,26 +2143,29 @@ async function loadSyncStatus(showError = true) {
 }
 
 /**
- * Onglet ILMS : le paquet Angular est servi par le poste, donc le cadre reste
- * sur la même origine. Son chargement n'a lieu qu'à la première ouverture.
+ * Onglet ILMS. L'interface tourne sur son propre serveur local, sur la boucle
+ * locale : elle y retrouve les chemins d'API relatifs qu'elle attend. Le cadre
+ * n'est chargé qu'à la première ouverture.
  */
 async function openIlms() {
   const frame = $("#ilms-frame");
-  let status = { available: true, gatewayUrl: "" };
+  let status = { available: true, gatewayUrl: "", origin: "" };
   try {
     status = await api("/api/ilms/status");
   } catch {
     // Statut indisponible : le cadre affichera lui-même le motif.
   }
   const notice = $("#ilms-notice");
-  const missingGateway = status.available && !status.gatewayUrl;
-  notice.hidden = !missingGateway;
-  if (missingGateway)
-    $("#ilms-notice-text").textContent =
-      "Renseignez l’adresse de la passerelle ILMS dans Paramètres pour utiliser cet onglet.";
+  const problem = !status.origin
+    ? "Le service local de l’interface ILMS n’a pas pu démarrer."
+    : status.available && !status.gatewayUrl
+      ? "Renseignez l’adresse de la passerelle ILMS dans Paramètres pour utiliser cet onglet."
+      : "";
+  notice.hidden = !problem;
+  if (problem) $("#ilms-notice-text").textContent = problem;
   icons();
-  if (!frame.dataset.loaded) {
-    frame.src = "/ilms/";
+  if (status.origin && !frame.dataset.loaded) {
+    frame.src = `${status.origin}/`;
     frame.dataset.loaded = "1";
   }
 }
@@ -2175,9 +2178,11 @@ function renderIlmsStatus(status) {
     : "Non configurée";
   $("#ilms-status-detail").textContent = !status.available
     ? "Module ILMS absent de cette version de l’application."
-    : status.gatewayUrl
-      ? `Passerelle : ${status.gatewayUrl}`
-      : "Aucune passerelle ILMS renseignée.";
+    : !status.origin
+      ? "Le service local de l’interface ILMS n’a pas démarré."
+      : status.gatewayUrl
+        ? `Passerelle : ${status.gatewayUrl}`
+        : "Aucune passerelle ILMS renseignée.";
   if (status.gatewayUrl) $("#ilms-gateway-url").value = status.gatewayUrl;
 }
 

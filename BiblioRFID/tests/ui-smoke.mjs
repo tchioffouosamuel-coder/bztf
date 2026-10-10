@@ -391,7 +391,9 @@ try {
   await desktop.click('[data-view="ilms"]');
   await desktop.waitForSelector("#view-ilms.active");
   await desktop.waitForFunction(() => Boolean(document.querySelector("#ilms-frame")?.src));
-  assert.match(await desktop.locator("#ilms-frame").getAttribute("src"), /\/ilms\/$/);
+  // L'interface ILMS a son propre port local : elle y retrouve les chemins
+  // d'API relatifs qu'elle attend, sans empiéter sur ceux du poste.
+  assert.match(await desktop.locator("#ilms-frame").getAttribute("src"), /^http:\/\/127\.0\.0\.1:\d+\/$/);
   assert.equal(await desktop.locator("#ilms-notice").isVisible(), false, "La passerelle est renseignée : aucun avertissement.");
   assert.equal(await desktop.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth), true, "Pas de débordement horizontal dans l'onglet ILMS.");
   assert.equal(await desktop.locator('[data-view="ilms"] svg.lucide').count(), 1, "L'icône de l'onglet ILMS doit être rendue.");
