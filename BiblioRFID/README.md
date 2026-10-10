@@ -95,6 +95,24 @@ passerelle doivent être contactés à leur adresse publique.
 La préparation du paquet est décrite dans [`ilms/README.md`](ilms/README.md).
 Sans ce paquet, l’application se construit et fonctionne normalement.
 
+### Le poste comme client de l’ILMS
+
+L’ILMS garde le catalogue ; le poste n’apporte que la chaîne RFID. Il interroge
+donc l’ILMS pour son propre compte, directement auprès de la passerelle — il
+tourne côté serveur, sans la contrainte d’origine d’un navigateur.
+
+L’authentification utilise un **compte de service propre au poste**, créé dans
+l’ILMS : identifiant, mot de passe et identifiant de la bibliothèque, à
+renseigner dans **Paramètres > Interface ILMS**. Le mot de passe ne ressort
+jamais de la base locale, et laisser le champ vide conserve celui déjà
+enregistré. Le jeton obtenu est gardé en mémoire jusqu’à son expiration, et
+redemandé une fois si la passerelle le refuse. Ni identifiants ni jeton ne sont
+journalisés.
+
+`GET /api/ilms/copies/by-tag?epc=&tid=` renvoie l’exemplaire de l’ILMS portant
+ce tag. Un tag absent du catalogue renvoie `null` : c’est une réponse
+ordinaire, le portail en lit toute la journée qui n’appartiennent pas au fonds.
+
 ## Premier essai
 
 1. Ouvrir **Paramètres**, choisir **Simulation**, puis enregistrer.

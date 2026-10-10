@@ -2180,10 +2180,20 @@ function renderIlmsStatus(status) {
     ? "Module ILMS absent de cette version de l’application."
     : !status.origin
       ? "Le service local de l’interface ILMS n’a pas démarré."
-      : status.gatewayUrl
-        ? `Passerelle : ${status.gatewayUrl}`
-        : "Aucune passerelle ILMS renseignée.";
+      : !status.gatewayUrl
+        ? "Aucune passerelle ILMS renseignée."
+        : status.clientReady
+          ? `Passerelle : ${status.gatewayUrl} · compte ${status.username}`
+          : `Passerelle : ${status.gatewayUrl} · compte du poste incomplet`;
   if (status.gatewayUrl) $("#ilms-gateway-url").value = status.gatewayUrl;
+  $("#ilms-username").value = status.username || "";
+  $("#ilms-library-id").value = status.libraryId || "";
+  // Le mot de passe enregistré n'est jamais renvoyé : le champ reste vide et
+  // le laisser vide conserve celui déjà en place.
+  $("#ilms-password").value = "";
+  $("#ilms-password").placeholder = status.passwordSet
+    ? "Inchangé si laissé vide"
+    : "Mot de passe du compte";
 }
 
 async function loadIlmsStatus(showError = true) {
@@ -2201,7 +2211,12 @@ async function saveIlmsSettings(event) {
   try {
     const status = await api("/api/ilms/settings", {
       method: "PUT",
-      body: JSON.stringify({ gatewayUrl: $("#ilms-gateway-url").value }),
+      body: JSON.stringify({
+        gatewayUrl: $("#ilms-gateway-url").value,
+        username: $("#ilms-username").value,
+        password: $("#ilms-password").value,
+        libraryId: $("#ilms-library-id").value,
+      }),
     });
     renderIlmsStatus(status);
     // Le cadre doit repartir de l'adresse enregistrée.

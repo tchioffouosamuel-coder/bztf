@@ -26,6 +26,7 @@ import {
   resolveIlmsRoot,
   startIlmsServer,
 } from "./lib/ilms.js";
+import { IlmsClient } from "./lib/ilms-client.js";
 
 const execFileAsync = promisify(execFile);
 const root = path.dirname(fileURLToPath(import.meta.url));
@@ -57,6 +58,9 @@ const ilmsRoot = resolveIlmsRoot({
   override: process.env.BIBLIORFID_ILMS_DIR || "",
 });
 let ilmsOrigin = "";
+// Le poste parle aussi à l'ILMS pour son compte : c'est l'ILMS qui garde le
+// catalogue, le poste n'apporte que la chaîne RFID.
+const ilmsClient = new IlmsClient(db);
 
 /** Ce que l'interface du poste doit savoir pour proposer l'onglet ILMS. */
 function ilmsStatus() {
@@ -66,6 +70,11 @@ function ilmsStatus() {
     gatewayUrl,
     origin: ilmsOrigin,
     configured: Boolean(ilmsRoot && gatewayUrl && ilmsOrigin),
+    username: db.getSetting("ilms_username", ""),
+    libraryId: db.getSetting("ilms_library_id", ""),
+    // Le mot de passe du compte de service ne sort pas de la base.
+    passwordSet: Boolean(db.getSetting("ilms_password", "")),
+    clientReady: ilmsClient.configured,
   };
 }
 const marker = "__RFID_JSON__";
@@ -1083,8 +1092,32 @@ async function api(request, response, url) {
     } catch (error) {
       return json(response, 400, { error: error.message });
     }
-    db.setSettings({ ilms_gateway_url: gatewayUrl });
+    const settings = {
+      ilms_gateway_url: gatewayUrl,
+      ilms_username: String(input.username ?? "").trim(),
+      ilms_library_id: String(input.libraryId ?? "").trim(),
+    };
+    // Un champ laissé vide conserve le mot de passe déjà enregistré : le
+    // formulaire ne le réaffiche jamais.
+    const password = String(input.password ?? "");
+    if (password) settings.ilms_password = password;
+    db.setSettings(settings);
+    ilmsClient.reset();
     return json(response, 200, ilmsStatus());
+  }
+  if (request.method === "GET" && pathname === "/api/ilms/copies/by-tag") {
+    try {
+      const copy = await ilmsClient.findCopyByTag({
+        epc: url.searchParams.get("epc") || "",
+        tid: url.searchParams.get("tid") || "",
+      });
+      return json(response, 200, { copy });
+    } catch (error) {
+      return json(response, error.offline ? 503 : 400, {
+        error: error.message,
+        offline: Boolean(error.offline),
+      });
+    }
   }
   if (request.method === "GET" && pathname === "/api/sync/status")
     return json(response, 200, syncService.status());
