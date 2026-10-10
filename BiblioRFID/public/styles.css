@@ -2899,3 +2899,38 @@ dialog::backdrop {
     grid-template-columns: 1fr;
   }
 }
+
+/* Onglet ILMS : le cadre occupe toute la hauteur utile du poste. */
+.ilms-frame-wrap {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  min-height: calc(100vh - 210px);
+}
+.ilms-frame {
+  flex: 1;
+  width: 100%;
+  min-height: 520px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--surface);
+  box-shadow: var(--shadow);
+}
+.ilms-notice {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 14px 16px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--surface);
+}
+.ilms-notice p {
+  flex: 1;
+  margin: 0;
+}
+/* `display: flex` l'emporterait sur le `display: none` de l'attribut hidden. */
+.ilms-notice[hidden] {
+  display: none;
+}

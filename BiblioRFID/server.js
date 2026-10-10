@@ -21,6 +21,12 @@ import { parseCatalogWorkbook } from "./lib/xlsx-import.js";
 import { isBadgeEpc, isCardEpc, isValidEpc } from "./lib/epc.js";
 import { CataloguingService } from "./lib/cataloguing/service.js";
 import { handleCataloguingRequest } from "./lib/cataloguing/routes.js";
+import {
+  createGatewayProxy,
+  normalizeGatewayUrl,
+  resolveIlmsRoot,
+  serveIlms,
+} from "./lib/ilms.js";
 
 const execFileAsync = promisify(execFile);
 const root = path.dirname(fileURLToPath(import.meta.url));
@@ -43,6 +49,25 @@ syncService.initialize();
 const cataloguingService = new CataloguingService(db, { dataRoot });
 // Photos abandonnées lors d'un catalogage interrompu : elles ne servent plus.
 cataloguingService.purgeStaleCaptures(48);
+// Interface ILMS embarquée : paquet Angular servi sous `/ilms/`, ses appels
+// d'API relayés par `/gateway/` pour rester sur l'origine du poste.
+const ilmsRoot = resolveIlmsRoot({
+  root,
+  override: process.env.BIBLIORFID_ILMS_DIR || "",
+});
+const gatewayProxy = createGatewayProxy({
+  baseUrl: () => db.getSetting("ilms_gateway_url", ""),
+});
+
+/** Ce que l'interface du poste doit savoir pour proposer l'onglet ILMS. */
+function ilmsStatus() {
+  const gatewayUrl = db.getSetting("ilms_gateway_url", "");
+  return {
+    available: Boolean(ilmsRoot),
+    gatewayUrl,
+    configured: Boolean(ilmsRoot && gatewayUrl),
+  };
+}
 const marker = "__RFID_JSON__";
 const EMPTY_EPC = "000000000000000000000000";
 let simulatedTag = {
@@ -582,6 +607,24 @@ function json(response, status, payload) {
   response.end(body);
 }
 
+/** Message du cadre ILMS quand la session du poste manque ou a expiré. */
+function ilmsSignInPage() {
+  return `<!doctype html>
+<html lang="fr"><head><meta charset="utf-8">
+<title>Session requise</title>
+<style>
+  body { margin: 0; display: grid; place-items: center; min-height: 100vh;
+    font: 15px/1.6 "Segoe UI", system-ui, sans-serif; color: #153047;
+    background: #f4f7fa; }
+  div { max-width: 30rem; padding: 2rem; text-align: center; }
+  h1 { font-size: 1.25rem; margin: 0 0 0.75rem; }
+</style></head>
+<body><div>
+  <h1>Session du poste requise</h1>
+  <p>Connectez-vous à Bibliotèque ZTF pour ouvrir l'interface ILMS.</p>
+</div></body></html>`;
+}
+
 const sessionCookieName = "bibliorfid_session";
 const sessionLifetimeSeconds = 12 * 60 * 60;
 
@@ -1047,6 +1090,19 @@ async function api(request, response, url) {
       connection_endpoint: connection.endpoint,
     });
     return json(response, 200, db.settings());
+  }
+  if (request.method === "GET" && pathname === "/api/ilms/status")
+    return json(response, 200, ilmsStatus());
+  if (request.method === "PUT" && pathname === "/api/ilms/settings") {
+    const input = await readBody(request);
+    let gatewayUrl;
+    try {
+      gatewayUrl = normalizeGatewayUrl(input.gatewayUrl);
+    } catch (error) {
+      return json(response, 400, { error: error.message });
+    }
+    db.setSettings({ ilms_gateway_url: gatewayUrl });
+    return json(response, 200, ilmsStatus());
   }
   if (request.method === "GET" && pathname === "/api/sync/status")
     return json(response, 200, syncService.status());
@@ -1587,6 +1643,25 @@ const server = http.createServer(async (request, response) => {
   try {
     if (url.pathname.startsWith("/api/"))
       return await api(request, response, url);
+    // Le poste écoute aussi sur le réseau : l'interface ILMS et le relais de
+    // sa passerelle exigent la session locale, comme les routes d'API.
+    if (url.pathname === "/gateway" || url.pathname.startsWith("/gateway/")) {
+      if (!db.userForSession(sessionToken(request)))
+        return json(response, 401, { error: "Authentification requise." });
+      return await gatewayProxy(request, response, url);
+    }
+    if (url.pathname === "/ilms" || url.pathname.startsWith("/ilms/")) {
+      if (!db.userForSession(sessionToken(request))) {
+        const page = ilmsSignInPage();
+        response.writeHead(401, {
+          "Content-Type": "text/html; charset=utf-8",
+          "Content-Length": Buffer.byteLength(page),
+          "Cache-Control": "no-store",
+        });
+        return response.end(page);
+      }
+      return serveIlms(response, url.pathname, ilmsRoot, request.method);
+    }
     if (
       url.pathname === "/vendor/sweetalert2/sweetalert2.all.min.js" ||
       url.pathname === "/vendor/sweetalert2/sweetalert2.min.css"

@@ -57,6 +57,13 @@
           "library.db-wal",
           "library.db-shm"
         ]
+      },
+      {
+        "from": "ilms",
+        "to": "ilms",
+        "filter": [
+          "**/*"
+        ]
       }
     ],
     "win": {

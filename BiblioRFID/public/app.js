@@ -1,5 +1,6 @@
 import createElement from "/vendor/lucide/createElement.js";
 import Activity from "/vendor/lucide/icons/activity.js";
+import AppWindow from "/vendor/lucide/icons/app-window.js";
 import ArrowRight from "/vendor/lucide/icons/arrow-right.js";
 import BadgeCheck from "/vendor/lucide/icons/badge-check.js";
 import BadgeMinus from "/vendor/lucide/icons/badge-minus.js";
@@ -61,11 +62,13 @@ import UserPlus from "/vendor/lucide/icons/user-plus.js";
 import UserRound from "/vendor/lucide/icons/user-round.js";
 import Users from "/vendor/lucide/icons/users.js";
 import UsersRound from "/vendor/lucide/icons/users-round.js";
+import WifiOff from "/vendor/lucide/icons/wifi-off.js";
 import X from "/vendor/lucide/icons/x.js";
 import { initCataloguing } from "/cataloguing.js";
 
 const lucideIcons = {
   activity: Activity,
+  "app-window": AppWindow,
   "arrow-right": ArrowRight,
   "badge-check": BadgeCheck,
   "badge-minus": BadgeMinus,
@@ -127,6 +130,7 @@ const lucideIcons = {
   "user-round": UserRound,
   users: Users,
   "users-round": UsersRound,
+  "wifi-off": WifiOff,
   x: X,
 };
 
@@ -199,6 +203,7 @@ const viewMeta = {
   staff: ["Équipe", "Personnel"],
   gate: ["Sécurité et fréquentation", "Portail antivol"],
   station: ["Opérations RFID", "Station RFID"],
+  ilms: ["Catalogue partagé", "Interface ILMS"],
   history: ["Traçabilité", "Historique"],
   settings: ["Configuration", "Paramètres"],
 };
@@ -409,8 +414,10 @@ function setView(name) {
   if (name === "station") startAutoReading();
   if (name === "history") loadHistory();
   if (name === "cataloguing") cataloguing?.activate();
+  if (name === "ilms") openIlms();
   if (name === "settings") {
     loadSyncStatus(false);
+    loadIlmsStatus(false);
     cataloguing?.loadSettingsForm();
   }
 }
@@ -2135,6 +2142,79 @@ async function loadSyncStatus(showError = true) {
   }
 }
 
+/**
+ * Onglet ILMS : le paquet Angular est servi par le poste, donc le cadre reste
+ * sur la même origine. Son chargement n'a lieu qu'à la première ouverture.
+ */
+async function openIlms() {
+  const frame = $("#ilms-frame");
+  let status = { available: true, gatewayUrl: "" };
+  try {
+    status = await api("/api/ilms/status");
+  } catch {
+    // Statut indisponible : le cadre affichera lui-même le motif.
+  }
+  const notice = $("#ilms-notice");
+  const missingGateway = status.available && !status.gatewayUrl;
+  notice.hidden = !missingGateway;
+  if (missingGateway)
+    $("#ilms-notice-text").textContent =
+      "Renseignez l’adresse de la passerelle ILMS dans Paramètres pour utiliser cet onglet.";
+  icons();
+  if (!frame.dataset.loaded) {
+    frame.src = "/ilms/";
+    frame.dataset.loaded = "1";
+  }
+}
+
+function renderIlmsStatus(status) {
+  const configured = Boolean(status.configured);
+  $("#ilms-status").classList.toggle("connected", configured);
+  $("#ilms-status-title").textContent = configured
+    ? "Interface disponible"
+    : "Non configurée";
+  $("#ilms-status-detail").textContent = !status.available
+    ? "Module ILMS absent de cette version de l’application."
+    : status.gatewayUrl
+      ? `Passerelle : ${status.gatewayUrl}`
+      : "Aucune passerelle ILMS renseignée.";
+  if (status.gatewayUrl) $("#ilms-gateway-url").value = status.gatewayUrl;
+}
+
+async function loadIlmsStatus(showError = true) {
+  try {
+    renderIlmsStatus(await api("/api/ilms/status"));
+  } catch (error) {
+    if (showError) toast(error.message, "error");
+  }
+}
+
+async function saveIlmsSettings(event) {
+  event.preventDefault();
+  const button = $("#save-ilms");
+  button.disabled = true;
+  try {
+    const status = await api("/api/ilms/settings", {
+      method: "PUT",
+      body: JSON.stringify({ gatewayUrl: $("#ilms-gateway-url").value }),
+    });
+    renderIlmsStatus(status);
+    // Le cadre doit repartir de l'adresse enregistrée.
+    const frame = $("#ilms-frame");
+    delete frame.dataset.loaded;
+    frame.removeAttribute("src");
+    toast(
+      status.gatewayUrl
+        ? "Passerelle ILMS enregistrée."
+        : "Passerelle ILMS effacée.",
+    );
+  } catch (error) {
+    toast(error.message, "error");
+  } finally {
+    button.disabled = false;
+  }
+}
+
 async function saveSyncSettings(event) {
   event.preventDefault();
   const button = $("#save-sync");
@@ -3114,6 +3194,7 @@ function bindEvents() {
   $("#test-connection").addEventListener("click", () => probeConnection());
   $("#settings-form").addEventListener("submit", saveSettings);
   $("#sync-settings-form").addEventListener("submit", saveSyncSettings);
+  $("#ilms-settings-form").addEventListener("submit", saveIlmsSettings);
   $("#sync-now").addEventListener("click", runSyncNow);
   $("#reader-timing-form").addEventListener("submit", saveReaderTiming);
   $("#test-buzzer").addEventListener("click", testBuzzer);

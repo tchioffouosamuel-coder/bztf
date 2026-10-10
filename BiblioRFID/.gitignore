@@ -9,3 +9,5 @@ dist-desktop/
 dist-desktop-*/
 win-unpacked/
 launcher/bin/
+ilms/*
+!ilms/README.md

@@ -108,6 +108,9 @@
           <button class="nav-item" data-view="station">
             <i data-lucide="radio-tower"></i><span>Station RFID</span>
           </button>
+          <button class="nav-item" data-view="ilms">
+            <i data-lucide="app-window"></i><span>ILMS</span>
+          </button>
           <button class="nav-item" data-view="history">
             <i data-lucide="history"></i><span>Historique</span>
           </button>
@@ -1034,6 +1037,27 @@
             </div>
           </section>
 
+          <section class="view" id="view-ilms">
+            <div class="ilms-frame-wrap">
+              <div class="ilms-notice" id="ilms-notice" hidden>
+                <i data-lucide="wifi-off"></i>
+                <p id="ilms-notice-text"></p>
+                <button
+                  class="button secondary"
+                  type="button"
+                  data-view-link="settings"
+                >
+                  <i data-lucide="settings-2"></i><span>Paramètres</span>
+                </button>
+              </div>
+              <iframe
+                id="ilms-frame"
+                class="ilms-frame"
+                title="Interface ILMS"
+                referrerpolicy="no-referrer"
+              ></iframe>
+            </div>
+          </section>
           <section class="view" id="view-settings">
             <div class="section-heading">
               <div>
@@ -1095,6 +1119,45 @@
                     <i data-lucide="refresh-cw"></i
                     ><span>Synchroniser maintenant</span></button
                   ><button class="button primary" type="submit" id="save-sync">
+                    <i data-lucide="save"></i><span>Enregistrer</span>
+                  </button>
+                </div>
+              </div>
+            </form>
+            <form class="settings-form" id="ilms-settings-form">
+              <div class="settings-section">
+                <div class="settings-copy">
+                  <h3>Interface ILMS</h3>
+                  <p>
+                    Catalogage complet, autorités et circulation, ouverts dans
+                    l’onglet ILMS du poste.
+                  </p>
+                </div>
+                <div class="sync-fields">
+                  <label class="field wide"
+                    ><span>Adresse de la passerelle</span
+                    ><input
+                      id="ilms-gateway-url"
+                      name="gatewayUrl"
+                      type="url"
+                      inputmode="url"
+                      autocomplete="url"
+                      placeholder="https://gateway.bibliotheque-ztf.org"
+                  /></label>
+                </div>
+              </div>
+              <div class="settings-actions">
+                <div class="sync-status" id="ilms-status" aria-live="polite">
+                  <span class="sync-status-dot"></span>
+                  <div>
+                    <strong id="ilms-status-title">Non configurée</strong>
+                    <p id="ilms-status-detail">
+                      Aucune passerelle ILMS renseignée.
+                    </p>
+                  </div>
+                </div>
+                <div class="settings-action-buttons">
+                  <button class="button primary" type="submit" id="save-ilms">
                     <i data-lucide="save"></i><span>Enregistrer</span>
                   </button>
                 </div>

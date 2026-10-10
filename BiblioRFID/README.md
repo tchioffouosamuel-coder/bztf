@@ -62,6 +62,34 @@ Dans l’application Windows empaquetée, la recompilation du pont utilise la co
 native extraite dans le profil `%APPDATA%\biblio-rfid\native`. Le contenu de
 `app.asar` reste ainsi en lecture seule.
 
+## Interface ILMS embarquée
+
+L’onglet **ILMS** ouvre l’interface complète du système de gestion — notices et
+autorités, exemplaires, circulation, abonnés, statistiques — sans quitter
+l’application. Tout ce qui demande le lecteur RFID (station, encodage,
+inventaire, portail, poste d’emprunt) reste dans les onglets du poste.
+
+Le paquet Angular est livré dans l’exécutable et servi par le serveur local
+sous `/ilms/`. Ses appels d’API passent par `/gateway/`, relayés vers la
+passerelle ILMS : l’interface reste donc sur l’origine du poste, sans question
+de CORS, avec un seul endroit où signaler une coupure réseau. Renseigner
+l’adresse de la passerelle dans **Paramètres > Interface ILMS**
+(`https://gateway.bibliotheque-ztf.org`).
+
+L’onglet et le relais exigent la session du poste, comme les routes d’API : le
+serveur écoute aussi sur le réseau local, et le relais ne doit pas être ouvert
+à un poste non authentifié. Le jeton de l’ILMS, lui, circule inchangé et n’est
+jamais journalisé.
+
+Trois situations sont annoncées explicitement plutôt que par un écran vide :
+exécutable produit sans le module, passerelle non renseignée, passerelle
+injoignable. Le relais ne transporte que HTTP ; les canaux WebSocket de la
+passerelle doivent être contactés à leur adresse publique.
+
+La préparation du paquet est décrite dans [`ilms/README.md`](ilms/README.md) :
+`ng build --base-href /ilms/` et `apiUrl: "/gateway"` côté ILMS. Sans ce
+paquet, l’application se construit et fonctionne normalement.
+
 ## Premier essai
 
 1. Ouvrir **Paramètres**, choisir **Simulation**, puis enregistrer.

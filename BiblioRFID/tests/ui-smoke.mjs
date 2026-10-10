@@ -376,6 +376,27 @@ try {
   assert.equal(await desktop.locator("#test-buzzer").isVisible(), true);
   await desktop.screenshot({ path: path.join(output, "settings-reader-timing.png"), fullPage: true });
 
+  // Onglet ILMS : le paquet Angular est servi par le poste, donc le cadre
+  // reste sur la même origine et ne se charge qu'à la première ouverture.
+  // Le refus d'une adresse non HTTP est couvert par tests/ilms.test.js : le
+  // faire ici ajouterait une erreur de console attendue à la vérification
+  // finale, qui doit rester vide.
+  assert.equal(await desktop.locator("#ilms-gateway-url").isVisible(), true);
+  await desktop.locator("#ilms-gateway-url").fill("https://gateway.exemple.org/");
+  await desktop.click("#save-ilms");
+  await desktop.waitForSelector('.toast:has-text("Passerelle ILMS enregistrée")');
+  assert.match(await desktop.locator("#ilms-status-detail").innerText(), /gateway\.exemple\.org/);
+  await desktop.screenshot({ path: path.join(output, "settings-ilms.png"), fullPage: true });
+
+  await desktop.click('[data-view="ilms"]');
+  await desktop.waitForSelector("#view-ilms.active");
+  await desktop.waitForFunction(() => Boolean(document.querySelector("#ilms-frame")?.src));
+  assert.match(await desktop.locator("#ilms-frame").getAttribute("src"), /\/ilms\/$/);
+  assert.equal(await desktop.locator("#ilms-notice").isVisible(), false, "La passerelle est renseignée : aucun avertissement.");
+  assert.equal(await desktop.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth), true, "Pas de débordement horizontal dans l'onglet ILMS.");
+  assert.equal(await desktop.locator('[data-view="ilms"] svg.lucide').count(), 1, "L'icône de l'onglet ILMS doit être rendue.");
+  await desktop.screenshot({ path: path.join(output, "ilms-embedded.png"), fullPage: true });
+
   const mobile = await browser.newPage({ viewport: { width: 390, height: 844 }, deviceScaleFactor: 1 });
   mobile.on("pageerror", (error) => errors.push(error.message));
   await mobile.route("**/api/reader/events?*", (route) => fulfillSnapshot(route, {
