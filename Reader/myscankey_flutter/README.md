@@ -71,6 +71,12 @@ Le message d’alarme (`android/app/src/main/res/raw/gate_alarm.wav`) se régén
 
 À valider sur site avec le portail réel : sens des barrières (bouton *Inverser*), puissance des antennes (ne pas lire les livres rangés à proximité) et sortie réelle du buzzer (bouton *Tester le buzzer* ; un avertissement s’affiche si le portail refuse sa coupure).
 
+### Paramètres matériels N01
+
+Le terminal admin (carte *Paramètres matériels N01*) relit tout ce que le SDK expose et n’envoie au portail que les champs modifiés : identifiant, RFID/Gen2 (région, table de fréquences, session, Q, cible, mode RF, unicité, RSSI), puissances des antennes et antennes d’inventaire, entrées et sorties GPI-GPO, réseau et horloge, rapports et inventaire automatique. Ce que la carte ne laisse pas écrire reste en lecture seule (versions, adresses MAC, niveaux GPI courants, mode d’auto-inventaire piloté par l’application) et la clé de licence est masquée. La lecture est suspendue pendant l’écriture puis redémarre seule ; un réglage refusé par la carte est signalé sans empêcher les autres. L’intervalle `syncinterv`, que le *getter* du SDK omet alors que son *setter* l’exige, est demandé avant toute modification de l’inventaire automatique.
+
+Pour parler au contrôleur sans l’application (diagnostic du câble RS232, commandes absentes du SDK), `tool/n01/serial_monitor.ps1` ouvre le port série (COM18, 115 200 bauds, 8N1 par défaut) et envoie un objet JSON par ligne, sans fin de ligne, comme le SDK. Les commandes du protocole constructeur sont répertoriées dans `tool/n01/commandes-serie.md`, avec les réserves relevées dans le document d’origine ; le contrôleur observé annonce le firmware V1.3.6.6.
+
 ## Poste d’emprunt
 
 Le poste utilise le SDK « RFID Desktop Reader » (`android/app/libs/reader.jar`, classe `GClient`) via `DeskReaderBridge.kt`, indépendamment du lecteur Seuic intégré :

@@ -162,6 +162,28 @@ class GateReaderService {
     }
   }
 
+  /// Snapshot complet des paramètres exposés par le SDK N01 et la démo native.
+  Future<Map<String, Object?>> readN01Settings() async {
+    if (!_connected || simulation) return const {};
+    final result = await _methods.invokeMapMethod<Object?, Object?>(
+      'getN01Settings',
+    );
+    return _stringMap(result);
+  }
+
+  /// Applique les clés présentes dans [settings] puis renvoie le nouveau
+  /// snapshot. Les clés absentes ne sont pas modifiées côté matériel.
+  Future<Map<String, Object?>> applyN01Settings(
+    Map<String, Object?> settings,
+  ) async {
+    if (!_connected || simulation) return const {};
+    final result = await _methods.invokeMapMethod<Object?, Object?>(
+      'applyN01Settings',
+      {'settings': settings},
+    );
+    return _stringMap(result);
+  }
+
   Future<void> disconnect() async {
     if (!_connected) return;
     await stopInventory();
@@ -230,5 +252,10 @@ class GateReaderService {
     }
     await _tags.close();
     await _sensors.close();
+  }
+
+  static Map<String, Object?> _stringMap(Map<Object?, Object?>? value) {
+    if (value == null) return const {};
+    return value.map((key, data) => MapEntry(key.toString(), data));
   }
 }

@@ -4,5 +4,13 @@
 -keep class com.gg.reader.** { *; }
 -keep class com.gxwl.device.reader.** { *; }
 -keep class cn.pda.serialport.** { *; }
+
+# N01 SDK: Gson reflects on enum constants and protocol model fields.
+# The serial JNI library also looks up SerialPort.mFd by its original name.
+-keep class ZAO_API.** { *; }
+-keep class Tool.** { *; }
+-keep class Interface.** { *; }
+-keep class android_serialport_api.** { *; }
+
 -dontwarn gnu.io.**
 -dontwarn com.sun.crypto.provider.**

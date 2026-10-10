@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import '../app.dart';
 import '../services/gate_controller.dart';
 import '../services/gate_reader_service.dart';
+import 'n01_settings_form.dart';
 
 /// Réglages du portail antivol dans le terminal admin : connexion au
 /// portail N01, barrières infrarouges (sens de passage) et alarme.
@@ -29,6 +30,9 @@ class _GateSettingsSectionState extends State<GateSettingsSection> {
   late int _buzzerGpo;
   late int _buzzerSeconds;
   bool _testing = false;
+  bool _loadingN01 = false;
+  bool _applyingN01 = false;
+  Map<String, Object?>? _n01Settings;
 
   GateController get gate => widget.gate;
 
@@ -66,7 +70,10 @@ class _GateSettingsSectionState extends State<GateSettingsSection> {
   }
 
   Future<void> _saveReader() async {
-    setState(() => _testing = true);
+    setState(() {
+      _testing = true;
+      _n01Settings = null;
+    });
     try {
       await gate.configureReader(
         nextTransport: _transport,
@@ -78,6 +85,55 @@ class _GateSettingsSectionState extends State<GateSettingsSection> {
       if (mounted) showMessage(context, error.toString(), error: true);
     } finally {
       if (mounted) setState(() => _testing = false);
+    }
+  }
+
+  Future<void> _loadN01Settings() async {
+    if (!gate.readerConnected || gate.simulation) return;
+    setState(() => _loadingN01 = true);
+    try {
+      final settings = await gate.readN01Settings();
+      if (mounted) {
+        setState(() => _n01Settings = settings);
+        showMessage(context, 'Paramètres N01 relus.');
+      }
+    } catch (error) {
+      if (mounted) showMessage(context, error.toString(), error: true);
+    } finally {
+      if (mounted) setState(() => _loadingN01 = false);
+    }
+  }
+
+  Future<void> _applyN01Settings(Map<String, Object?> settings) async {
+    if (!gate.readerConnected || gate.simulation) return;
+    setState(() => _applyingN01 = true);
+    try {
+      final result = await gate.applyN01Settings(settings);
+      final applied = result['applied'];
+      if (mounted) {
+        setState(() => _n01Settings = result);
+        final requested = [
+          for (final entry in settings.entries)
+            if (entry.value is Map)
+              ...(entry.value as Map).keys.map((key) => key.toString())
+            else
+              entry.key == 'antennas' ? 'antennaPowers' : entry.key,
+        ];
+        final refused = requested
+            .where((key) => applied is! List || !applied.contains(key))
+            .toList();
+        showMessage(
+          context,
+          refused.isNotEmpty
+              ? 'Le portail a refusé ${refused.length} réglage(s).'
+              : 'Modifications N01 appliquées.',
+          error: refused.isNotEmpty,
+        );
+      }
+    } catch (error) {
+      if (mounted) showMessage(context, error.toString(), error: true);
+    } finally {
+      if (mounted) setState(() => _applyingN01 = false);
     }
   }
 
@@ -230,7 +286,9 @@ class _GateSettingsSectionState extends State<GateSettingsSection> {
                   ),
                   const SizedBox(height: 12),
                   FilledButton.icon(
-                    onPressed: _testing ? null : _saveReader,
+                    onPressed: _testing || _loadingN01 || _applyingN01
+                        ? null
+                        : _saveReader,
                     icon: _testing
                         ? const SizedBox.square(
                             dimension: 18,
@@ -239,6 +297,67 @@ class _GateSettingsSectionState extends State<GateSettingsSection> {
                         : const Icon(Icons.cable),
                     label: const Text('Enregistrer et tester'),
                   ),
+                ],
+              ),
+            ),
+          ),
+          _heading('Paramètres matériels N01'),
+          Card(
+            child: Padding(
+              padding: const EdgeInsets.all(14),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  Row(
+                    children: [
+                      Icon(Icons.tune, color: colors.primary),
+                      const SizedBox(width: 10),
+                      const Expanded(
+                        child: Text(
+                          'SDK N01',
+                          style: TextStyle(fontWeight: FontWeight.w800),
+                        ),
+                      ),
+                      IconButton(
+                        tooltip: 'Relire',
+                        onPressed:
+                            gate.readerConnected &&
+                                !gate.simulation &&
+                                !_loadingN01 &&
+                                !_applyingN01
+                            ? _loadN01Settings
+                            : null,
+                        icon: _loadingN01
+                            ? const SizedBox.square(
+                                dimension: 18,
+                                child: CircularProgressIndicator(
+                                  strokeWidth: 2,
+                                ),
+                              )
+                            : const Icon(Icons.refresh),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 10),
+                  if (_n01Settings case final settings?)
+                    N01SettingsForm(
+                      settings: settings,
+                      busy: _applyingN01 || _loadingN01,
+                      onApply: gate.readerConnected && !gate.simulation
+                          ? _applyN01Settings
+                          : null,
+                    )
+                  else
+                    OutlinedButton.icon(
+                      onPressed:
+                          gate.readerConnected &&
+                              !gate.simulation &&
+                              !_loadingN01
+                          ? _loadN01Settings
+                          : null,
+                      icon: const Icon(Icons.download_outlined),
+                      label: const Text('Charger les paramètres N01'),
+                    ),
                 ],
               ),
             ),

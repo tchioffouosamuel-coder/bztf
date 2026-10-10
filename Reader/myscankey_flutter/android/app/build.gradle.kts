@@ -58,6 +58,7 @@ dependencies {
     compileOnly(files("libs/uhf.jar"))
     compileOnly(files("libs/scankey.jar"))
     implementation("com.google.code.gson:gson:2.8.7")
+    testImplementation("junit:junit:4.13.2")
 }
 
 flutter {

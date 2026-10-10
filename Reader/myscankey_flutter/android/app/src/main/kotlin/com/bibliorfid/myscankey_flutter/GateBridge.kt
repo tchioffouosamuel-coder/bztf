@@ -2,6 +2,8 @@ package com.bibliorfid.myscankey_flutter
 
 import Interface.ListenGPI
 import Interface.TagReadDataEventCallback
+import Tool.AutoInvCfgSet
+import Tool.BankCfg
 import Tool.Epc_Filter
 import Tool.N01AntPwr
 import Tool.TagFilter
@@ -81,6 +83,8 @@ class GateBridge(
 			"stopInventory" -> stopInventory(result)
 			"readTid" -> readTid(call.argument<String>("epc") ?: "", result)
 			"ping" -> ping(result)
+			"getN01Settings" -> getN01Settings(result)
+			"applyN01Settings" -> applyN01Settings(call.argument<Map<String, Any?>>("settings") ?: emptyMap(), result)
 			"pulseGpo" -> pulseGpo(call.argument<Int>("gpo") ?: RED_LIGHT_GPO, call.argument<Int>("durationMs") ?: 3000, result)
 			"silenceBuzzer" -> {
 				val current = reader
@@ -167,6 +171,308 @@ class GateBridge(
 				postError(result, "GATE_CONNECT", error.message ?: "Connexion au portail impossible.")
 			}
 		}
+	}
+
+	private fun getN01Settings(result: MethodChannel.Result) {
+		val current = reader
+		if (current == null) {
+			result.error("READER_OFFLINE", "Connectez le portail avant de relire les paramètres N01.", null)
+			return
+		}
+		executor.execute {
+			try {
+				val snapshot = n01Snapshot(current)
+				mainHandler.post { result.success(snapshot) }
+			} catch (error: Throwable) {
+				Log.e(TAG, "N01 settings read failed", error)
+				postError(result, "N01_SETTINGS", error.message ?: "Lecture des paramètres N01 impossible.")
+			}
+		}
+	}
+
+	private fun applyN01Settings(settings: Map<String, Any?>, result: MethodChannel.Result) {
+		val current = reader
+		if (current == null) {
+			result.error("READER_OFFLINE", "Connectez le portail avant d'appliquer les paramètres N01.", null)
+			return
+		}
+		executor.execute {
+			val resume = reading
+			try {
+				if (resume) haltReading(current)
+				val applied = applyN01Settings(current, settings)
+				val snapshot = n01Snapshot(current).toMutableMap()
+				snapshot["applied"] = applied
+				mainHandler.post { result.success(snapshot) }
+			} catch (error: Throwable) {
+				Log.e(TAG, "N01 settings apply failed", error)
+				postError(result, "N01_SETTINGS", error.message ?: "Application des paramètres N01 impossible.")
+			} finally {
+				if (resume && reader === current) {
+					val status = runCatching { beginReading(current) }.getOrNull()
+					if (status != N01_Api.RET_ERRNO.RET_OK) Log.w(TAG, "Gate inventory restart after settings: $status")
+				}
+			}
+		}
+	}
+
+	private fun n01Snapshot(api: N01_Api): Map<String, Any?> = linkedMapOf(
+		"identity" to linkedMapOf(
+			"readerId" to safe { api.N01_GetReaderId() },
+			"hardwareVersion" to safe { api.N01_GetHardWareVersion()?.toList() },
+			"license" to safe { api.N01_GetLicense()?.toList() },
+		),
+		"rfid" to linkedMapOf(
+			"region" to safe { api.N01_GetFreqRegion()?.name },
+			"hopTable" to safe { api.N01_GetHopTable()?.toList() },
+			"session" to safe { api.N01_GetSession() },
+			"qValue" to safe { api.N01_GetQValue() },
+			"target" to safe { api.N01_GetTarget() },
+			"gen2RfMode" to safe { api.N01_GetGen2RfMode() },
+			"rfidLevel" to safe { api.N01_RfidGetLevel() },
+			"uniByAnt" to safe { api.N01_GetUniByAnt() },
+			"uniByBank" to safe { api.N01_GetUniByBank() },
+			"maxRssi" to safe { api.N01_GetMaxRssi() },
+			"invAntennas" to safe { api.N01_GetInvingAnt()?.toList() },
+		),
+		"antennas" to safe {
+			api.N01_GetMultiAntPwr()?.map {
+				linkedMapOf("ant" to it.getAnt(), "read" to it.getRead(), "write" to it.getWrite())
+			}
+		},
+		"io" to linkedMapOf(
+			"gpiLevels" to (1..4).associate { it.toString() to safe { api.N01_GetGpi(it) } },
+			"exGet" to safe { api.N01_GetExGet()?.toList() },
+			"tagInfoEx" to safe { api.N01_GetTagInfoEx()?.toList() },
+			"tagGpo" to safe { api.N01_GetTagGpo()?.toList() },
+			"indicatorGpo" to safe { api.N01_IndicatorGpoGet()?.toList() },
+		),
+		"network" to linkedMapOf(
+			"localTcpPort" to safe { api.N01_GetLocalTcpPort() },
+			"ethConfig" to safe { api.N01_GetEthConfig()?.toList() },
+			"wifiDhcp" to safe { api.N01_GetWIFIdhcp()?.toList() },
+			"wifiSsidPassw" to safe { api.N01_GetWifiSsidPassw()?.toList() },
+			"ethMac" to safe { api.N01_GetEthMac() },
+			"wifiMac" to safe { api.N01_GetWifiMac() },
+			"httpUrl" to safe { api.N01_GetHttpUrlGet() },
+			"otaUrl" to safe { api.N01_GetOtaURL() },
+			"timezone" to safe { api.N01_GetTimezone() },
+			"time" to safe { api.N01_GetTime() },
+		),
+		"reporting" to linkedMapOf(
+			"reportCfg" to safe { api.N01_GetReportCfg()?.toList() },
+			"autoInv" to safe { api.N01_GetAutoInv()?.toList() },
+			"autoInvCfg" to safe { autoInvCfgMap(api.N01_GetAutoInvCfg()) },
+		),
+		"capabilities" to listOf(
+			"connect", "readerId", "timezone", "time", "localTcpPort", "rfidRegion",
+			"hopTable", "session", "qValue", "target", "gen2RfMode", "rfidLevel",
+			"uniqueByAntenna", "uniqueByBank", "maxRssi", "inventoryAntennas",
+			"antennaPowers", "gpi", "gpo", "exGet", "tagInfoEx", "tagGpo",
+			"indicatorGpo", "ethernet", "wifi", "httpUrl", "reportCfg",
+			"autoInventory", "bankRead", "bankWrite", "epcWrite", "lock", "kill",
+			"license", "ota", "factoryReset", "reboot",
+		),
+	)
+
+	private fun applyN01Settings(api: N01_Api, settings: Map<String, Any?>): List<String> {
+		val applied = mutableListOf<String>()
+		val identity = settings.mapValue("identity")
+		val rfid = settings.mapValue("rfid")
+		val io = settings.mapValue("io")
+		val network = settings.mapValue("network")
+		val reporting = settings.mapValue("reporting")
+
+		fun mark(name: String, status: N01_Api.RET_ERRNO?) {
+			if (status == N01_Api.RET_ERRNO.RET_OK) applied += name else Log.w(TAG, "N01 setting $name refused: $status")
+		}
+
+		(identity["readerId"] ?: settings["readerId"])?.toString()?.takeIf { it.isNotBlank() }?.let {
+			mark("readerId", api.N01_SetReaderId(it))
+		}
+		(identity["licenseKey"] ?: settings["licenseKey"])?.toString()?.takeIf { it.isNotBlank() }?.let {
+			mark("license", api.N01_SetLicense(it))
+		}
+		(rfid["region"] ?: settings["region"])?.toString()?.takeIf { it.isNotBlank() }?.let {
+			mark("region", runCatching { api.N01_SetFreqRange(N01_Api.FreqRegion.valueOf(it.uppercase(Locale.ROOT))) }.getOrNull())
+		}
+		(rfid["hopTable"] ?: settings["hopTable"]).asIntList()?.let { mark("hopTable", api.N01_SetHopTable(it)) }
+		(rfid["session"] ?: settings["session"]).asInt()?.let { mark("session", api.N01_SetSession(it.coerceIn(0, 3))) }
+		(rfid["qValue"] ?: rfid["q"] ?: settings["qValue"]).asInt()?.let { mark("qValue", api.N01_SetQValue(it.coerceIn(0, 16))) }
+		(rfid["target"] ?: settings["target"])?.toString()?.takeIf { it in TARGETS }?.let { mark("target", api.N01_SetTarget(it)) }
+		(rfid["gen2RfMode"] ?: settings["gen2RfMode"]).asInt()?.let { mark("gen2RfMode", api.N01_SetGen2RfMode(it)) }
+		(rfid["rfidLevel"] ?: settings["rfidLevel"]).asInt()?.let {
+			mark("rfidLevel", if (it == 1) api.N01_RfidSetLevel_one() else api.N01_RfidSetLevel_more())
+		}
+		(rfid["uniByAnt"] ?: settings["uniByAnt"]).asBool()?.let { mark("uniByAnt", api.N01_SetUniByAnt(it)) }
+		(rfid["uniByBank"] ?: settings["uniByBank"]).asBool()?.let { mark("uniByBank", api.N01_SetUniByBank(it)) }
+		(rfid["maxRssi"] ?: settings["maxRssi"]).asBool()?.let { mark("maxRssi", api.N01_SetMaxRssi(it)) }
+		(rfid["invAntennas"] ?: settings["invAntennas"]).asIntList()?.let { mark("invAntennas", api.N01_SetInvingAnt(it)) }
+		(settings["antennas"] as? List<*>)?.let { mark("antennaPowers", setAntennaPowers(api, it)) }
+
+		(io["exGet"] ?: settings["exGet"]).asIntArray()?.let { mark("exGet", api.N01_SetExGet(it)) }
+		(io["tagInfoEx"] ?: settings["tagInfoEx"]).asIntArray()?.let { mark("tagInfoEx", api.N01_SetTagInfoEx(it)) }
+		(io["tagGpo"] ?: settings["tagGpo"])?.let { mark("tagGpo", setTagGpo(api, it)) }
+		(io["indicatorGpo"] ?: settings["indicatorGpo"]).asIntArray()?.let { mark("indicatorGpo", api.N01_IndicatorGpoSet(it)) }
+
+		(network["localTcpPort"] ?: settings["localTcpPort"]).asInt()?.let { mark("localTcpPort", api.N01_SetLocalTcpPort(it)) }
+		(network["ethConfig"] ?: settings["ethConfig"]).asStringArray()?.let { mark("ethConfig", api.N01_SetEthConfig(it)) }
+		(network["wifiDhcp"] ?: settings["wifiDhcp"]).asStringArray()?.let { mark("wifiDhcp", api.N01_SetWIFIdhcp(it)) }
+		(network["wifiSsidPassw"] ?: settings["wifiSsidPassw"]).asStringArray()?.let { mark("wifiSsidPassw", api.N01_SetWifiSsidPassw(it)) }
+		(network["httpUrl"] ?: settings["httpUrl"])?.toString()?.let { mark("httpUrl", api.N01_SetHttpUrlGet(it)) }
+		(network["timezone"] ?: settings["timezone"])?.toString()?.let { mark("timezone", api.N01_SetTimezone(it)) }
+		(network["time"] ?: settings["time"]).asIntArray()?.let { mark("time", api.N01_SetTime(it)) }
+
+		(reporting["reportCfg"] ?: settings["reportCfg"]).asIntArray()?.let { mark("reportCfg", api.N01_SetReportCfg(it)) }
+		(reporting["autoInvCfg"] ?: settings["autoInvCfg"])?.let { mark("autoInvCfg", setAutoInvCfg(api, it)) }
+		return applied
+	}
+
+	private fun setAntennaPowers(api: N01_Api, raw: List<*>): N01_Api.RET_ERRNO? {
+		val current = (api.N01_GetMultiAntPwr()?.toMutableList() ?: mutableListOf())
+		for (item in raw) {
+			val map = item as? Map<*, *> ?: continue
+			val ant = map["ant"].asInt() ?: continue
+			val target = current.firstOrNull { it.getAnt() == ant } ?: N01AntPwr().also {
+				it.setAnt(ant)
+				current += it
+			}
+			map["read"].asInt()?.let { target.setRead(it.coerceIn(MIN_POWER, MAX_POWER)) }
+			map["write"].asInt()?.let { target.setWrite(it.coerceIn(MIN_POWER, MAX_POWER)) }
+		}
+		return api.N01_SetMultiAntPwr(current.toTypedArray())
+	}
+
+	private fun setTagGpo(api: N01_Api, raw: Any): N01_Api.RET_ERRNO? {
+		val map = raw as? Map<*, *>
+		if (map != null) {
+			val gpo = (map["gpo"] ?: map["outputs"]).asInt() ?: return null
+			val level = map["level"].asInt() ?: 1
+			val duration = (map["duration"] ?: map["gpotime"]).asInt() ?: 1
+			val filter = map["filter"].mapValue()
+			return if (filter.isNotEmpty()) {
+				api.N01_SetTagGpo(
+					gpo,
+					level,
+					duration,
+					Epc_Filter(filter["start"].asInt() ?: 0, filter["mask"]?.toString().orEmpty(), filter["match"].asBool() ?: true),
+				)
+			} else {
+				api.N01_SetTagGpo(intArrayOf(gpo, level, duration))
+			}
+		}
+		val list = raw as? List<*>
+		if (list != null && list.size >= 6) {
+			return api.N01_SetTagGpo(
+				list[0].asInt() ?: 0,
+				list[1].asInt() ?: 1,
+				list[2].asInt() ?: 1,
+				Epc_Filter(list[3].asInt() ?: 0, list[4]?.toString().orEmpty(), list[5].asBool() ?: true),
+			)
+		}
+		if (list != null && list.size >= 3) {
+			return api.N01_SetTagGpo(intArrayOf(list[0].asInt() ?: 0, list[1].asInt() ?: 1, list[2].asInt() ?: 1))
+		}
+		return raw.asIntArray()?.let { api.N01_SetTagGpo(it) }
+	}
+
+	private fun setAutoInvCfg(api: N01_Api, raw: Any): N01_Api.RET_ERRNO? {
+		val map = raw as? Map<*, *> ?: return null
+		val cfg = AutoInvCfgSet(
+			map["stopdelay"].asInt() ?: 0,
+			(map["syncinterv"] ?: map["syncInterval"]).asInt() ?: 0,
+			map["synctimeout"].asInt() ?: 0,
+			(map["triggpo"] ?: map["trigpo"]).asInt() ?: 0,
+			map["epc0gpo"].asInt() ?: 0,
+			map["epc1gpo"].asInt() ?: 0,
+			map["legalgpo"].asInt() ?: 0,
+			map["illegalgpo"].asInt() ?: 0,
+			map["errgpo"].asInt() ?: 0,
+			map["gpodur"].asInt() ?: 0,
+			map["ingpi"].asInt() ?: 0,
+			map["outgpi"].asInt() ?: 0,
+		)
+		val tagFilter = tagFilterFromMap(map["tagFilter"])
+		val bankCfg = bankCfgFromMap(map["bankData"])
+		return when {
+			tagFilter != null && bankCfg != null -> api.N01_SetAutoInvCfg(cfg, tagFilter, bankCfg)
+			tagFilter != null -> api.N01_SetAutoInvCfg(cfg, tagFilter)
+			bankCfg != null -> api.N01_SetAutoInvCfg(cfg, bankCfg)
+			else -> api.N01_SetAutoInvCfg(cfg)
+		}
+	}
+
+	private fun autoInvCfgMap(cfg: Any?): Map<String, Any?>? {
+		val value = cfg as? Tool.AutoInvCfgGet ?: return null
+		return linkedMapOf(
+			"stopdelay" to value.getStopdelay(),
+			"synctimeout" to value.getSynctimeout(),
+			"trigpo" to value.getTrigpo(),
+			"epc0gpo" to value.getEpc0gpo(),
+			"epc1gpo" to value.getEpc1gpo(),
+			"legalgpo" to value.getLegalgpo(),
+			"illegalgpo" to value.getIllegalgpo(),
+			"errgpo" to value.getErrgpo(),
+			"gpodur" to value.getGpodur(),
+			"ingpi" to value.getIngpi(),
+			"outgpi" to value.getOutgpi(),
+			"tagFilter" to tagFilterMap(value.getTagFilter()),
+			"bankData" to bankCfgMap(value.getBankData()),
+		)
+	}
+
+	private fun tagFilterFromMap(raw: Any?): TagFilter? {
+		val map = raw as? Map<*, *> ?: return null
+		return TagFilter(map["bank"].asInt() ?: 1, (map["startBit"] ?: map["start_bit"]).asInt() ?: 32, map["mask"]?.toString().orEmpty(), map["match"].asBool() ?: true)
+	}
+
+	private fun bankCfgFromMap(raw: Any?): BankCfg? {
+		val map = raw as? Map<*, *> ?: return null
+		return BankCfg(map["bank"].asInt() ?: 2, (map["startWord"] ?: map["start_word"]).asInt() ?: 0, (map["wordCount"] ?: map["word_count"]).asInt() ?: 6, map["password"]?.toString().orEmpty())
+	}
+
+	private fun tagFilterMap(value: TagFilter?): Map<String, Any?>? = value?.let {
+		linkedMapOf("bank" to it.getBank(), "startBit" to it.getStart_bit(), "mask" to it.getMask(), "match" to it.isMatch())
+	}
+
+	private fun bankCfgMap(value: BankCfg?): Map<String, Any?>? = value?.let {
+		linkedMapOf("bank" to it.getBank(), "startWord" to it.getStart_word(), "wordCount" to it.getWord_count(), "password" to it.getPassword())
+	}
+
+	private fun <T> safe(block: () -> T): Any? = runCatching { block() }.getOrElse { "erreur ${it.javaClass.simpleName}" }
+
+	private fun Map<String, Any?>.mapValue(key: String): Map<String, Any?> =
+		(this[key] as? Map<*, *>)?.mapKeys { it.key.toString() } ?: emptyMap()
+
+	private fun Any?.mapValue(): Map<String, Any?> =
+		(this as? Map<*, *>)?.mapKeys { it.key.toString() } ?: emptyMap()
+
+	private fun Any?.asInt(): Int? = when (this) {
+		is Number -> toInt()
+		is String -> toIntOrNull()
+		else -> null
+	}
+
+	private fun Any?.asBool(): Boolean? = when (this) {
+		is Boolean -> this
+		is Number -> toInt() != 0
+		is String -> lowercase(Locale.ROOT).let { it == "true" || it == "1" }
+		else -> null
+	}
+
+	private fun Any?.asIntList(): List<Int>? = when (this) {
+		is IntArray -> toList()
+		is List<*> -> mapNotNull { it.asInt() }
+		else -> null
+	}
+
+	private fun Any?.asIntArray(): IntArray? = asIntList()?.toIntArray()
+
+	private fun Any?.asStringArray(): Array<String>? = when (this) {
+		is Array<*> -> map { it.toString() }.toTypedArray()
+		is List<*> -> map { it.toString() }.toTypedArray()
+		is String -> split(',').map { it.trim() }.toTypedArray()
+		else -> null
 	}
 
 	/**
@@ -325,7 +631,8 @@ class GateBridge(
 			"start2" to (triggerSensors.getOrNull(1)?.let { "GPI$it" } ?: "NONE"),
 			"stop2" to "NONE",
 		)
-		return api.N01_AutoInvStar("TCP_FAST", AUTO_INVENTORY_SECONDS, triggers)
+		val reportMode = if (transport == "serial") "RS232_FAST" else "TCP_FAST"
+		return api.N01_AutoInvStar(reportMode, AUTO_INVENTORY_SECONDS, triggers)
 	}
 
 	private fun haltReading(api: N01_Api) {
@@ -459,7 +766,6 @@ class GateBridge(
 	}
 
 	/** Appelé par le fil de réception du SDK : aucun traitement bloquant ici. */
-	/** Appelé par le fil de réception du SDK : aucun traitement bloquant ici. */
 	private fun onTag(epcInput: String, tidInput: String, rssi: Int, antenna: Int) = runCatching {
 		val epc = epcInput.filter { it.isLetterOrDigit() }.uppercase(Locale.ROOT)
 		if (epc.isEmpty()) return@runCatching
@@ -500,12 +806,21 @@ class GateBridge(
 		private val onTag: (String, String, Int, Int) -> Unit,
 		private val onGpi: (Int, Int) -> Unit,
 	) : N01_Api() {
+		private val messages = N01JsonStream()
 		/** Dernier masque des entrées GPI reçu (« gpis »). */
 		private var lastGpis: String? = null
 
+		// The SDK splits TCP data on every closing brace when it contains
+		// "rssi", corrupting nested objects and partial network reads.
+		override fun CheckDataEpc(message: String?) = SetClass(message)
+
+		// The serial callback deletes the returned text from its own buffer.
+		// Consume each chunk here and let N01JsonStream retain partial objects.
+		override fun ExtractCompleteJsonEpc(message: String?): String = message.orEmpty()
+
 		override fun SetClass(message: String?) {
 			if (message.isNullOrBlank()) return
-			for (part in splitObjects(message)) {
+			for (part in messages.accept(message)) {
 				val json = runCatching { JSONObject(part) }.getOrNull()
 				when {
 					json == null -> {
@@ -547,34 +862,6 @@ class GateBridge(
 			}
 		}
 
-		/** Objets JSON de premier niveau d'un bloc reçu (« }{ » collés). */
-		private fun splitObjects(text: String): List<String> {
-			val parts = mutableListOf<String>()
-			var depth = 0
-			var start = -1
-			var inString = false
-			var escaped = false
-			for ((index, char) in text.withIndex()) {
-				if (inString) {
-					when {
-						escaped -> escaped = false
-						char == '\\' -> escaped = true
-						char == '"' -> inString = false
-					}
-					continue
-				}
-				when (char) {
-					'"' -> inString = true
-					'{' -> if (depth++ == 0) start = index
-					'}' -> if (depth > 0 && --depth == 0 && start >= 0) {
-						parts += text.substring(start, index + 1)
-						start = -1
-					}
-				}
-			}
-			return parts.ifEmpty { listOf(text) }
-		}
-
 		private fun String.oneLine() = replace(Regex("\\s+"), " ").take(300)
 	}
 
@@ -614,5 +901,6 @@ class GateBridge(
 		const val TID_ATTEMPTS = 3
 		const val AUTO_INVENTORY_SECONDS = 3
 		const val CLEAR_CACHE_SECONDS = 1
+		val TARGETS = setOf("A", "B", "A-B", "B-A")
 	}
 }

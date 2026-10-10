@@ -345,6 +345,12 @@ class GateController extends ChangeNotifier {
   Future<bool> testBuzzer({int? gpo}) =>
       reader.pulseGpo(gpo ?? buzzerGpo, Duration(seconds: buzzerSeconds));
 
+  Future<Map<String, Object?>> readN01Settings() => reader.readN01Settings();
+
+  Future<Map<String, Object?>> applyN01Settings(
+    Map<String, Object?> settings,
+  ) => reader.applyN01Settings(settings);
+
   /// Joue l'alarme (message et voyant) sans la compter.
   Future<void> testAlarm() => _signalAlarm();
 
@@ -381,7 +387,13 @@ class GateController extends ChangeNotifier {
       return;
     }
     // Cartes d'abonné et tags étrangers à la bibliothèque : ignorés.
-    if (!isValidEpc(epc)) return;
+    if (!isValidEpc(epc)) {
+      debugPrint(
+        'Portail : tag $epc ignoré '
+        '(${isCardEpc(epc) ? 'carte abonné' : 'EPC hors format livre BCM ou CRC invalide'}).',
+      );
+      return;
+    }
     final last = _bookSeenAt[epc];
     _bookSeenAt[epc] = now;
     if (_bookSeenAt.length > 2000) {
