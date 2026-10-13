@@ -1,0 +1,87 @@
+{
+  "version": 1,
+  "scope": {
+    "gatewayUrl": "https://ilms.test",
+    "accountId": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+    "libraryId": "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
+  },
+  "member": {
+    "member_id": "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+    "card_id": "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
+    "number": "MEM-42",
+    "name": "Lecteur Test",
+    "status": 1,
+    "eligible": true
+  },
+  "copy": {
+    "copy": {
+      "id": "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee",
+      "document_id": "ffffffff-ffff-4fff-8fff-ffffffffffff",
+      "number": "COPY-42"
+    },
+    "title": "Document Test",
+    "available_for_checkout": true,
+    "active_loan": null
+  },
+  "loan": {
+    "id": "11111111-1111-4111-8111-111111111111",
+    "library_id": "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+    "member_id": "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+    "copy_id": "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee",
+    "document_id": "ffffffff-ffff-4fff-8fff-ffffffffffff",
+    "number": "LOAN-42",
+    "status": 1,
+    "due_date": "2030-12-01T12:00:00Z"
+  },
+  "operations": [
+    {
+      "input": {
+        "kind": "checkout",
+        "payload": {
+          "operation_id": "22222222-2222-4222-8222-222222222222",
+          "card": {"epc": " aa12 ", "token": "not-persisted"},
+          "copy": {"tid": "bb34"},
+          "preferred_return_date": "2030-12-01T13:00:00+01:00",
+          "expected_card_id": "DDDDDDDD-DDDD-4DDD-8DDD-DDDDDDDDDDDD",
+          "expected_member_id": "CCCCCCCC-CCCC-4CCC-8CCC-CCCCCCCCCCCC",
+          "expected_copy_id": "EEEEEEEE-EEEE-4EEE-8EEE-EEEEEEEEEEEE",
+          "password": "not-persisted"
+        }
+      },
+      "normalized": {
+        "kind": "checkout",
+        "payload": {
+          "operation_id": "22222222-2222-4222-8222-222222222222",
+          "card": {"epc": "AA12"},
+          "copy": {"tid": "BB34"},
+          "preferred_return_date": "2030-12-01T12:00:00.000Z",
+          "expected_card_id": "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
+          "expected_member_id": "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+          "expected_copy_id": "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee"
+        }
+      }
+    },
+    {
+      "input": {"kind": "return", "payload": {"copy": {"epc": "bb34", "tid": "cc56"}, "loan_id": "11111111-1111-4111-8111-111111111111", "name": "not-persisted"}},
+      "normalized": {"kind": "return", "payload": {"copy": {"epc": "BB34", "tid": "CC56"}, "loan_id": "11111111-1111-4111-8111-111111111111"}}
+    },
+    {
+      "input": {"kind": "checkout", "payload": {
+        "operation_id": "33333333-3333-4333-8333-333333333333",
+        "card": {"epc": "AA12"}, "copy": {"tid": "BB34"},
+        "preferred_return_date": "2030-12-01T12:00:00.123456Z",
+        "expected_card_id": "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
+        "expected_member_id": "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+        "expected_copy_id": "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee"
+      }},
+      "normalized": {"kind": "checkout", "payload": {
+        "operation_id": "33333333-3333-4333-8333-333333333333",
+        "card": {"epc": "AA12"}, "copy": {"tid": "BB34"},
+        "preferred_return_date": "2030-12-01T12:00:00.123Z",
+        "expected_card_id": "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
+        "expected_member_id": "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+        "expected_copy_id": "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee"
+      }}
+    }
+  ]
+}

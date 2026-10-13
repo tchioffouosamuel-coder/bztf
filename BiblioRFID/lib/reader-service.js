@@ -4,7 +4,7 @@ import path from "node:path";
 import readline from "node:readline";
 
 export class ReaderService extends EventEmitter {
-  constructor(executable, marker) {
+  constructor(executable, marker, { startupTimeoutMs = 10000, spawnProcess = spawn } = {}) {
     super();
     this.executable = executable;
     this.marker = marker;
@@ -14,32 +14,52 @@ export class ReaderService extends EventEmitter {
     this.readyPromise = null;
     this.connection = null;
     this.connected = false;
+    this.startupTimeoutMs = startupTimeoutMs;
+    this.spawnProcess = spawnProcess;
   }
 
   async start() {
     if (this.process && !this.process.killed) return this.readyPromise;
     this.readyPromise = new Promise((resolve, reject) => {
-      const child = spawn(this.executable, ["daemon"], {
+      const child = this.spawnProcess(this.executable, ["daemon"], {
         cwd: path.dirname(this.executable),
         windowsHide: true,
         stdio: ["pipe", "pipe", "pipe"]
       });
       this.process = child;
+      let ready = false;
+      const startupTimer = setTimeout(() => {
+        finishReady(new Error("Le pont RFID n'a pas confirme son demarrage."));
+        child.kill();
+      }, this.startupTimeoutMs);
+      const finishReady = (error, message) => {
+        if (ready) return;
+        ready = true;
+        clearTimeout(startupTimer);
+        if (error) reject(error);
+        else resolve(message);
+      };
       const lines = readline.createInterface({ input: child.stdout });
-      lines.on("line", (line) => this.handleLine(line, resolve));
+      lines.on("line", (line) => {
+        if (this.process === child) this.handleLine(line, (message) => finishReady(null, message));
+      });
       child.stderr.on("data", (chunk) => this.emit("diagnostic", chunk.toString()));
-      child.once("error", reject);
-      child.once("exit", (code) => {
+      const stopped = (error) => {
+        finishReady(error);
+        lines.close();
+        if (this.process !== child) return;
         this.connected = false;
         this.connection = null;
         this.process = null;
         for (const { reject: rejectPending, timer } of this.pending.values()) {
           clearTimeout(timer);
-          rejectPending(new Error(`Le pont RFID s'est arrêté (code ${code ?? "inconnu"}).`));
+          rejectPending(error);
         }
         this.pending.clear();
         this.emit("disconnected");
-      });
+      };
+      child.once("error", stopped);
+      child.once("exit", (code) => stopped(new Error(`Le pont RFID s'est arrete (code ${code ?? "inconnu"}).`)));
     });
     return this.readyPromise;
   }

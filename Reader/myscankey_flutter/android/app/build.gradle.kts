@@ -5,6 +5,19 @@ plugins {
     id("dev.flutter.flutter-gradle-plugin")
 }
 
+val ilmsStandalone = providers.gradleProperty("ILMS_STANDALONE").orNull == "true"
+val targetName = providers.gradleProperty("target").orNull?.replace('\\', '/')?.substringAfterLast('/')
+// Flutter device tests wrap the target in a generated listener.dart.
+val ilmsRecipe = providers.gradleProperty("ILMS_RECIPE").orNull == "true"
+require(targetName != "listener.dart" || ilmsRecipe) {
+    "Flutter device-test wrappers require explicit ILMS_RECIPE=true."
+}
+val ilmsTarget = targetName == "main_ilms.dart" ||
+    (ilmsRecipe && (targetName == "ilms_device_test.dart" || targetName == "listener.dart"))
+require(ilmsStandalone == ilmsTarget) {
+    "ILMS targets require ORG_GRADLE_PROJECT_ILMS_STANDALONE=true; legacy targets must not use it."
+}
+
 android {
     namespace = "com.bibliorfid.myscankey_flutter"
     compileSdk = flutter.compileSdkVersion
@@ -21,7 +34,9 @@ android {
 
     defaultConfig {
         // TODO: Specify your own unique Application ID (https://developer.android.com/studio/build/application-id.html).
-        applicationId = "com.bibliorfid.myscankey_flutter"
+        applicationId = if (ilmsStandalone) "com.bibliorfid.myscankey_flutter.ilms" else "com.bibliorfid.myscankey_flutter"
+        manifestPlaceholders["applicationLabel"] = if (ilmsStandalone) "BIBLIORFID ILMS" else "Bibliothèque ZTF"
+        manifestPlaceholders["applicationActivity"] = if (ilmsStandalone) ".IlmsActivity" else ".MainActivity"
         // You can update the following values to match your application needs.
         // For more information, see: https://flutter.dev/to/review-gradle-config.
         minSdk = flutter.minSdkVersion
