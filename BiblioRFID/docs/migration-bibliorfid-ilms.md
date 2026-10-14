@@ -991,11 +991,16 @@ que des demandes restent a traiter.
 `https://gateway.bibliotheque-ztf.org` est joignable et authentifie. Le
 14 octobre 2026, avec un compte administrateur fourni par l'utilisateur, les
 trois etapes de connexion passent (OAuth 200, login 200, bibliotheques 200,
-une seule bibliotheque). Les routes `circulation/rfid/*` repondent en
-revanche 500 enveloppant `404 NOT_FOUND` : les extensions RFID ne sont pas
-deployees dans le `library-service`. Verifie par comparaison avec une route
-inventee sous le meme prefixe, qui donne la meme erreur, alors que
-`GET /libraries/{UUID}` repond 200 dans la meme session.
+une seule bibliotheque). Les routes `circulation/rfid/*` repondaient en
+revanche 500 enveloppant `404 NOT_FOUND`. Verifie par comparaison avec une
+route inventee sous le meme prefixe, qui donnait la meme erreur, alors que
+`GET /libraries/{UUID}` repondait 200 dans la meme session.
+
+Lecture corrigee du 14 octobre 2026, apres examen du code : ces routes
+n'etaient pas en attente de deploiement, elles n'existaient pas. Elles ont
+depuis ete ecrites et poussees sur le `master` du `library-service` et
+attendent un deploiement. Voir [clients natifs](ilms-circulation-client.md)
+pour les prealables de recette.
 Le gateway convertit les 404 amont en 500 et un mot de passe errone en 500
 au lieu de 401 ; a corriger avant la recette. Les ecritures `checkouts` et
 `returns` n'ont pas ete essayees. Le constat anonyme du 12 octobre (HEAD 404)
@@ -1315,3 +1320,27 @@ inchange.
   l'origine explicite le journal de test reste visible.
 - Aucun import, effacement de journal, commit, push, deploiement ni
   basculement Render. Aucun pret ou retour distant execute.
+
+## Tranche 15 - Correction d'une lecture erronee et suite backend
+
+- La tranche 14 concluait que les extensions RFID n'etaient "pas deployees".
+  La lecture etait fausse : apres examen du `library-service`, elles
+  n'existaient pas. Le depot ne portait aucun controleur de circulation,
+  seulement un `GET .../copies/by-rfid` et les routes `loans` classiques.
+  Dire "pas deployees" laissait croire a un retard de livraison alors qu'il
+  manquait le code.
+- Les quatre routes ont ete ecrites cote backend, au contrat exact que ces
+  clients implementent deja : tags EPC/TID, idempotence par `operation_id`
+  garantie par un index unique, refus quand un tag ne designe plus l'objet
+  attendu. Rien n'a change dans ce depot, les clients natifs n'avaient pas a
+  bouger.
+- Prealables avant recette, aucun n'etant du code : deployer le
+  `library-service`, verifier la presence de pgvector sur la base visee, et
+  encoder les cartes de lecteur. Les colonnes `rfid_code` et `rfid_tid` ont
+  ete ajoutees aux cartes, mais aucune n'est encodee : `members/resolve`
+  repondra qu'aucune carte ne porte le tag.
+- Le `library-service` rend desormais 400 et 404 sur ses propres refus. Le
+  `gateway-service` n'est pas corrige et continue de convertir les 404 amont
+  en 500 : c'est lui qui compte pour un poste hors ligne, puisque ces clients
+  traduisent un 500 en panne reessayable et rejoueraient indefiniment.
+- Aucun import, effacement de journal, deploiement ni basculement Render.

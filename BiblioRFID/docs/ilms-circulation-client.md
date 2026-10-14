@@ -73,18 +73,32 @@ confirme en reel :
 | POST `.../circulation/rfid/members/resolve` | 500 enveloppant `404 NOT_FOUND` |
 | POST `.../circulation/rfid/copies/resolve` | 500 enveloppant `404 NOT_FOUND` |
 
-Les extensions RFID ne sont donc pas deployees. Ce n'est pas un probleme de
-corps de requete ni de droits : une route inventee sous le meme prefixe
-renvoie exactement la meme erreur, et `GET /libraries/{UUID}` repond 200 dans
-la meme session. Le prefixe `circulation` est absent du `library-service`.
-`checkouts` et `returns` echoueront de la meme maniere ; ils n'ont pas ete
-essayes, ce sont des ecritures.
+Ce n'etait pas un probleme de corps de requete ni de droits : une route
+inventee sous le meme prefixe renvoyait exactement la meme erreur, et
+`GET /libraries/{UUID}` repondait 200 dans la meme session.
+
+Lecture corrigee du 14 octobre 2026, apres examen du code du
+`library-service`. Les quatre routes n'etaient pas "deployees ailleurs" :
+elles n'existaient pas. Le depot ne portait aucun controleur de circulation,
+seulement un `GET .../copies/by-rfid` et les routes `loans` classiques. La
+formulation precedente laissait croire a un simple retard de deploiement.
+
+Etat depuis : les quatre routes sont ecrites et poussees sur le `master` du
+`library-service`, au contrat exact decrit plus haut, avec l'idempotence par
+`operation_id` garantie par un index unique. Elles attendent un deploiement.
+Deux prealables avant de les recetter : les cartes de lecteur ont recu des
+colonnes `rfid_code` et `rfid_tid` mais **aucune carte n'est encodee**, donc
+`members/resolve` repondra qu'aucune carte ne porte le tag ; et l'extension
+pgvector doit etre presente sur la base visee, une migration anterieure en
+dependant.
 
 Le gateway convertit les 404 amont en 500, et un mot de passe errone en 500
 au lieu de 401. Consequence pour ces clients : `request` leve
 `IlmsClientError("denied", 500)` pour une route absente, ce qui presente une
 extension manquante comme une panne serveur, donc comme reessayable alors
-qu'elle ne le sera jamais. A corriger cote gateway avant la recette.
+qu'elle ne le sera jamais. Le `library-service` rend desormais 400 et 404 sur
+ses propres refus ; **le `gateway-service` n'est pas corrige**, et c'est lui
+qui compte pour un poste hors ligne qui rejoue ses demandes.
 
 Correction de routage du 12 octobre 2026 : les GET anonymes directs sur
 OAuth, login et bibliotheques repondent 404 avec le prefixe local `/api`,
