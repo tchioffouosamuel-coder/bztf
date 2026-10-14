@@ -1339,8 +1339,12 @@ inchange.
   encoder les cartes de lecteur. Les colonnes `rfid_code` et `rfid_tid` ont
   ete ajoutees aux cartes, mais aucune n'est encodee : `members/resolve`
   repondra qu'aucune carte ne porte le tag.
-- Le `library-service` rend desormais 400 et 404 sur ses propres refus. Le
-  `gateway-service` n'est pas corrige et continue de convertir les 404 amont
-  en 500 : c'est lui qui compte pour un poste hors ligne, puisque ces clients
-  traduisent un 500 en panne reessayable et rejoueraient indefiniment.
+- Le gateway etait accuse a tort depuis le debut de ce chantier. Teste
+  directement sur le `library-service`, sans gateway devant, un chemin
+  inexistant repondait deja 500 avec un corps disant 404 : le gateway ne
+  faisait que relayer, et son code ne compte que deux fichiers Java. La cause
+  etait le filet general du service, qui remplacait par 500 le code porte par
+  les `ResponseStatusException`. Corrige et verifie sur le service en marche.
+  Cela comptait pour ces clients, qui traduisent un 500 en panne reessayable
+  et rejouaient indefiniment des demandes qui ne passeront jamais.
 - Aucun import, effacement de journal, deploiement ni basculement Render.

@@ -92,13 +92,22 @@ colonnes `rfid_code` et `rfid_tid` mais **aucune carte n'est encodee**, donc
 pgvector doit etre presente sur la base visee, une migration anterieure en
 dependant.
 
-Le gateway convertit les 404 amont en 500, et un mot de passe errone en 500
-au lieu de 401. Consequence pour ces clients : `request` leve
-`IlmsClientError("denied", 500)` pour une route absente, ce qui presente une
-extension manquante comme une panne serveur, donc comme reessayable alors
-qu'elle ne le sera jamais. Le `library-service` rend desormais 400 et 404 sur
-ses propres refus ; **le `gateway-service` n'est pas corrige**, et c'est lui
-qui compte pour un poste hors ligne qui rejoue ses demandes.
+Les 500 enveloppant un 404 n'etaient pas le fait du gateway. Teste le
+14 octobre 2026 directement sur le `library-service`, sans gateway devant,
+un chemin inexistant repondait 500 avec un corps disant 404 : le gateway ne
+faisait que relayer. Son code ne compte d'ailleurs que deux fichiers Java.
+
+La cause etait le filet general du service, qui attrapait `Exception` et
+remplacait par 500 le code porte par les `ResponseStatusException`. Corrige :
+une exception qui porte son code le garde. Verifie sur le service en marche,
+chemin inexistant 404, sans jeton 401, cle invalide 400, objet inexistant
+404.
+
+Cela comptait precisement pour ces clients : `request` leve
+`IlmsClientError("denied", 500)`, qu'ils traitent comme une panne
+reessayable. Ils rejouaient donc indefiniment des demandes qui ne passeront
+jamais. Le correctif est pousse mais **pas encore deploye** ; jusque-la, le
+comportement observe reste celui decrit plus haut.
 
 Correction de routage du 12 octobre 2026 : les GET anonymes directs sur
 OAuth, login et bibliotheques repondent 404 avec le prefixe local `/api`,
