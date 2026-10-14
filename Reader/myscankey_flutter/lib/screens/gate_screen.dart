@@ -165,8 +165,14 @@ class _Header extends StatelessWidget {
     final colors = Theme.of(context).colorScheme;
     final (label, color, icon) = gate.connecting
         ? ('Connexion…', colors.onSurfaceVariant, Icons.sync)
-        : gate.readerConnected
+        : gate.monitoring
         ? ('Surveillance active', colors.primary, Icons.shield_outlined)
+        : gate.readerConnected
+        ? (
+            'Surveillance interrompue',
+            colors.error,
+            Icons.warning_amber_outlined,
+          )
         : ('Portail hors ligne', colors.error, Icons.sensors_off);
     return Padding(
       padding: const EdgeInsets.fromLTRB(16, 10, 8, 10),

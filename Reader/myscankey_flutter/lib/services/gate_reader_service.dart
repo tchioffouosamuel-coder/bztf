@@ -91,7 +91,7 @@ class GateReaderService {
     final target = normalizeEndpoint(transport, endpoint);
     _nativeSubscription ??= _events.receiveBroadcastStream().listen(
       _onNativeEvent,
-      onError: _tags.addError,
+      onError: _onNativeError,
     );
     final result = await _methods.invokeMapMethod<Object?, Object?>('connect', {
       'transport': transport,
@@ -119,6 +119,13 @@ class GateReaderService {
     }
   }
 
+  void _onNativeError(Object error) {
+    if (error is PlatformException && error.code == 'INVENTORY_START') {
+      _reading = false;
+    }
+    _tags.addError(error);
+  }
+
   Future<void> startInventory({int? power}) async {
     if (!_connected) {
       throw StateError('Connectez le portail avant la lecture.');
@@ -127,6 +134,7 @@ class GateReaderService {
       throw RangeError.range(power, minPower, maxPower, 'power');
     }
     if (!simulation) {
+      _reading = false;
       await _methods.invokeMethod<void>('startInventory', {'power': power});
     }
     _reading = true;

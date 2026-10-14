@@ -439,6 +439,21 @@ void main() {
     expect(find.text('Surveillance active'), findsOneWidget);
 
     await tester.runAsync(() async {
+      await reader.stopInventory();
+      reader.failInventory = true;
+      await controller.gate.reconnect();
+    });
+    await tester.pump();
+    expect(find.text('Surveillance active'), findsNothing);
+    expect(find.text('Surveillance interrompue'), findsOneWidget);
+    expect(reader.connected, isTrue);
+    expect(controller.gate.monitoring, isFalse);
+    reader.failInventory = false;
+    await tester.runAsync(controller.gate.reconnect);
+    await tester.pump();
+    expect(find.text('Surveillance active'), findsOneWidget);
+
+    await tester.runAsync(() async {
       controller.gate.simulatePassage(PassageDirection.entry);
       await _until(() => controller.gate.today.entries == 1);
       reader.simulateTag(_tag(book.epc, book.tid!));
@@ -500,10 +515,12 @@ void main() {
         // Écran ouvert avant le chargement : portail encore inconnu.
         await gate.enter();
         expect(reader.reading, isFalse);
+        expect(gate.monitoring, isFalse);
         expect(gate.readerError, contains('Configurez'));
 
         await gate.initialize();
         expect(reader.reading, isTrue);
+        expect(gate.monitoring, isTrue);
         expect(gate.readerError, isNull);
       } finally {
         await gate.leave();
@@ -593,6 +610,13 @@ class _SilentReader extends ReaderService {
 class _FakeGateReader extends GateReaderService {
   int alarms = 0;
   int lights = 0;
+  bool failInventory = false;
+
+  @override
+  Future<void> startInventory({int? power}) async {
+    if (failInventory) throw StateError('ERR_BACK_DATA_FAIL');
+    await super.startInventory(power: power);
+  }
 
   /// Sorties actionnées (voyant, buzzer), dans l'ordre.
   final List<int> outputs = [];

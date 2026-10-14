@@ -71,6 +71,8 @@ Le message d’alarme (`android/app/src/main/res/raw/gate_alarm.wav`) se régén
 
 À valider sur site avec le portail réel : sens des barrières (bouton *Inverser*), puissance des antennes (ne pas lire les livres rangés à proximité) et sortie réelle du buzzer (bouton *Tester le buzzer* ; un avertissement s’affiche si le portail refuse sa coupure).
 
+Les commandes de lecture automatique et de sortie GPO attendent leur propre réponse pendant au plus 2 secondes, au lieu des 150 ms fixes du SDK. La commande d'arrêt conserve une durée numérique conforme au protocole. Un échec de démarrage ou de reprise de lecture interrompt le statut de surveillance et déclenche une nouvelle tentative ; la connexion seule ne suffit pas à afficher « Surveillance active ».
+
 ### Paramètres matériels N01
 
 Le terminal admin (carte *Paramètres matériels N01*) relit tout ce que le SDK expose et n’envoie au portail que les champs modifiés : identifiant, RFID/Gen2 (région, table de fréquences, session, Q, cible, mode RF, unicité, RSSI), puissances des antennes et antennes d’inventaire, entrées et sorties GPI-GPO, réseau et horloge, rapports et inventaire automatique. Ce que la carte ne laisse pas écrire reste en lecture seule (versions, adresses MAC, niveaux GPI courants, mode d’auto-inventaire piloté par l’application) et la clé de licence est masquée. La lecture est suspendue pendant l’écriture puis redémarre seule ; un réglage refusé par la carte est signalé sans empêcher les autres. L’intervalle `syncinterv`, que le *getter* du SDK omet alors que son *setter* l’exige, est demandé avant toute modification de l’inventaire automatique.

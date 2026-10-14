@@ -209,8 +209,7 @@ class GateBridge(
 				postError(result, "N01_SETTINGS", error.message ?: "Application des paramètres N01 impossible.")
 			} finally {
 				if (resume && reader === current) {
-					val status = runCatching { beginReading(current) }.getOrNull()
-					if (status != N01_Api.RET_ERRNO.RET_OK) Log.w(TAG, "Gate inventory restart after settings: $status")
+					restartReading(current)
 				}
 			}
 		}
@@ -563,7 +562,8 @@ class GateBridge(
 				silent = status == N01_Api.RET_ERRNO.RET_OK && silent
 			}
 		}.onFailure { Log.w(TAG, "Tag GPO unavailable", it) }
-		runCatching { api.N01_SetGpo(gpo, 0) }
+		silent = runCatching { api.N01_SetGpo(gpo, 0) == N01_Api.RET_ERRNO.RET_OK }
+			.getOrDefault(false) && silent
 		return silent
 	}
 
@@ -580,6 +580,7 @@ class GateBridge(
 		Log.i(TAG, "Gate inventory starting: power=${power ?: "reader"} dBm")
 		executor.execute {
 			try {
+				reading = false
 				haltReading(current)
 				if (power != null && !applyPower(current, power)) {
 					Log.w(TAG, "Gate power $power dBm refused")
@@ -592,7 +593,8 @@ class GateBridge(
 				val status = beginReading(current)
 				Log.i(TAG, "Gate inventory started: power=${power ?: "reader"} dBm, triggers=$triggerSensors, status=$status")
 				if (status != N01_Api.RET_ERRNO.RET_OK) {
-					postError(result, "INVENTORY_START", "Le portail a refusé la lecture ($status).")
+					val detail = (current as? GateApi)?.lastCommandReply ?: "Aucune réponse reçue du portail."
+					postError(result, "INVENTORY_START", "Démarrage de la lecture impossible ($status). $detail")
 					return@execute
 				}
 				reading = true
@@ -632,7 +634,21 @@ class GateBridge(
 			"stop2" to "NONE",
 		)
 		val reportMode = if (transport == "serial") "RS232_FAST" else "TCP_FAST"
-		return api.N01_AutoInvStar(reportMode, AUTO_INVENTORY_SECONDS, triggers)
+		val status = api.N01_AutoInvStar(reportMode, AUTO_INVENTORY_SECONDS, triggers)
+		reading = status == N01_Api.RET_ERRNO.RET_OK
+		return status
+	}
+
+	private fun restartReading(api: N01_Api) {
+		val status = runCatching { beginReading(api) }.getOrNull()
+		if (status != N01_Api.RET_ERRNO.RET_OK) {
+			reading = false
+			val detail = (api as? GateApi)?.lastCommandReply ?: "Aucune réponse reçue du portail."
+			Log.w(TAG, "Gate inventory restart failed: $status, $detail")
+			mainHandler.post {
+				eventSink?.error("INVENTORY_START", "Reprise de la lecture impossible. $detail", null)
+			}
+		}
 	}
 
 	private fun haltReading(api: N01_Api) {
@@ -674,8 +690,7 @@ class GateBridge(
 				Log.w(TAG, "Gate TID read failed for $epc", error)
 			} finally {
 				if (resume && reader === current) {
-					val status = runCatching { beginReading(current) }.getOrNull()
-					if (status != N01_Api.RET_ERRNO.RET_OK) Log.w(TAG, "Gate inventory restart: $status")
+					restartReading(current)
 				}
 			}
 			mainHandler.post { result.success(tid) }
@@ -807,8 +822,26 @@ class GateBridge(
 		private val onGpi: (Int, Int) -> Unit,
 	) : N01_Api() {
 		private val messages = N01JsonStream()
+		private val replies = N01CommandReply()
+		@Volatile var lastCommandReply: String? = null
+			private set
 		/** Dernier masque des entrées GPI reçu (« gpis »). */
 		private var lastGpis: String? = null
+
+		override fun SleepSend(command: java.util.HashMap<String, Any>) {
+			// The SDK's stop command uses a string where firmware expects seconds.
+			if (command["OP"] == "AutoInvSet" && command["duration"] == "NONE") {
+				command["duration"] = 0
+			}
+			val operation = command["OP"]?.toString().orEmpty()
+			if (operation != "AutoInvSet" && operation != "GpoSet") {
+				super.SleepSend(command)
+				return
+			}
+			lastCommandReply = null
+			lastCommandReply = replies.send(operation) { super.SleepSend(command) }
+			if (lastCommandReply == null) Log.w(TAG, "Gate command timed out: $operation")
+		}
 
 		// The SDK splits TCP data on every closing brace when it contains
 		// "rssi", corrupting nested objects and partial network reads.
@@ -840,6 +873,8 @@ class GateBridge(
 					else -> {
 						Log.i(TAG, "Gate message: ${part.oneLine()}")
 						super.SetClass(part)
+						// Publish only after the SDK has populated its response fields.
+						if (json.has("RES")) replies.accept(json.optString("RES"))
 					}
 				}
 			}

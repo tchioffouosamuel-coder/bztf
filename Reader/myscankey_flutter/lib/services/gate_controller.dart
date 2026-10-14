@@ -141,6 +141,7 @@ class GateController extends ChangeNotifier {
   int _failedPings = 0;
 
   bool get readerConnected => reader.connected;
+  bool get monitoring => active && reader.reading && readerError == null;
   bool get simulation => transport == 'simulation';
   bool get countsPeople => tracker.enabled;
   int get outsideSensor => tracker.outsideSensor;
@@ -748,7 +749,7 @@ class GateController extends ChangeNotifier {
 
   void _onReaderError(Object error) {
     readerError = _describe(error);
-    if (active && !reader.connected) _scheduleReconnect();
+    if (active && !reader.reading) _scheduleReconnect();
     notifyListeners();
   }
 
