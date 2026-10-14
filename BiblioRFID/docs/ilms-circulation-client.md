@@ -51,15 +51,40 @@ pendant l'appel interdit d'exposer/acquitter sa reponse tardive.
 Les transports ne verifient pas localement la signature du JWT ni le lien
 entre un jeton et un UUID de compte fourni par leur appelant. L'entree mobile
 obtient maintenant le compte et le jeton dans la meme reponse de connexion
-native ; le desktop doit encore etre branche a une telle session.
+native ; le desktop connait l'origine du gateway par defaut, mais son compte,
+sa bibliotheque et son jeton restent a brancher sur une telle session.
 Le serveur valide le JWT et les droits
 natifs dans la bibliotheque ; un filtrage local n'est pas une autorisation.
 
 Origine fournie par l'utilisateur : `https://gateway.bibliotheque-ztf.org`.
-Le 12 octobre 2026, une requete HEAD anonyme sur `/` a retourne 404 avec
-verification TLS reussie, sans redirection. Cela ne valide ni les nouvelles
-routes deployees, ni l'authentification, ni un environnement de test.
-Aucun jeton ou appel metier n'a ete envoye a ce serveur.
+C'est desormais le defaut des deux clients natifs.
+
+Verification authentifiee du 14 octobre 2026, avec un compte administrateur
+fourni par l'utilisateur et le client OAuth public du portail. Les trois
+etapes de connexion passent et le contrat observe dans le portail est
+confirme en reel :
+
+| Etape | Resultat |
+| --- | --- |
+| POST `/auth-service/oauth/token` | 200, `scope: write read`, `expires_in` 900 |
+| POST `/auth-service/api/v1/auth/login` | 200, `user.id` et `access_token.token` de type `Bearer` |
+| GET `/library-service/api/v1/libraries` | 200, une seule bibliotheque (selection automatique applicable) |
+| GET `/library-service/api/v1/libraries/{UUID}` | 200 |
+| POST `.../circulation/rfid/members/resolve` | 500 enveloppant `404 NOT_FOUND` |
+| POST `.../circulation/rfid/copies/resolve` | 500 enveloppant `404 NOT_FOUND` |
+
+Les extensions RFID ne sont donc pas deployees. Ce n'est pas un probleme de
+corps de requete ni de droits : une route inventee sous le meme prefixe
+renvoie exactement la meme erreur, et `GET /libraries/{UUID}` repond 200 dans
+la meme session. Le prefixe `circulation` est absent du `library-service`.
+`checkouts` et `returns` echoueront de la meme maniere ; ils n'ont pas ete
+essayes, ce sont des ecritures.
+
+Le gateway convertit les 404 amont en 500, et un mot de passe errone en 500
+au lieu de 401. Consequence pour ces clients : `request` leve
+`IlmsClientError("denied", 500)` pour une route absente, ce qui presente une
+extension manquante comme une panne serveur, donc comme reessayable alors
+qu'elle ne le sera jamais. A corriger cote gateway avant la recette.
 
 Correction de routage du 12 octobre 2026 : les GET anonymes directs sur
 OAuth, login et bibliotheques repondent 404 avec le prefixe local `/api`,
@@ -257,7 +282,7 @@ ouvrir de base ni contacter de serveur. Configuration du processus :
 
 | Variable | Valeur attendue |
 | --- | --- |
-| `ILMS_GATEWAY_URL` | Origine HTTPS complete du gateway cible |
+| `ILMS_GATEWAY_URL` | Origine HTTPS complete du gateway cible ; defaut `https://gateway.bibliotheque-ztf.org` |
 | `ILMS_ACCOUNT_ID` | UUID de la session ILMS courante |
 | `ILMS_LIBRARY_ID` | UUID de la bibliotheque cible |
 | `ILMS_JOURNAL_PATH` | Chemin explicite d'un fichier dedie ; jamais `library.db` |
@@ -422,7 +447,8 @@ refus d'une base historique, corruption et perte locale d'acquittement.
 Les changements de contexte pendant le stockage et la perte locale de
 jeton sont couverts : pas de reponse tardive ni de faux refus HTTP persiste.
 
-Restent : session et interface Electron,
+Restent : session et interface Electron (l'origine du gateway est branchee,
+le compte, la bibliotheque et le jeton ne le sont pas),
 recette du gateway complet avec JWT signe, deploiement des extensions et
 lecteur physique, recette OAuth distante, iOS et cycle de vie mobile complet.
 Le catalogue offline, les inventaires, badges/presences,

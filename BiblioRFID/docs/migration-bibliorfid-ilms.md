@@ -988,11 +988,19 @@ que des demandes restent a traiter.
 
 ### Gateway indique par l'utilisateur
 
-`https://gateway.bibliotheque-ztf.org` : HEAD anonyme sur `/` le 12 octobre
-2026, TLS verifie, HTTP 404, aucune redirection. Le gateway est joignable,
-mais cela ne prouve pas le deploiement des nouvelles routes RFID et ne
-confirme pas un environnement de test. Aucun secret ou appel metier envoye.
-Le proxy Angular local vers 8081 reste inchange.
+`https://gateway.bibliotheque-ztf.org` est joignable et authentifie. Le
+14 octobre 2026, avec un compte administrateur fourni par l'utilisateur, les
+trois etapes de connexion passent (OAuth 200, login 200, bibliotheques 200,
+une seule bibliotheque). Les routes `circulation/rfid/*` repondent en
+revanche 500 enveloppant `404 NOT_FOUND` : les extensions RFID ne sont pas
+deployees dans le `library-service`. Verifie par comparaison avec une route
+inventee sous le meme prefixe, qui donne la meme erreur, alors que
+`GET /libraries/{UUID}` repond 200 dans la meme session.
+Le gateway convertit les 404 amont en 500 et un mot de passe errone en 500
+au lieu de 401 ; a corriger avant la recette. Les ecritures `checkouts` et
+`returns` n'ont pas ete essayees. Le constat anonyme du 12 octobre (HEAD 404)
+est remplace par cette verification. Le proxy Angular local vers 8081 reste
+inchange.
 
 ### Verification locale
 
@@ -1272,3 +1280,38 @@ Le proxy Angular local vers 8081 reste inchange.
   Leurs suites et la recette physique SQLite precedente ne sont pas relancees.
 - Aucun import, effacement du journal, commit, push, deploiement ou basculement
   Render. Aucun identifiant reel saisi/lu ni pret/retour distant execute.
+
+## Tranche 14 - Verification authentifiee et origine par defaut du desktop
+
+- Recette distante du 14 octobre 2026 avec un compte administrateur et le
+  mot de passe fournis par l'utilisateur, et le client OAuth public du
+  portail (`test-client`, present en clair dans `environment.prod.ts` et
+  dans le bundle JS servi). Chaine complete : OAuth 200, login 200 avec
+  `user.id` et `access_token.token` de type `Bearer`, `GET /libraries` 200
+  avec une seule bibliotheque, `GET /libraries/{UUID}` 200.
+- Les quatre routes RFID ne sont pas deployees : `members/resolve` et
+  `copies/resolve` repondent 500 enveloppant `404 NOT_FOUND`, comme une
+  route inventee sous le meme prefixe. `checkouts` et `returns` ne sont pas
+  essayees, ce sont des ecritures sur la base de l'utilisateur.
+- Deux anomalies serveur a corriger, hors de ce depot : le gateway renvoie
+  500 au lieu de 404 pour une route absente et au lieu de 401 pour un mot de
+  passe errone ; `/auth-service/actuator/health` repond 500. Le client natif
+  traduit ces 500 en `denied`, donc en panne reessayable, alors qu'une route
+  absente ne le sera jamais.
+- Le compte administrateur utilise un mot de passe trivial sur un serveur
+  public ; son changement est recommande a l'utilisateur. Aucun secret n'est
+  ecrit dans ce depot.
+- Desktop branche sur le gateway : `ILMS_DEFAULT_GATEWAY_URL` est exporte par
+  `lib/ilms-circulation-client.js` et sert de defaut a `ILMS_GATEWAY_URL` dans
+  `ilms-sync.js`, aligne sur `ilmsDefaultGatewayUrl` du mobile et sur
+  `apiUrl` du portail. Une origine explicite reste prioritaire.
+- `nativeScope` n'est pas modifie et reste un validateur strict : le defaut
+  s'applique a la lecture de la configuration, jamais a une origine fournie
+  par un appelant. Le compte, la bibliotheque et le jeton du desktop restent
+  a brancher sur une vraie session ; l'UI Electron n'appelle toujours pas
+  ILMS.
+- 136 tests Node SDK passent, dont un nouveau test du defaut : sans
+  `ILMS_GATEWAY_URL` le CLI vise le gateway deploye et la portee change, avec
+  l'origine explicite le journal de test reste visible.
+- Aucun import, effacement de journal, commit, push, deploiement ni
+  basculement Render. Aucun pret ou retour distant execute.

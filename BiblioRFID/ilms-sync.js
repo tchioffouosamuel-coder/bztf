@@ -1,4 +1,4 @@
-import { IlmsCirculationClient, IlmsClientError } from "./lib/ilms-circulation-client.js";
+import { ILMS_DEFAULT_GATEWAY_URL, IlmsCirculationClient, IlmsClientError } from "./lib/ilms-circulation-client.js";
 import { IlmsCirculationJournal } from "./lib/ilms-circulation-journal.js";
 
 async function input() {
@@ -12,7 +12,7 @@ async function main() {
   const [command, argument, extra] = process.argv.slice(2);
   if (!command || command === "help") {
     process.stdout.write("ILMS : resolve-member, resolve-copy, enqueue, list, retry <UUID>, discard <UUID> --confirm-local-discard.\n"
-      + "Configuration locale : ILMS_GATEWAY_URL, ILMS_ACCOUNT_ID, ILMS_LIBRARY_ID, ILMS_JOURNAL_PATH ; ILMS_ACCESS_TOKEN pour HTTP uniquement.\n"
+      + "Configuration locale : ILMS_GATEWAY_URL (defaut " + ILMS_DEFAULT_GATEWAY_URL + "), ILMS_ACCOUNT_ID, ILMS_LIBRARY_ID, ILMS_JOURNAL_PATH ; ILMS_ACCESS_TOKEN pour HTTP uniquement.\n"
       + "Tags/demandes JSON sur stdin. Aucun renvoi automatique, aucune importation de l'ancienne base.\n"); return;
   }
   if (!["resolve-member", "resolve-copy", "enqueue", "list", "retry", "discard"].includes(command)
@@ -22,7 +22,7 @@ async function main() {
   if (!process.env.ILMS_JOURNAL_PATH || process.env.ILMS_JOURNAL_PATH === ":memory:") throw new IlmsClientError("storage");
   const journal = new IlmsCirculationJournal(process.env.ILMS_JOURNAL_PATH);
   try {
-    const client = new IlmsCirculationClient({journal, getSession: () => ({gatewayUrl: process.env.ILMS_GATEWAY_URL,
+    const client = new IlmsCirculationClient({journal, getSession: () => ({gatewayUrl: process.env.ILMS_GATEWAY_URL || ILMS_DEFAULT_GATEWAY_URL,
       accountId: process.env.ILMS_ACCOUNT_ID, libraryId: process.env.ILMS_LIBRARY_ID, accessToken: process.env.ILMS_ACCESS_TOKEN})});
     let result;
     if (command === "list") result = client.list();

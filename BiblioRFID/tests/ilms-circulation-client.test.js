@@ -8,7 +8,7 @@ import { spawn } from "node:child_process";
 import { DatabaseSync } from "node:sqlite";
 import { randomUUID } from "node:crypto";
 import { fileURLToPath } from "node:url";
-import { IlmsCirculationClient, IlmsClientError, nativeOperation, nativeScope, nativeTag } from "../lib/ilms-circulation-client.js";
+import { ILMS_DEFAULT_GATEWAY_URL, IlmsCirculationClient, IlmsClientError, nativeOperation, nativeScope, nativeTag } from "../lib/ilms-circulation-client.js";
 import { IlmsCirculationJournal } from "../lib/ilms-circulation-journal.js";
 
 const fixture = JSON.parse(fs.readFileSync(new URL("./fixtures/ilms-circulation-contract.json", import.meta.url), "utf8"));
@@ -253,11 +253,12 @@ test("real HTTP redirects are not followed and never forward the ILMS bearer tok
 });
 
 const cli = fileURLToPath(new URL("../ilms-sync.js", import.meta.url));
-function command(context, args, input) {
+function command(context, args, input, overrides = {}) {
   return new Promise((resolve, reject) => {
-    const child = spawn(process.execPath, ["--no-warnings=ExperimentalWarning", cli, ...args], {windowsHide: true,
-      env: {...process.env, ILMS_GATEWAY_URL: context.session.gatewayUrl, ILMS_ACCOUNT_ID: context.session.accountId,
-        ILMS_LIBRARY_ID: context.session.libraryId, ILMS_ACCESS_TOKEN: context.session.accessToken, ILMS_JOURNAL_PATH: context.file}});
+    const env = {...process.env, ILMS_GATEWAY_URL: context.session.gatewayUrl, ILMS_ACCOUNT_ID: context.session.accountId,
+      ILMS_LIBRARY_ID: context.session.libraryId, ILMS_ACCESS_TOKEN: context.session.accessToken, ILMS_JOURNAL_PATH: context.file, ...overrides};
+    for (const key of Object.keys(overrides)) if (overrides[key] === undefined) delete env[key];
+    const child = spawn(process.execPath, ["--no-warnings=ExperimentalWarning", cli, ...args], {windowsHide: true, env});
     let stdout = ""; let stderr = ""; child.stdout.on("data", data => stdout += data); child.stderr.on("data", data => stderr += data);
     child.on("error", reject); child.on("close", code => resolve({code, stdout, stderr})); child.stdin.end(input ? JSON.stringify(input) : "");
   });
@@ -274,6 +275,18 @@ test("desktop CLI persists across separate processes, then explicitly replays th
   const listed = await command(context, ["list"]); assert.equal(JSON.parse(listed.stdout)[0].id, saved.entry.id);
   const result = await command(context, ["retry", saved.entry.id]); assert.equal(result.code, 0); assert.equal(JSON.parse(result.stdout).accepted_by_ilms, true);
   assert.equal(calls, 1); assert.deepEqual(JSON.parse((await command(context, ["list"])).stdout), []);
+});
+test("CLI falls back to the deployed gateway, and an explicit origin still wins", async t => {
+  assert.equal(ILMS_DEFAULT_GATEWAY_URL, "https://gateway.bibliotheque-ztf.org");
+  assert.equal(nativeScope({...fixture.scope, gatewayUrl: ILMS_DEFAULT_GATEWAY_URL}).gateway_url, ILMS_DEFAULT_GATEWAY_URL);
+  const context = setup(t); const entry = context.client.enqueue(returned());
+  // Sans origine explicite le CLI vise le gateway deployé : la portee change,
+  // donc le journal de la portee de test n'est plus visible — et rien n'echoue.
+  const withoutOrigin = await command(context, ["list"], undefined, {ILMS_GATEWAY_URL: undefined});
+  assert.equal(withoutOrigin.code, 0);
+  assert.deepEqual(JSON.parse(withoutOrigin.stdout), []);
+  const listed = await command(context, ["list"]);
+  assert.equal(listed.code, 0); assert.equal(JSON.parse(listed.stdout)[0].id, entry.id);
 });
 test("CLI discard requires explicit local confirmation and never represents a remote cancellation", async t => {
   const context = setup(t); const [entry] = [context.client.enqueue(returned())];

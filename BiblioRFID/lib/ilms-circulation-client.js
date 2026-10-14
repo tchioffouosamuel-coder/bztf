@@ -1,6 +1,11 @@
 import { randomUUID } from "node:crypto";
 
 export const ILMS_UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+// Deploiement par defaut, aligne sur le portail (`environment.prod.ts`) et sur
+// l'entree mobile `ilmsDefaultGatewayUrl`. C'est un reglage de deploiement, pas
+// un secret d'exploitation. `nativeScope` reste strict : ce defaut s'applique
+// uniquement a la lecture de la configuration, jamais a une origine fournie.
+export const ILMS_DEFAULT_GATEWAY_URL = "https://gateway.bibliotheque-ztf.org";
 const messages = {
   scope: "Compte, bibliotheque et origine ILMS valides requis.",
   auth: "Un jeton de session ILMS est requis.",
