@@ -1,0 +1,21 @@
+# Table de partitions du pont RFID, flash 4 Mo, avec deux slots OTA.
+#
+# Le firmware complet (UART + Wi-Fi + Bluetooth classique) pese ~1,58 Mo :
+# les slots de 1,25 Mo de default.csv sont trop petits, et huge_app.csv
+# (3 Mo d'un seul tenant) interdit l'OTA. Deux slots de 1,9375 Mo laissent
+# donc ~18 % de marge pour les evolutions.
+#
+# Ce pont ne stocke rien dans un systeme de fichiers : sa configuration tient
+# dans NVS. Aucune partition spiffs/littlefs n'est donc reservee.
+#
+# Passer de huge_app.csv a cette table impose UN flash par USB ; les mises a
+# jour suivantes peuvent se faire par OTA. "nvs" garde volontairement l'offset
+# et la taille de huge_app.csv (0x9000, 0x5000) : la configuration deja
+# enregistree (Wi-Fi, temporisations, source de mise a jour) survit au
+# changement de table.
+# Name,     Type, SubType,  Offset,   Size
+nvs,        data, nvs,      0x9000,   0x5000
+otadata,    data, ota,      0xe000,   0x2000
+app0,       app,  ota_0,    0x10000,  0x1F0000
+app1,       app,  ota_1,    0x200000, 0x1F0000
+coredump,   data, coredump, 0x3F0000, 0x10000

@@ -3,6 +3,7 @@
 !/.gitignore
 !/BiblioRFID/
 !/BiblioRFID-Sync-API/
+!/PontRFID-ESP32/
 !/Reader/
 
 # Inside the reader collection, keep only the Flutter mobile app.
