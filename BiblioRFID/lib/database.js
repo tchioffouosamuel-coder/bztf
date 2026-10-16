@@ -2559,6 +2559,7 @@ export class LibraryDatabase {
       "sync_api_key",
       "cataloguing_vision_api_key",
       "cataloguing_ai_key",
+      "ilms_password",
     ];
     const rows = this.db.prepare("SELECT key, value FROM settings").all();
     const values = Object.fromEntries(

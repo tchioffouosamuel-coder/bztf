@@ -1,5 +1,6 @@
 import createElement from "/vendor/lucide/createElement.js";
 import Activity from "/vendor/lucide/icons/activity.js";
+import AppWindow from "/vendor/lucide/icons/app-window.js";
 import ArrowRight from "/vendor/lucide/icons/arrow-right.js";
 import BadgeCheck from "/vendor/lucide/icons/badge-check.js";
 import BadgeMinus from "/vendor/lucide/icons/badge-minus.js";
@@ -61,11 +62,13 @@ import UserPlus from "/vendor/lucide/icons/user-plus.js";
 import UserRound from "/vendor/lucide/icons/user-round.js";
 import Users from "/vendor/lucide/icons/users.js";
 import UsersRound from "/vendor/lucide/icons/users-round.js";
+import WifiOff from "/vendor/lucide/icons/wifi-off.js";
 import X from "/vendor/lucide/icons/x.js";
 import { initCataloguing } from "/cataloguing.js";
 
 const lucideIcons = {
   activity: Activity,
+  "app-window": AppWindow,
   "arrow-right": ArrowRight,
   "badge-check": BadgeCheck,
   "badge-minus": BadgeMinus,
@@ -127,6 +130,7 @@ const lucideIcons = {
   "user-round": UserRound,
   users: Users,
   "users-round": UsersRound,
+  "wifi-off": WifiOff,
   x: X,
 };
 
@@ -199,6 +203,7 @@ const viewMeta = {
   staff: ["Équipe", "Personnel"],
   gate: ["Sécurité et fréquentation", "Portail antivol"],
   station: ["Opérations RFID", "Station RFID"],
+  ilms: ["Catalogue partagé", "Interface ILMS"],
   history: ["Traçabilité", "Historique"],
   settings: ["Configuration", "Paramètres"],
 };
@@ -409,9 +414,11 @@ function setView(name) {
   if (name === "station") startAutoReading();
   if (name === "history") loadHistory();
   if (name === "cataloguing") cataloguing?.activate();
+  if (name === "ilms") openIlms();
   if (name === "settings") {
     loadSyncStatus(false);
     loadIlmsSession(false);
+    loadIlmsStatus(false);
     cataloguing?.loadSettingsForm();
   }
 }
@@ -2142,6 +2149,99 @@ async function loadSyncStatus(showError = true) {
   }
 }
 
+/**
+ * Onglet ILMS. L'interface tourne sur son propre serveur local, sur la boucle
+ * locale : elle y retrouve les chemins d'API relatifs qu'elle attend. Le cadre
+ * n'est chargé qu'à la première ouverture.
+ */
+async function openIlms() {
+  const frame = $("#ilms-frame");
+  let status = { available: true, gatewayUrl: "", origin: "" };
+  try {
+    status = await api("/api/ilms/status");
+  } catch {
+    // Statut indisponible : le cadre affichera lui-même le motif.
+  }
+  const notice = $("#ilms-notice");
+  const problem = !status.origin
+    ? "Le service local de l’interface ILMS n’a pas pu démarrer."
+    : status.available && !status.gatewayUrl
+      ? "Renseignez l’adresse de la passerelle ILMS dans Paramètres pour utiliser cet onglet."
+      : "";
+  notice.hidden = !problem;
+  if (problem) $("#ilms-notice-text").textContent = problem;
+  icons();
+  if (status.origin && !frame.dataset.loaded) {
+    frame.src = `${status.origin}/`;
+    frame.dataset.loaded = "1";
+  }
+}
+
+function renderIlmsStatus(status) {
+  const configured = Boolean(status.configured);
+  $("#ilms-status").classList.toggle("connected", configured);
+  $("#ilms-status-title").textContent = configured
+    ? "Interface disponible"
+    : "Non configurée";
+  $("#ilms-status-detail").textContent = !status.available
+    ? "Module ILMS absent de cette version de l’application."
+    : !status.origin
+      ? "Le service local de l’interface ILMS n’a pas démarré."
+      : !status.gatewayUrl
+        ? "Aucune passerelle ILMS renseignée."
+        : status.clientReady
+          ? `Passerelle : ${status.gatewayUrl} · compte ${status.username}`
+          : `Passerelle : ${status.gatewayUrl} · compte du poste incomplet`;
+  if (status.gatewayUrl) $("#ilms-gateway-url").value = status.gatewayUrl;
+  $("#ilms-username").value = status.username || "";
+  $("#ilms-library-id").value = status.libraryId || "";
+  // Le mot de passe enregistré n'est jamais renvoyé : le champ reste vide et
+  // le laisser vide conserve celui déjà en place.
+  $("#ilms-password").value = "";
+  $("#ilms-password").placeholder = status.passwordSet
+    ? "Inchangé si laissé vide"
+    : "Mot de passe du compte";
+}
+
+async function loadIlmsStatus(showError = true) {
+  try {
+    renderIlmsStatus(await api("/api/ilms/status"));
+  } catch (error) {
+    if (showError) toast(error.message, "error");
+  }
+}
+
+async function saveIlmsSettings(event) {
+  event.preventDefault();
+  const button = $("#save-ilms");
+  button.disabled = true;
+  try {
+    const status = await api("/api/ilms/settings", {
+      method: "PUT",
+      body: JSON.stringify({
+        gatewayUrl: $("#ilms-gateway-url").value,
+        username: $("#ilms-username").value,
+        password: $("#ilms-password").value,
+        libraryId: $("#ilms-library-id").value,
+      }),
+    });
+    renderIlmsStatus(status);
+    // Le cadre doit repartir de l'adresse enregistrée.
+    const frame = $("#ilms-frame");
+    delete frame.dataset.loaded;
+    frame.removeAttribute("src");
+    toast(
+      status.gatewayUrl
+        ? "Passerelle ILMS enregistrée."
+        : "Passerelle ILMS effacée.",
+    );
+  } catch (error) {
+    toast(error.message, "error");
+  } finally {
+    button.disabled = false;
+  }
+}
+
 async function saveSyncSettings(event) {
   event.preventDefault();
   const button = $("#save-sync");
@@ -2232,19 +2332,19 @@ function renderIlms(data) {
     detail = "Journal local indisponible : les demandes ne peuvent pas être acquittées.";
   }
 
-  $("#ilms-status-title").textContent = title;
-  $("#ilms-status-detail").textContent = detail;
-  $("#ilms-logout").hidden = !signedIn;
-  $("#ilms-login span").textContent = signedIn ? "Se reconnecter" : "Se connecter";
-  if (data?.gateway_url) $("#ilms-gateway-url").value = data.gateway_url;
+  $("#ilms-circ-status-title").textContent = title;
+  $("#ilms-circ-status-detail").textContent = detail;
+  $("#ilms-circ-logout").hidden = !signedIn;
+  $("#ilms-circ-login span").textContent = signedIn ? "Se reconnecter" : "Se connecter";
+  if (data?.gateway_url) $("#ilms-circ-gateway-url").value = data.gateway_url;
   // Le mot de passe ne survit pas a un aller-retour : le laisser affiche
   // l’exposerait sur un poste partage sans rien apporter.
-  $("#ilms-password").value = "";
-  $("#ilms-client-secret").value = "";
+  $("#ilms-circ-password").value = "";
+  $("#ilms-circ-client-secret").value = "";
 
   const libraries = data?.libraries || [];
-  const field = $("#ilms-library-field");
-  const select = $("#ilms-library");
+  const field = $("#ilms-circ-library-field");
+  const select = $("#ilms-circ-library");
   field.hidden = libraries.length < 2;
   if (!field.hidden) {
     select.innerHTML = libraries
@@ -2261,10 +2361,10 @@ function renderIlms(data) {
       .join("");
   }
 
-  const section = $("#ilms-journal-section");
+  const section = $("#ilms-circ-journal-section");
   section.hidden = !journal || journal.total === 0;
   if (!section.hidden) {
-    $("#ilms-journal-rows").innerHTML = journal.entries
+    $("#ilms-circ-journal-rows").innerHTML = journal.entries
       .map(
         (entry) =>
           "<tr><td>" +
@@ -2301,17 +2401,17 @@ async function loadIlmsSession(showError = true) {
 
 async function signInIlms(event) {
   event.preventDefault();
-  const button = $("#ilms-login");
+  const button = $("#ilms-circ-login");
   button.disabled = true;
   try {
     const result = await api("/api/ilms/session", {
       method: "POST",
       body: JSON.stringify({
-        gateway_url: $("#ilms-gateway-url").value,
-        username: $("#ilms-username").value,
-        password: $("#ilms-password").value,
-        client_id: $("#ilms-client-id").value,
-        client_secret: $("#ilms-client-secret").value,
+        gateway_url: $("#ilms-circ-gateway-url").value,
+        username: $("#ilms-circ-username").value,
+        password: $("#ilms-circ-password").value,
+        client_id: $("#ilms-circ-client-id").value,
+        client_secret: $("#ilms-circ-client-secret").value,
       }),
     });
     renderIlms(result);
@@ -3321,11 +3421,12 @@ function bindEvents() {
   $("#test-connection").addEventListener("click", () => probeConnection());
   $("#settings-form").addEventListener("submit", saveSettings);
   $("#sync-settings-form").addEventListener("submit", saveSyncSettings);
+  $("#ilms-settings-form").addEventListener("submit", saveIlmsSettings);
   $("#sync-now").addEventListener("click", runSyncNow);
-  $("#ilms-session-form").addEventListener("submit", signInIlms);
-  $("#ilms-logout").addEventListener("click", signOutIlms);
-  $("#ilms-library").addEventListener("change", selectIlmsLibrary);
-  $("#ilms-journal-rows").addEventListener("click", (event) => {
+  $("#ilms-circ-form").addEventListener("submit", signInIlms);
+  $("#ilms-circ-logout").addEventListener("click", signOutIlms);
+  $("#ilms-circ-library").addEventListener("change", selectIlmsLibrary);
+  $("#ilms-circ-journal-rows").addEventListener("click", (event) => {
     const retry = event.target.closest("[data-ilms-retry]");
     if (retry) return retryIlmsEntry(retry.dataset.ilmsRetry);
     const discard = event.target.closest("[data-ilms-discard]");

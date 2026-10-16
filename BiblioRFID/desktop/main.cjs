@@ -74,6 +74,16 @@ function prepareBridgeDirectory() {
   return bridgeDirectory;
 }
 
+/**
+ * Paquet Angular de l'ILMS : livré hors de `app.asar` pour rester lisible
+ * par le serveur local, et simplement absent des versions sans ce module.
+ */
+function ilmsDirectory() {
+  return app.isPackaged
+    ? path.join(process.resourcesPath, "ilms")
+    : path.join(appRoot(), "ilms");
+}
+
 async function serverReady() {
   try {
     const response = await fetch(`${serverUrl}/api/auth/status`, {
@@ -117,6 +127,7 @@ async function startServer() {
       PORT: String(serverPort),
       BIBLIORFID_DATA_DIR: prepareDataDirectory(),
       BIBLIORFID_BRIDGE_DIR: prepareBridgeDirectory(),
+      BIBLIORFID_ILMS_DIR: ilmsDirectory(),
     },
     stdio: "ignore",
   });
