@@ -2047,6 +2047,14 @@ dialog::backdrop {
 .toast.success svg {
   color: var(--primary);
 }
+/* Demande ILMS restee au journal : ce n'est pas un echec, mais il faut le
+   voir. L'ambre la distingue du rouge d'un refus. */
+.toast.warn {
+  border-left-color: var(--amber);
+}
+.toast.warn svg {
+  color: var(--amber);
+}
 .app-alert {
   border: 1px solid var(--line);
   border-radius: var(--radius);

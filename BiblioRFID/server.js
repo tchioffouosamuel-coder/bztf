@@ -21,6 +21,11 @@ import { parseCatalogWorkbook } from "./lib/xlsx-import.js";
 import { isBadgeEpc, isCardEpc, isValidEpc } from "./lib/epc.js";
 import { CataloguingService } from "./lib/cataloguing/service.js";
 import { handleCataloguingRequest } from "./lib/cataloguing/routes.js";
+import { IlmsCirculationClient } from "./lib/ilms-circulation-client.js";
+import { IlmsCirculationJournal } from "./lib/ilms-circulation-journal.js";
+import { IlmsSessionStore } from "./lib/ilms-session.js";
+import { handleIlmsRequest } from "./lib/ilms-routes.js";
+import { mirrorCheckout, mirrorReturn } from "./lib/ilms-circulation-bridge.js";
 
 const execFileAsync = promisify(execFile);
 const root = path.dirname(fileURLToPath(import.meta.url));
@@ -43,6 +48,26 @@ syncService.initialize();
 const cataloguingService = new CataloguingService(db, { dataRoot });
 // Photos abandonnées lors d'un catalogage interrompu : elles ne servent plus.
 cataloguingService.purgeStaleCaptures(48);
+
+// Session ILMS du poste. Le jeton reste en memoire de ce processus : le
+// poste est partage, et un jeton ecrit sur disque survivrait a la fermeture
+// de la session de son porteur.
+const ilmsSession = new IlmsSessionStore();
+// Le journal, lui, est durable : une demande acceptee ici doit survivre a
+// une coupure, sinon le poste acquitterait un pret qu'ILMS n'a jamais recu.
+let ilmsJournal = null;
+// Null quand le journal est illisible : l'interface doit pouvoir le dire,
+// et une exception ici empecherait toute reponse, y compris celle qui
+// explique la panne.
+function ilmsClient() {
+  try {
+    if (!ilmsJournal) ilmsJournal = new IlmsCirculationJournal(path.join(dataRoot, "ilms-journal.db"));
+  } catch {
+    ilmsJournal = null;
+    return null;
+  }
+  return new IlmsCirculationClient({journal: ilmsJournal, getSession: () => ilmsSession.session ?? {}});
+}
 const marker = "__RFID_JSON__";
 const EMPTY_EPC = "000000000000000000000000";
 let simulatedTag = {
@@ -792,6 +817,17 @@ async function api(request, response, url) {
   if (request.method === "GET" && pathname === "/api/auth/me")
     return json(response, 200, { authenticated: true, user });
 
+  if (pathname.startsWith("/api/ilms"))
+    return handleIlmsRequest({
+      request,
+      response,
+      url,
+      session: ilmsSession,
+      client: ilmsClient(),
+      json,
+      readBody,
+    });
+
   if (pathname.startsWith("/api/cataloguing"))
     return handleCataloguingRequest({
       request,
@@ -994,15 +1030,33 @@ async function api(request, response, url) {
       : json(response, 404, { error: "Livre introuvable." });
   }
   const borrowMatch = pathname.match(/^\/api\/books\/(\d+)\/borrow$/);
-  if (borrowMatch && request.method === "POST")
-    return json(
-      response,
-      201,
-      db.borrowBook(borrowMatch[1], await readBody(request)),
-    );
+  if (borrowMatch && request.method === "POST") {
+    const result = db.borrowBook(borrowMatch[1], await readBody(request));
+    // Le pret local est deja enregistre : le report vers ILMS ne peut plus
+    // l’empecher. Une coupure laisse la demande au journal, elle partira.
+    const ilms = await mirrorCheckout({
+      client: ilmsClient(),
+      session: ilmsSession,
+      book: db.getBook(borrowMatch[1]),
+      subscriber: db.getSubscriber(result.loan.subscriber_id),
+      dueAt: result.loan.due_at,
+      // Identifiant durable du pret local : le reutiliser rend l’envoi
+      // idempotent, un rejeu ne cree donc pas un second pret dans ILMS.
+      operationId: result.loan.server_id,
+    });
+    return json(response, 201, { ...result, ilms });
+  }
   const returnMatch = pathname.match(/^\/api\/books\/(\d+)\/return$/);
-  if (returnMatch && request.method === "POST")
-    return json(response, 200, db.returnBook(returnMatch[1]));
+  if (returnMatch && request.method === "POST") {
+    const book = db.getBook(returnMatch[1]);
+    const result = db.returnBook(returnMatch[1]);
+    const ilms = await mirrorReturn({
+      client: ilmsClient(),
+      session: ilmsSession,
+      book,
+    });
+    return json(response, 200, { ...result, ilms });
+  }
   if (bookMatch && request.method === "GET") {
     const book = db.getBook(bookMatch[1]);
     return book

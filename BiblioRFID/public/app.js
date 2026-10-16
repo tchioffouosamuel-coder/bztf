@@ -411,6 +411,7 @@ function setView(name) {
   if (name === "cataloguing") cataloguing?.activate();
   if (name === "settings") {
     loadSyncStatus(false);
+    loadIlmsSession(false);
     cataloguing?.loadSettingsForm();
   }
 }
@@ -1512,8 +1513,12 @@ async function handleLoanRegister(event) {
   });
   if (!confirmed) return;
   try {
-    await api(`/api/books/${loan.book_id}/return`, { method: "POST", body: "{}" });
+    const returned = await api(`/api/books/${loan.book_id}/return`, {
+      method: "POST",
+      body: "{}",
+    });
     toast("Retour enregistré.");
+    toastIlms(returned.ilms);
     await Promise.all([loadLoans(), loadDashboard()]);
   } catch (error) {
     toast(error.message, "error");
@@ -1711,6 +1716,7 @@ async function submitLoan(event) {
     state.detailLoan = result.activeLoan;
     renderBookDetails();
     toast(`Emprunt enregistré pour ${result.activeLoan.subscriber_name}.`);
+    toastIlms(result.ilms);
     await Promise.all([loadBooks(), loadDashboard()]);
   } catch (error) {
     toast(error.message, "error");
@@ -1885,6 +1891,7 @@ async function returnDetailBook() {
     state.detailLoan = result.activeLoan;
     renderBookDetails();
     toast("Retour enregistré.");
+    toastIlms(result.ilms);
     await Promise.all([loadBooks(), loadDashboard()]);
   } catch (error) {
     toast(error.message, "error");
@@ -2175,6 +2182,206 @@ async function runSyncNow() {
   } catch (error) {
     toast(error.message, "error");
     await loadSyncStatus(false);
+  }
+}
+
+/**
+ * Avis du report vers ILMS apres une opération locale.
+ *
+ * Le prêt local a déjà abouti quand ceci s’affiche : le message complète,
+ * il ne contredit pas. Trois cas seulement intéressent l’opérateur — c’est
+ * parti, c’est en attente, ou ILMS a refusé — et seuls les deux derniers
+ * valent une alerte.
+ */
+function toastIlms(ilms) {
+  if (!ilms || ilms.status === "sent") return;
+  if (ilms.status === "queued") return toast(ilms.message, "warn");
+  if (ilms.status === "refused") return toast("ILMS : " + ilms.message, "error");
+  // `skipped` couvre l’absence de session ou d’étiquette : c’est le
+  // fonctionnement normal d’un poste hors ILMS, pas un incident.
+}
+
+/**
+ * Session ILMS du poste.
+ *
+ * Les identifiants ne sont pas gardes par l’interface : ils partent au
+ * serveur local, qui ouvre la session et conserve le jeton en memoire. Le
+ * navigateur n’en voit jamais la valeur.
+ */
+function renderIlms(data) {
+  const signedIn = Boolean(data?.signed_in);
+  const active = Boolean(data?.active);
+  const journal = data?.journal || null;
+
+  let title = "Non connecté";
+  let detail = "Aucune session ILMS ouverte sur ce poste.";
+  if (signedIn && !active) {
+    title = "Session expirée";
+    detail = "Le jeton a expiré. Reconnectez-vous pour reprendre les envois.";
+  } else if (signedIn && !data.library_id) {
+    title = "Bibliothèque à choisir";
+    detail = "Ce compte dessert plusieurs bibliothèques. Choisissez celle de ce poste.";
+  } else if (signedIn) {
+    const library = (data.libraries || []).find((entry) => entry.id === data.library_id);
+    title = "Connecté · " + (library ? library.name : "bibliothèque inconnue");
+    detail = journal
+      ? journal.pending + " demande(s) en attente, " + journal.blocked + " bloquée(s)."
+      : "Journal local indisponible : les demandes ne peuvent pas être acquittées.";
+  }
+  if (data?.journal_error && signedIn) {
+    detail = "Journal local indisponible : les demandes ne peuvent pas être acquittées.";
+  }
+
+  $("#ilms-status-title").textContent = title;
+  $("#ilms-status-detail").textContent = detail;
+  $("#ilms-logout").hidden = !signedIn;
+  $("#ilms-login span").textContent = signedIn ? "Se reconnecter" : "Se connecter";
+  if (data?.gateway_url) $("#ilms-gateway-url").value = data.gateway_url;
+  // Le mot de passe ne survit pas a un aller-retour : le laisser affiche
+  // l’exposerait sur un poste partage sans rien apporter.
+  $("#ilms-password").value = "";
+  $("#ilms-client-secret").value = "";
+
+  const libraries = data?.libraries || [];
+  const field = $("#ilms-library-field");
+  const select = $("#ilms-library");
+  field.hidden = libraries.length < 2;
+  if (!field.hidden) {
+    select.innerHTML = libraries
+      .map(
+        (entry) =>
+          '<option value="' +
+          escapeHtml(entry.id) +
+          '"' +
+          (entry.id === data.library_id ? " selected" : "") +
+          ">" +
+          escapeHtml(entry.name) +
+          "</option>",
+      )
+      .join("");
+  }
+
+  const section = $("#ilms-journal-section");
+  section.hidden = !journal || journal.total === 0;
+  if (!section.hidden) {
+    $("#ilms-journal-rows").innerHTML = journal.entries
+      .map(
+        (entry) =>
+          "<tr><td>" +
+          (entry.kind === "checkout" ? "Prêt" : "Retour") +
+          "</td><td>" +
+          (entry.state === "blocked" ? "Bloquée" : "En attente") +
+          "</td><td>" +
+          entry.attempts +
+          "</td><td>" +
+          (entry.last_status ? escapeHtml(String(entry.last_status)) : "—") +
+          "</td><td>" +
+          escapeHtml(formatDate(entry.created_at)) +
+          '</td><td class="row-actions">' +
+          '<button class="button ghost" type="button" data-ilms-retry="' +
+          escapeHtml(entry.id) +
+          '">Réessayer</button>' +
+          '<button class="button ghost danger" type="button" data-ilms-discard="' +
+          escapeHtml(entry.id) +
+          '">Abandonner</button>' +
+          "</td></tr>",
+      )
+      .join("");
+  }
+  window.lucide?.createIcons();
+}
+
+async function loadIlmsSession(showError = true) {
+  try {
+    renderIlms(await api("/api/ilms/session"));
+  } catch (error) {
+    if (showError) toast(error.message, "error");
+  }
+}
+
+async function signInIlms(event) {
+  event.preventDefault();
+  const button = $("#ilms-login");
+  button.disabled = true;
+  try {
+    const result = await api("/api/ilms/session", {
+      method: "POST",
+      body: JSON.stringify({
+        gateway_url: $("#ilms-gateway-url").value,
+        username: $("#ilms-username").value,
+        password: $("#ilms-password").value,
+        client_id: $("#ilms-client-id").value,
+        client_secret: $("#ilms-client-secret").value,
+      }),
+    });
+    renderIlms(result);
+    toast(
+      result.library_id
+        ? "Session ILMS ouverte."
+        : "Session ouverte. Choisissez la bibliothèque de ce poste.",
+    );
+  } catch (error) {
+    toast(error.message, "error");
+  } finally {
+    button.disabled = false;
+  }
+}
+
+async function signOutIlms() {
+  try {
+    renderIlms(await api("/api/ilms/session", { method: "DELETE" }));
+    toast("Session ILMS fermée.");
+  } catch (error) {
+    toast(error.message, "error");
+  }
+}
+
+async function selectIlmsLibrary(event) {
+  try {
+    renderIlms(
+      await api("/api/ilms/session/library", {
+        method: "PUT",
+        body: JSON.stringify({ library_id: event.target.value }),
+      }),
+    );
+  } catch (error) {
+    toast(error.message, "error");
+    await loadIlmsSession(false);
+  }
+}
+
+async function retryIlmsEntry(id) {
+  try {
+    const result = await api(
+      "/api/ilms/journal/" + encodeURIComponent(id) + "/retry",
+      { method: "POST", body: "{}" },
+    );
+    renderIlms(result);
+    toast("Demande acquittée par ILMS (" + result.loan.number + ").");
+  } catch (error) {
+    toast(error.message, "error");
+    await loadIlmsSession(false);
+  }
+}
+
+async function discardIlmsEntry(id) {
+  // Abandonner n’annule rien chez ILMS : la demande a pu y arriver avant
+  // que la reponse se perde. L’operateur doit le savoir avant de cliquer.
+  const confirmed = window.confirm(
+    "Abandonner cette demande ? Elle n’est pas annulée dans ILMS : si elle y est déjà arrivée, le prêt existe toujours.",
+  );
+  if (!confirmed) return;
+  try {
+    renderIlms(
+      await api(
+        "/api/ilms/journal/" + encodeURIComponent(id) + "?confirm=local-discard",
+        { method: "DELETE" },
+      ),
+    );
+    toast("Demande retirée du journal local.");
+  } catch (error) {
+    toast(error.message, "error");
+    await loadIlmsSession(false);
   }
 }
 
@@ -3115,6 +3322,15 @@ function bindEvents() {
   $("#settings-form").addEventListener("submit", saveSettings);
   $("#sync-settings-form").addEventListener("submit", saveSyncSettings);
   $("#sync-now").addEventListener("click", runSyncNow);
+  $("#ilms-session-form").addEventListener("submit", signInIlms);
+  $("#ilms-logout").addEventListener("click", signOutIlms);
+  $("#ilms-library").addEventListener("change", selectIlmsLibrary);
+  $("#ilms-journal-rows").addEventListener("click", (event) => {
+    const retry = event.target.closest("[data-ilms-retry]");
+    if (retry) return retryIlmsEntry(retry.dataset.ilmsRetry);
+    const discard = event.target.closest("[data-ilms-discard]");
+    if (discard) return discardIlmsEntry(discard.dataset.ilmsDiscard);
+  });
   $("#reader-timing-form").addEventListener("submit", saveReaderTiming);
   $("#test-buzzer").addEventListener("click", testBuzzer);
   $$("input[name=beepMode]").forEach((input) =>

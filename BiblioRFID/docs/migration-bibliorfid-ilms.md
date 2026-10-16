@@ -1348,3 +1348,68 @@ inchange.
   Cela comptait pour ces clients, qui traduisent un 500 en panne reessayable
   et rejouaient indefiniment des demandes qui ne passeront jamais.
 - Aucun import, effacement de journal, deploiement ni basculement Render.
+
+## Tranche 16 - L'UI Electron appelle enfin ILMS
+
+- La tranche 14 se terminait sur « l'UI Electron n'appelle toujours pas
+  ILMS ». C'etait le dernier chainon : le client natif, le journal durable
+  et le CLI etaient ecrits et testes, mais aucun geste de l'interface ne les
+  atteignait. Il manquait une session, et le poste n'avait aucun moyen d'en
+  ouvrir une.
+- `lib/ilms-session.js` reprend le contrat de `IlmsAuthService` du mobile,
+  sans l'inventer une seconde fois : jeton OAuth client, connexion
+  utilisateur, liste des bibliotheques. Le mot de passe n'est jamais
+  conserve et le jeton ne quitte pas la memoire du processus serveur ; le
+  poste est partage, un jeton sur disque y survivrait a son porteur. Aucune
+  reponse HTTP ne le porte.
+- L'echeance est lue dans la revendication `exp` du jeton final, pas dans le
+  `expires_in` de l'etape OAuth, qui ne vaut que pour le jeton d'amorce. Une
+  session expiree reste affichee mais rend un jeton vide : le client refuse
+  au lieu d'envoyer un en-tete qu'ILMS rejetterait.
+- Une seule bibliotheque est choisie d'office, plusieurs laissent le choix a
+  l'operateur. La liste rendue par le serveur n'est pas une autorisation :
+  aucune portee « toutes les bibliotheques » n'est fabriquee, et
+  `selectLibrary` refuse un identifiant que le serveur n'a pas accorde.
+- `lib/ilms-routes.js` monte six routes derriere la session locale du poste :
+  se connecter a ILMS suppose d'abord d'etre entre dans le poste. Un code
+  natif rend un code HTTP qui conserve la distinction utile : ce qui se
+  reessaie, ce qui demande une correction, ce qui ne passera jamais. Rien
+  n'est aplati sur 500.
+- L'abandon d'une demande du journal exige une confirmation explicite dans
+  l'URL. Il est local et ne l'annule pas chez ILMS : la demande a pu y
+  arriver avant que la reponse se perde, et l'interface le dit avant le clic.
+- `lib/ilms-circulation-bridge.js` reporte les prets et retours locaux. Le
+  pret local est deja enregistre quand le pont s'execute et rien n'y touche :
+  une bibliotheque qui prete pendant une coupure continue, le journal durable
+  rattrape le serveur ensuite. Le pont rend un etat, jamais une exception.
+- L'idempotence s'appuie sur le `server_id` du pret local comme
+  `operation_id` : rejouer apres une coupure ne cree pas un second pret.
+- Ce qui ne passera jamais n'est pas enfile : carte non encodee, livre sans
+  etiquette, abonne refuse, exemplaire indisponible, tag inconnu. Les enfiler
+  aurait rempli le journal de demandes refusees une par une a chaque reprise.
+  Ce qui peut encore passer y reste, panne reseau comme refus ferme.
+- Un panneau « Session ILMS » dans les reglages, avec l'etat de la session et
+  les demandes en attente, chacune reessayable ou abandonnable. Un avis apres
+  chaque pret distingue l'envoi, la mise en attente et le refus ; l'absence
+  de session ne declenche rien, c'est le fonctionnement normal d'un poste
+  hors ILMS.
+- Un refus de connexion a desormais son propre code et son propre message :
+  `denied` parlait du journal, hors de propos pendant une connexion. L'etape
+  fautive est nommee — `oauth`, `login` ou `libraries` — et remontee jusqu'a
+  l'interface. Ce chantier a perdu deux tranches a confondre la passerelle,
+  le service et le mot de passe ; la question ne doit plus se poser.
+- 188 tests Node passent, contre 136 a la tranche 14 : 22 sur la session, 16
+  sur les routes, 14 sur le pont. Le controle d'interface Playwright passe.
+  Verification sur le serveur du poste reellement en marche : routes montees,
+  et un pret puis un retour sans session ILMS aboutissent localement en
+  rendant `skipped / no_session`.
+- Chaine de connexion eprouvee contre `https://gateway.bibliotheque-ztf.org`
+  avec un identifiant inexistant, pour ne toucher aucun compte reel : l'etape
+  OAuth passe, l'etape `login` refuse en 400. Le service rend donc 400 la ou
+  401 serait attendu, ce que la tranche 14 avait deja releve sur d'autres
+  routes. Aucune connexion reelle n'a ete tentee, aucun pret ou retour
+  distant execute, aucun identifiant ecrit dans ce depot.
+- Reste a faire, et non fait ici : les vues portique et station ne passent
+  pas encore par ILMS, et le catalogage du poste reste local. La recette avec
+  un vrai compte demande des cartes de lecteur encodees, qu'aucune base ne
+  porte aujourd'hui.

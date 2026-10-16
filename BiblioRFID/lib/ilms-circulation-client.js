@@ -16,6 +16,9 @@ const messages = {
   response: "Reponse ILMS invalide. La demande reste dans le journal.",
   network: "Resultat inconnu. Reprise explicite avec la demande d'origine requise.",
   denied: "Demande refusee par ILMS. Elle reste dans le journal pour verification.",
+  password_change: "Mot de passe a renouveler sur le portail avant d'utiliser ce poste.",
+  no_library: "Ce compte ne donne acces a aucune bibliotheque.",
+  signin: "Connexion refusee par ILMS. Verifiez l'identifiant, le mot de passe et le client OAuth."
 };
 export class IlmsClientError extends Error {
   constructor(code, status = 0) { super(messages[code] ?? messages.network); this.code = code; this.status = status; }
