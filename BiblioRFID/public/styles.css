@@ -1416,6 +1416,34 @@ tbody tr.selected td {
 .multiple-notice svg {
   color: var(--cyan);
 }
+.station-ilms {
+  margin: 0 18px 16px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  overflow: hidden;
+}
+.station-ilms-heading {
+  padding: 8px 14px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  background: var(--surface-soft);
+}
+.station-ilms-result {
+  padding: 12px 14px;
+  border-top: 1px solid var(--line);
+  overflow-wrap: anywhere;
+}
+.station-ilms-result p {
+  margin: 6px 0;
+  color: var(--muted);
+  font-size: 12px;
+}
+.station-ilms-result code {
+  color: var(--muted);
+  font-size: 10px;
+}
 .tag-preview {
   margin: 0 18px 16px;
   border: 1px solid var(--line);

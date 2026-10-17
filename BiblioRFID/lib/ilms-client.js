@@ -6,9 +6,9 @@
  * catalogue distant, en parlant directement à la passerelle — il tourne
  * côté serveur, il n'a donc pas la contrainte d'origine du navigateur.
  *
- * L'authentification utilise un compte de service propre au poste : les
- * identifiants restent sur la machine, et le jeton obtenu est gardé en
- * mémoire jusqu'à son expiration. Rien de tout cela n'est journalisé.
+ * Une session operateur ouverte donne sa portee a la consultation. Sans
+ * elle, le compte de service propre au poste permet la lecture non surveillee.
+ * Les deux jetons restent distincts et en memoire.
  */
 
 /** Panne réseau ou passerelle muette : distinguée d'un refus de l'API. */
@@ -35,13 +35,14 @@ const EXPIRY_MARGIN_MS = 60_000;
 const DEFAULT_TIMEOUT_MS = 15_000;
 
 export class IlmsClient {
-  constructor(database, { fetchImpl, now, timeoutMs } = {}) {
+  constructor(database, { fetchImpl, now, timeoutMs, getSession = () => null } = {}) {
     this.database = database;
     this.fetchImpl = fetchImpl || ((...args) => globalThis.fetch(...args));
     this.now = now || (() => Date.now());
     this.timeoutMs = timeoutMs || DEFAULT_TIMEOUT_MS;
     this.session = null;
     this.pendingLogin = null;
+    this.getSession = getSession;
   }
 
   settings() {
@@ -64,15 +65,38 @@ export class IlmsClient {
     this.pendingLogin = null;
   }
 
-  async request(path, { method = "GET", body, retryOnUnauthorized = true } = {}) {
-    const { gatewayUrl } = this.settings();
+  context() {
+    const operator = this.getSession();
+    // Une session ouverte sans bibliotheque ou expiree ne doit pas emprunter
+    // silencieusement les droits et la bibliotheque du compte de service.
+    if (operator !== null) {
+      if (!operator.libraryId)
+        throw new IlmsApiError("Choisissez une bibliothèque dans la session ILMS.", 403);
+      if (!operator.accessToken)
+        throw new IlmsApiError("La session ILMS a expiré. Reconnectez-vous dans les réglages.", 401);
+      return { ...operator, operator: true };
+    }
     if (!this.configured)
       throw new IlmsApiError(
         "Compte ILMS du poste incomplet : adresse, identifiants et bibliothèque sont requis.",
         0,
       );
+    return this.settings();
+  }
 
-    const token = await this.token();
+  checkContext(context) {
+    const current = this.context();
+    if (["gatewayUrl", "libraryId", "accountId", "accessToken", "generation", "username", "password", "operator"]
+      .some(key => current[key] !== context[key]))
+      throw new IlmsApiError("La configuration ILMS a changé. Relancez la recherche.", 409);
+  }
+
+  async request(path, { method = "GET", body, retryOnUnauthorized = true, context = this.context() } = {}) {
+    this.checkContext(context);
+    const { gatewayUrl } = context;
+
+    const token = context.operator ? context.accessToken : await this.token();
+    this.checkContext(context);
     let response;
     try {
       response = await this.fetchImpl(`${gatewayUrl}${path}`, {
@@ -84,6 +108,8 @@ export class IlmsClient {
         },
         body: body ? JSON.stringify(body) : undefined,
         signal: AbortSignal.timeout(this.timeoutMs),
+        redirect: "error",
+        credentials: "omit",
       });
     } catch (error) {
       throw new IlmsOfflineError(
@@ -94,9 +120,10 @@ export class IlmsClient {
     }
 
     // Jeton rejeté : une seule reprise, après l'avoir redemandé.
-    if (response.status === 401 && retryOnUnauthorized) {
+    this.checkContext(context);
+    if (response.status === 401 && retryOnUnauthorized && !context.operator) {
       this.reset();
-      return this.request(path, { method, body, retryOnUnauthorized: false });
+      return this.request(path, { method, body, retryOnUnauthorized: false, context });
     }
     return response;
   }
@@ -163,26 +190,59 @@ export class IlmsClient {
    * Exemplaire portant ce tag, ou `null` s'il n'est pas au catalogue — ce
    * qui est une réponse ordinaire : le portail en lit toute la journée.
    */
-  async findCopyByTag({ epc = "", tid = "" } = {}) {
+  async findCopyByTag({ epc = "", tid = "", includeDocument = false } = {}) {
     if (!epc && !tid)
       throw new IlmsApiError("Indiquez l'EPC ou le TID du tag.", 0);
 
-    const { libraryId } = this.settings();
+    const context = this.context();
+    const { libraryId } = context;
     const query = new URLSearchParams();
     if (epc) query.set("epc", epc);
     if (tid) query.set("tid", tid);
     const response = await this.request(
-      `/library-service/api/v1/libraries/${libraryId}/copies/by-rfid?${query}`,
+      `/library-service/api/v1/libraries/${encodeURIComponent(libraryId)}/copies/by-rfid?${query}`,
+      { context },
     );
 
-    if (response.status === 404) return null;
     const payload = await readJson(response);
+    this.checkContext(context);
     if (!response.ok)
       throw new IlmsApiError(
         payload?.message || "Recherche de l'exemplaire impossible.",
         response.status,
       );
-    return payload ? normalizeCopy(payload) : null;
+    if (payload === null) return null;
+    if (typeof payload !== "object" || Array.isArray(payload) || typeof payload.id !== "string" || !payload.id
+      || (payload.library_id && payload.library_id !== libraryId))
+      throw new IlmsApiError("Réponse ILMS invalide pour cet exemplaire.", 502);
+    const copy = normalizeCopy(payload);
+    if (!includeDocument) return copy;
+    copy.document = null;
+    copy.documentError = null;
+    if (copy.documentId) {
+      try {
+        const documentResponse = await this.request(
+          `/library-service/api/v1/libraries/${encodeURIComponent(libraryId)}/documents/${encodeURIComponent(copy.documentId)}`,
+          { context },
+        );
+        const document = await readJson(documentResponse);
+        if (!documentResponse.ok || !document || document.id !== copy.documentId
+          || (document.library_id && document.library_id !== libraryId))
+          throw new IlmsApiError("Notice ILMS indisponible.", documentResponse.status);
+        copy.document = {
+          id: document.id,
+          title: document.title ?? "",
+          authors: Array.isArray(document.primary_authors) ? document.primary_authors.filter(name => typeof name === "string") : [],
+          isbn: document.isbn13 || document.isbn || "",
+        };
+      } catch {
+        // L'identite de l'exemplaire reste utile pendant une panne de notice.
+        // Elle ne permet toutefois pas de conclure qu'un pret est autorise.
+        copy.documentError = "Notice ILMS indisponible. Actualisez pour réessayer.";
+      }
+    }
+    this.checkContext(context);
+    return copy;
   }
 }
 
@@ -192,7 +252,7 @@ async function readJson(response) {
   try {
     return JSON.parse(text);
   } catch {
-    return null;
+    throw new IlmsApiError("Réponse ILMS illisible.", 502);
   }
 }
 

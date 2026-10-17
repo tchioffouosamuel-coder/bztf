@@ -65,6 +65,7 @@ import UsersRound from "/vendor/lucide/icons/users-round.js";
 import WifiOff from "/vendor/lucide/icons/wifi-off.js";
 import X from "/vendor/lucide/icons/x.js";
 import { initCataloguing } from "/cataloguing.js";
+import { StationCatalogue } from "/station-catalogue.js";
 
 const lucideIcons = {
   activity: Activity,
@@ -135,6 +136,10 @@ const lucideIcons = {
 };
 
 let cataloguing = null;
+const stationCatalogue = new StationCatalogue({
+  lookup: api,
+  changed: () => renderVisualTags(false),
+});
 
 const $ = (selector, root = document) => root.querySelector(selector);
 const $$ = (selector, root = document) => [...root.querySelectorAll(selector)];
@@ -243,7 +248,7 @@ async function api(path, options = {}) {
     headers: { "Content-Type": "application/json", ...(options.headers || {}) },
   });
   const payload = await response.json();
-  if (response.status === 401 && !path.startsWith("/api/auth/")) {
+  if (response.status === 401 && !path.startsWith("/api/auth/") && payload.code !== "ilms_catalogue") {
     showAuth({ setupRequired: false, message: "Votre session a expiré." });
   }
   if (!response.ok) throw new Error(payload.error || "Opération impossible.");
@@ -251,6 +256,7 @@ async function api(path, options = {}) {
 }
 
 function showAuth({ setupRequired = false, message = "" } = {}) {
+  resetStationCatalogue();
   state.setupRequired = setupRequired;
   state.user = null;
   state.readerStream?.close();
@@ -2226,6 +2232,7 @@ async function saveIlmsSettings(event) {
       }),
     });
     renderIlmsStatus(status);
+    resetStationCatalogue();
     // Le cadre doit repartir de l'adresse enregistrée.
     const frame = $("#ilms-frame");
     delete frame.dataset.loaded;
@@ -2309,6 +2316,7 @@ function toastIlms(ilms) {
  * navigateur n’en voit jamais la valeur.
  */
 function renderIlms(data) {
+  resetStationCatalogue();
   const signedIn = Boolean(data?.signed_in);
   const active = Boolean(data?.active);
   const journal = data?.journal || null;
@@ -2589,6 +2597,7 @@ function setAutoMode(
 }
 
 function stopAutoReading(disable = true) {
+  resetStationCatalogue();
   state.readerStream?.close();
   state.readerStream = null;
   state.readerStreamKey = "";
@@ -2700,6 +2709,58 @@ function updateTagPreview(tag) {
   $("#scan-epc").textContent = tag.epc || "—";
   $("#scan-tid").textContent = tag.tid || "—";
   $("#scan-rssi").textContent = `${tag.rssi ?? "—"}`;
+}
+
+function resetStationCatalogue() {
+  stationCatalogue.reset();
+  $("#station-ilms").classList.add("hidden");
+  $("#station-ilms-results").replaceChildren();
+}
+
+function renderStationCatalogue(tags) {
+  const entries = stationCatalogue.sync(tags);
+  $("#station-ilms").classList.toggle("hidden", entries.length === 0);
+  $("#station-ilms-results").innerHTML = entries.map(entry => {
+    const copy = entry.copy;
+    const title = copy?.document?.title || (copy ? `Exemplaire ${copy.number || copy.id}` : {
+      loading: "Recherche dans ILMS…",
+      unknown: "Tag absent du catalogue ILMS",
+      unconfigured: "Catalogue ILMS non connecté",
+      error: "Recherche ILMS impossible",
+    }[entry.state]);
+    const detail = copy ? [
+      copy.document?.authors?.join(", "),
+      copy.number && `Exemplaire : ${copy.number}`,
+      copy.documentNumber && `Notice : ${copy.documentNumber}`,
+      copy.quote && `Cote : ${copy.quote}`,
+      copy.section, copy.shelf,
+      copy.document?.isbn && `ISBN : ${copy.document.isbn}`,
+      ({ 1: "Bon état", 2: "En cours de saisie", 3: "Détérioré", 4: "Perdu", 5: "Consultation sur place", 6: "En dépôt" })[copy.status],
+      copy.documentError,
+    ].filter(Boolean).join(" · ") : entry.state === "error" ? entry.message
+      : entry.state === "unconfigured" ? "Ouvrez une session ILMS ou configurez le compte du poste dans les réglages."
+      : entry.state === "unknown" ? "Aucun exemplaire trouvé dans la bibliothèque sélectionnée."
+      : "Le catalogue local reste consultable pendant la recherche.";
+    return `<article class="station-ilms-result"><strong>${escapeHtml(title)}</strong><p>${escapeHtml(detail)}</p><code>${escapeHtml(entry.tag.tid || entry.tag.epc)}</code></article>`;
+  }).join("");
+}
+
+function showIlmsCopy(copy) {
+  state.selectedBook = null;
+  state.pendingBook = null;
+  $("#unknown-panel").classList.add("hidden");
+  $("#quick-register-form").classList.add("hidden");
+  const container = $("#selected-book");
+  container.className = "selected-book recognized";
+  container.innerHTML = `<i data-lucide="library-big"></i><div class="selected-book-copy">
+    <span class="selection-label">Exemplaire reconnu dans ILMS</span>
+    <h3>${escapeHtml(copy.document?.title || copy.number || "Exemplaire ILMS")}</h3>
+    <p>${escapeHtml(copy.document?.authors?.join(", ") || copy.documentError || "Notice ILMS")}</p>
+    <div class="selected-identifiers"><strong>${escapeHtml(copy.number || copy.id)}</strong></div>
+  </div>`;
+  setWriteStatus("Exemplaire ILMS identifié", "Consultation du catalogue. Aucun encodage ni prêt effectué.", "success");
+  setReaderBanner("Lecture confirmée", "Retirez le livre pour traiter le suivant.");
+  icons();
 }
 
 function resetStationDisplay() {
@@ -2881,7 +2942,7 @@ function showMultipleIdentification(tags, changed) {
   $("#unknown-panel").classList.add("hidden");
   $("#quick-register-form").classList.add("hidden");
   const panel = $("#multiple-identification");
-  const recognized = tags.filter((tag) => tag.book).length;
+  const recognized = tags.filter((tag) => tag.book || stationCatalogue.get(tag)?.copy).length;
   const cards = tags.filter((tag) => tag.subscriber || tag.staff).length;
   const unknown = tags.length - recognized - cards;
   panel.classList.remove("hidden");
@@ -2906,6 +2967,12 @@ function showMultipleIdentification(tags, changed) {
         ? `<div class="multiple-book-item">
         <i data-lucide="book-check"></i>
         <div><strong>${escapeHtml(tag.book.title)}</strong><small>${escapeHtml(tag.book.author || tag.book.accession)} · ${escapeHtml(tag.book.accession)}</small><code>${escapeHtml(tag.tid || tag.epc)}</code></div>
+        <span class="multiple-signal">Signal<b>${tag.rssi ?? "—"}</b></span>
+      </div>`
+        : stationCatalogue.get(tag)?.copy
+        ? `<div class="multiple-book-item">
+        <i data-lucide="library-big"></i>
+        <div><strong>${escapeHtml(stationCatalogue.get(tag).copy.document?.title || stationCatalogue.get(tag).copy.number || "Exemplaire ILMS")}</strong><small>Catalogue ILMS · ${escapeHtml(stationCatalogue.get(tag).copy.number)}</small><code>${escapeHtml(tag.tid || tag.epc)}</code></div>
         <span class="multiple-signal">Signal<b>${tag.rssi ?? "—"}</b></span>
       </div>`
         : `<div class="multiple-book-item unknown">
@@ -3098,6 +3165,7 @@ function visualTagKey(tag) {
 async function renderVisualTags(notify = true) {
   if (state.registrationOpen || state.activeView !== "station") return;
   const tags = [...state.visualTags.values()];
+  renderStationCatalogue(tags);
   if (tags.length === 0) {
     if (state.presenceSessionId == null) state.visualSessionAnnounced = false;
     resetStationDisplay();
@@ -3125,6 +3193,11 @@ async function renderVisualTags(notify = true) {
   const key = `${tag.tid}:${tag.epc}`;
   const changed = key !== state.currentTagKey;
   state.currentTagKey = key;
+  const ilmsCopy = stationCatalogue.get(tag)?.copy;
+  if (ilmsCopy && !tag.book) {
+    showIlmsCopy(ilmsCopy);
+    return;
+  }
   if (tag.book) {
     state.pendingBook = null;
     $("#unknown-panel").classList.add("hidden");
@@ -3163,6 +3236,17 @@ async function renderVisualTags(notify = true) {
       "Badge du personnel détecté",
       "Un badge du personnel ne peut pas être encodé comme livre.",
     );
+    return;
+  }
+
+  if (stationCatalogue.get(tag)?.state === "loading") {
+    state.selectedBook = null;
+    $("#unknown-panel").classList.add("hidden");
+    $("#quick-register-form").classList.add("hidden");
+    const container = $("#selected-book");
+    container.className = "selected-book";
+    container.innerHTML = '<div class="selected-book-copy"><h3>Identification en cours</h3><p>Recherche de cet exemplaire dans le catalogue ILMS…</p></div>';
+    setWriteStatus("Recherche ILMS en cours", "Laissez le tag sur le lecteur.");
     return;
   }
 
@@ -3215,7 +3299,8 @@ async function handleScanResult(result) {
     if (timer) clearTimeout(timer);
     state.visualTagTimers.delete(key);
     const previous = state.visualTags.get(key);
-    if (!previous || previous.book?.id !== tag.book?.id) shouldRender = true;
+    if (!previous || previous.book?.id !== tag.book?.id || previous.epc !== tag.epc || previous.kind !== tag.kind)
+      shouldRender = true;
     state.visualTags.set(key, tag);
   }
 
@@ -3334,6 +3419,10 @@ function bindEvents() {
     }),
   );
   $("#auto-read-toggle").addEventListener("click", toggleAutoReading);
+  $("#station-ilms-refresh").addEventListener("click", () => {
+    resetStationCatalogue();
+    renderVisualTags(false);
+  });
   $("#register-tag-button").addEventListener("click", beginRegistration);
   $("#cancel-registration").addEventListener("click", cancelRegistration);
   $("#quick-title").addEventListener("input", (event) => {

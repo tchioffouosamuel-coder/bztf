@@ -84,9 +84,11 @@ const ilmsRoot = resolveIlmsRoot({
   override: process.env.BIBLIORFID_ILMS_DIR || "",
 });
 let ilmsOrigin = "";
-// Le poste parle aussi à l'ILMS pour son compte : c'est l'ILMS qui garde le
-// catalogue, le poste n'apporte que la chaîne RFID.
-const ilmsClient = new IlmsClient(db);
+// La consultation suit la bibliotheque de l'operateur. Sans session ouverte,
+// le compte de service conserve son usage non surveille et sa propre portee.
+const ilmsClient = new IlmsClient(db, {
+  getSession: () => ilmsSession.signedIn ? { ...ilmsSession.session, generation: ilmsSession.generation } : null,
+});
 
 /** Ce que l'interface du poste doit savoir pour proposer l'onglet ILMS. */
 function ilmsStatus() {
@@ -1167,14 +1169,18 @@ async function api(request, response, url) {
     return json(response, 200, ilmsStatus());
   }
   if (request.method === "GET" && pathname === "/api/ilms/copies/by-tag") {
+    if (!ilmsSession.signedIn && !ilmsClient.configured)
+      return json(response, 200, { configured: false, copy: null });
     try {
       const copy = await ilmsClient.findCopyByTag({
         epc: url.searchParams.get("epc") || "",
         tid: url.searchParams.get("tid") || "",
+        includeDocument: true,
       });
-      return json(response, 200, { copy });
+      return json(response, 200, { configured: true, copy });
     } catch (error) {
-      return json(response, error.offline ? 503 : 400, {
+      return json(response, error.offline ? 503 : error.status >= 400 && error.status <= 599 ? error.status : 400, {
+        code: "ilms_catalogue",
         error: error.message,
         offline: Boolean(error.offline),
       });

@@ -244,3 +244,111 @@ test("ne laisse pas le mot de passe du poste ressortir des réglages", () => {
     db.close();
   }
 });
+
+function operatorFixture(handler) {
+  const session = {
+    gatewayUrl: "https://operator.test",
+    accountId: "operator",
+    libraryId: "library-operator",
+    accessToken: "operator-token",
+  };
+  const calls = [];
+  const db = database();
+  configure(db, "https://service.test");
+  const client = new IlmsClient(db, {
+    getSession: () => session,
+    fetchImpl: async (url, options) => {
+      calls.push({ url, ...options });
+      return handler(url, options);
+    },
+  });
+  return { client, db, session, calls };
+}
+
+test("la recherche utilise la bibliotheque et le jeton de l'operateur, puis lit la notice", async () => {
+  const { client, db, calls } = operatorFixture(url => Response.json(url.includes("/copies/") ? {
+    id: "c1", document_id: "d1", library_id: "library-operator", number: "EX-12", status: 3,
+  } : { id: "d1", title: "Titre ILMS", primary_authors: ["Auteur"], isbn13: "9782070408504" }));
+  try {
+    const copy = await client.findCopyByTag({ epc: "AA12", tid: "BB34", includeDocument: true });
+    assert.deepEqual(calls.map(call => call.url), [
+      "https://operator.test/library-service/api/v1/libraries/library-operator/copies/by-rfid?epc=AA12&tid=BB34",
+      "https://operator.test/library-service/api/v1/libraries/library-operator/documents/d1",
+    ]);
+    assert.ok(calls.every(call => call.headers.Authorization === "Bearer operator-token" && call.redirect === "error"));
+    assert.equal(copy.document.title, "Titre ILMS");
+    assert.deepEqual(copy.document.authors, ["Auteur"]);
+    assert.equal(copy.document.isbn, "9782070408504");
+    assert.equal(copy.status, 3, "l'etat de conservation n'est pas une disponibilite de pret");
+  } finally { db.close(); }
+});
+
+test("session expiree ou sans bibliotheque : aucun repli sur le compte de service", async () => {
+  const { client, db, session, calls } = operatorFixture(() => assert.fail("aucun appel attendu"));
+  try {
+    session.accessToken = "";
+    await assert.rejects(client.findCopyByTag({ epc: "AA12" }), error => error.status === 401);
+    session.libraryId = null;
+    await assert.rejects(client.findCopyByTag({ epc: "AA12" }), error => error.status === 403);
+    assert.equal(calls.length, 0);
+  } finally { db.close(); }
+});
+
+test("un refus du jeton operateur ne reconnecte pas le compte de service", async () => {
+  const { client, db, calls } = operatorFixture(() => Response.json({ message: "Session ILMS refusée" }, { status: 401 }));
+  try {
+    await assert.rejects(client.findCopyByTag({ epc: "AA12" }), error => error.status === 401);
+    assert.equal(calls.length, 1);
+  } finally { db.close(); }
+});
+
+test("un changement de bibliotheque pendant la recherche invalide sa reponse", async () => {
+  let finish;
+  const { client, db, session, calls } = operatorFixture(() => new Promise(resolve => { finish = resolve; }));
+  try {
+    const lookup = client.findCopyByTag({ epc: "AA12", includeDocument: true });
+    session.libraryId = "another-library";
+    finish(Response.json({ id: "c1", document_id: "d1" }));
+    await assert.rejects(lookup, error => error.status === 409);
+    assert.equal(calls.length, 1);
+  } finally { db.close(); }
+});
+
+test("une notice indisponible conserve l'identite de l'exemplaire", async () => {
+  const { client, db } = operatorFixture(url => url.includes("/copies/")
+    ? Response.json({ id: "c1", number: "EX-12", document_id: "d1" })
+    : Response.json({ message: "Erreur interne" }, { status: 503 }));
+  try {
+    const copy = await client.findCopyByTag({ epc: "AA12", includeDocument: true });
+    assert.equal(copy.number, "EX-12");
+    assert.equal(copy.document, null);
+    assert.match(copy.documentError, /indisponible/);
+  } finally { db.close(); }
+});
+
+test("une deconnexion pendant la lecture de notice invalide aussi l'exemplaire", async () => {
+  const { client, db, session } = operatorFixture(url => {
+    if (url.includes("/copies/")) return Response.json({ id: "c1", document_id: "d1" });
+    session.accessToken = "";
+    return Response.json({ id: "d1", title: "Notice obsolete" });
+  });
+  try {
+    await assert.rejects(client.findCopyByTag({ epc: "AA12", includeDocument: true }), error => error.status === 401);
+  } finally { db.close(); }
+});
+
+test("un 404 de route absente et une reponse mal formee ne signifient pas tag inconnu", async () => {
+  for (const response of [new Response("", { status: 404 }), new Response("<html>Erreur</html>"), Response.json({}), Response.json(false)]) {
+    const { client, db } = operatorFixture(() => response);
+    try {
+      await assert.rejects(client.findCopyByTag({ epc: "AA12" }), error => [404, 502].includes(error.status));
+    } finally { db.close(); }
+  }
+});
+
+test("rejette une correspondance rendue hors bibliotheque", async () => {
+  const { client, db } = operatorFixture(() => Response.json({ id: "c1", library_id: "other-library" }));
+  try {
+    await assert.rejects(client.findCopyByTag({ epc: "AA12" }), error => error.status === 502);
+  } finally { db.close(); }
+});

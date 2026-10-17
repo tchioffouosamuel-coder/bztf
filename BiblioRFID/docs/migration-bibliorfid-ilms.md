@@ -4,12 +4,12 @@ Decision utilisateur du 11 octobre 2026 : remplacer le backend OnRender par
 le backend ILMS et integrer toutes les fonctionnalites BIBLIORFID dans ILMS.
 Les anciennes donnees OnRender ne sont PAS a importer.
 
-Derniere tranche locale : [clients de circulation native](ilms-circulation-client.md).
-Le client desktop et son journal sont disponibles en commande ; le mobile
-dispose maintenant d'une entree native distincte avec connexion ILMS,
-choix de bibliotheque, prets/retours et journal durable a reprise explicite.
-La session/interface Electron et le lecteur mobile restent a brancher ;
-les entrees historiques ne sont pas basculees. Aucun deploiement ou import.
+Derniere tranche locale : tranche 17, consultation du catalogue ILMS depuis
+la station RFID. La session operateur Electron, le report de circulation et
+les [clients de circulation native](ilms-circulation-client.md) sont raccordes.
+Le portique et le catalogage du poste restent locaux ; la recette distante
+et le lecteur mobile restent a verifier. Aucun deploiement ou import dans
+cette tranche.
 
 ## Ce qui est annule
 
@@ -1413,3 +1413,81 @@ inchange.
   pas encore par ILMS, et le catalogage du poste reste local. La recette avec
   un vrai compte demande des cartes de lecteur encodees, qu'aucune base ne
   porte aujourd'hui.
+
+## Tranche 17 - La station consulte le catalogue ILMS
+
+- Verification avant modification : `/api/ilms/copies/by-tag` et
+  `IlmsClient.findCopyByTag` existaient, mais aucun ecran ne les appelait.
+  Le DTO d'exemplaire ne contient ni titre ni auteur. La consultation ajoute
+  donc un GET de la notice par `document_id`, dans la meme bibliotheque,
+  via `/library-service/api/v1/libraries/{id}/documents/{document_id}`.
+  Ces deux routes existent dans le backend : aucun ajout Java ou Angular.
+- La station affiche maintenant le titre, les auteurs, l'ISBN, les numeros
+  d'exemplaire et de notice, la cote, le rayon, la section et l'etat de
+  conservation disponibles. Cet etat n'est pas une disponibilite de pret.
+  Une notice indisponible laisse visibles les identifiants de l'exemplaire
+  et un message de reprise, plutot que de transformer un livre reconnu
+  en tag inconnu. Le contenu distant est echappe avant affichage.
+- Une session operateur ouverte fournit son jeton en memoire et sa
+  bibliotheque. Sans session operateur, le compte de service garde sa
+  propre authentification et sa propre bibliotheque. Une session expiree,
+  sans bibliotheque choisie ou refusee ne bascule jamais sur les droits
+  du compte de service. Les identifiants des deux comptes ne sont pas
+  fusionnes ; le relais du portail embarque reste independant.
+- La portee est capturee pour les deux lectures et recontrolee apres les
+  reponses, y compris la lecture de la notice : une deconnexion ou un
+  changement de compte/bibliotheque invalide le resultat en cours. Les
+  redirections des lectures sont refusees. Un 404 de route absente ou un
+  JSON illisible ne sont plus traduits en tag inconnu ; le contrat backend
+  d'un tag absent est une reponse reussie sans exemplaire.
+- `public/station-catalogue.js` conserve une recherche par couple EPC/TID
+  pendant sa presence visuelle, en lecture simple comme multiple. Les
+  mesures repetees et les erreurs ne declenchent pas de boucle reseau.
+  Le bouton Actualiser permet une reprise explicite. Les cartes et badges
+  identifies localement ne sont pas recherches comme exemplaires.
+- Le retrait confirme, la suspension, le changement de vue ou de session
+  annulent les demandes du navigateur et retirent leurs resultats. Une
+  reponse ancienne reste ignoree meme apres un aller-retour A -> B -> A.
+  Une modification de l'EPC avec le meme TID relance aussi l'identification.
+  L'anti-rebond visuel existant est conserve.
+- Un exemplaire reconnu uniquement dans ILMS est affiche sans proposer
+  de creation locale ou de desencodage de tag inconnu. Pendant la recherche
+  initiale, ces actions attendent son resultat. Aucune notice n'est importee
+  dans SQLite. Sans configuration ou pendant une panne, la reconnaissance
+  locale reste utilisable et le panneau ILMS explique son propre etat.
+  Un 401 de cette consultation distante ne ferme plus la session locale.
+- Verification du 17 octobre 2026 : `npm test` passe, 217 tests sur 217,
+  contre 203 avant cette tranche. Les ajouts couvrent la portee operateur,
+  le refus de repli implicite, la notice et ses erreurs, les reponses
+  invalides et les courses entre lecture/retrait/reconfiguration.
+  Journal : `artifacts/tranche-17-node-tests.log`.
+- `npm run test:station:ilms` passe. Ce nouveau controle lance son propre
+  serveur avec une base SQLite temporaire et une passerelle HTTP loopback
+  simulee : OAuth/login, choix de bibliotheque, vraie route locale de
+  catalogue, notice, lecture multiple, tag absent, panne, fiche locale
+  conservee, refus 401, notice indisponible, reponse tardive et changement
+  d'EPC. Aucun appel metier ILMS en ecriture. Affichages 1440/390/320 px
+  sans debordement horizontal ; captures desktop et 320 px inspectees.
+  Journaux `artifacts/tranche-17-station-ui.log`,
+  `artifacts/station-ilms-server.log` ; captures
+  `artifacts/station-ilms-desktop.png`, `station-ilms-390.png`,
+  `station-ilms-320.png`. Ce controle ne demande pas le bundle Angular.
+- `npm run test:ui` passe sur un serveur isole en 4310, avec le bundle
+  Angular deja present dans `ilms/`. Le premier passage a echoue sur
+  l'assertion de maintien d'un tag pendant une absence de 60 ms ; la
+  relance complete passe sans changement du test. Ce premier echec de
+  temporisation n'est pas efface : journaux
+  `artifacts/tranche-17-ui-smoke.log` et
+  `artifacts/tranche-17-ui-smoke-recheck.log`. Les bases de recette sont
+  temporaires, aucune base du poste n'est utilisee par ces controles.
+- Non verifies : consultation avec un vrai compte sur la passerelle
+  deployee, lecteur physique, couverture des droits HTTP reels. Le chemin
+  historique du compte de service appelle encore directement le login,
+  sans l'etape OAuth de la session operateur ; sa connexion distante et
+  sa consolidation restent a traiter. Les suites Java, Angular et mobile
+  ne sont pas relancees. Le portique, son contrat de passages, le journal
+  de circulation du portail et ses graphiques restent des chantiers
+  distincts. Encoder une carte reste requis avant toute recette de pret.
+- Aucun commit, push, deploiement, import ou basculement Render. Les deux
+  autres depots, qui portent deja des changements locaux, ne sont pas
+  modifies dans cette tranche.

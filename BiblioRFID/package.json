@@ -15,6 +15,7 @@
     "test:agent:bridge": "node tests/ilms-native-bridge-smoke.mjs",
     "test": "node --test tests/*.test.js",
     "test:ui": "node tests/ui-smoke.mjs",
+    "test:station:ilms": "node tests/station-ilms-smoke.mjs",
     "test:desktop": "node tests/desktop-smoke.mjs",
     "desktop": "electron .",
     "build:desktop": "electron-builder --win portable"
