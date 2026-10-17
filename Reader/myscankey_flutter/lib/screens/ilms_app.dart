@@ -9,12 +9,11 @@ import '../services/ilms_circulation_sync.dart';
 import 'ilms_circulation_screen.dart';
 import 'ilms_messages.dart';
 
-/// Build-time defaults, mirroring the ILMS portal's `environment.ts`: the
-/// gateway and its OAuth client are deployment settings, not operator secrets.
-/// The portal ships the same pair in its public JS bundle, so prompting for
-/// them adds friction without adding confidentiality. Override per build with
-/// `--dart-define=ILMS_GATEWAY_URL=... --dart-define=ILMS_CLIENT_ID=...
-/// --dart-define=ILMS_CLIENT_SECRET=...`, or per session from the login form.
+/// Build-time deployment settings, mirroring the ILMS portal's
+/// `environment.ts`. ILMS is one product: the mobile app targets the same
+/// gateway as the portal, so the operator never picks a backend. Only the
+/// build can retarget it, with `--dart-define=ILMS_GATEWAY_URL=...
+/// --dart-define=ILMS_CLIENT_ID=... --dart-define=ILMS_CLIENT_SECRET=...`.
 const ilmsDefaultGatewayUrl = String.fromEnvironment(
   'ILMS_GATEWAY_URL',
   defaultValue: 'https://gateway.bibliotheque-ztf.org',
@@ -170,27 +169,15 @@ class IlmsLoginScreen extends StatefulWidget {
 
 class _IlmsLoginScreenState extends State<IlmsLoginScreen> {
   final _form = GlobalKey<FormState>();
-  final _gateway = TextEditingController(text: ilmsDefaultGatewayUrl);
   final _username = TextEditingController();
   final _password = TextEditingController();
-  final _clientId = TextEditingController(text: ilmsDefaultClientId);
-  final _secret = TextEditingController(text: ilmsDefaultClientSecret);
   bool _busy = false;
   bool _hidden = true;
-  // Only revealed on demand, or when the build ships no usable client.
-  bool _advanced =
-      ilmsDefaultClientId.isEmpty || ilmsDefaultClientSecret.isEmpty;
   String? _error;
 
   @override
   void dispose() {
-    for (final controller in [
-      _gateway,
-      _username,
-      _password,
-      _clientId,
-      _secret,
-    ]) {
+    for (final controller in [_username, _password]) {
       controller.clear();
       controller.dispose();
     }
@@ -205,35 +192,27 @@ class _IlmsLoginScreenState extends State<IlmsLoginScreen> {
     });
     try {
       await widget.auth.signIn(
-        gatewayUrl: _gateway.text,
+        gatewayUrl: ilmsDefaultGatewayUrl,
         username: _username.text,
         password: _password.text,
-        clientId: _clientId.text,
-        clientSecret: _secret.text,
+        clientId: ilmsDefaultClientId,
+        clientSecret: ilmsDefaultClientSecret,
       );
     } catch (error) {
       if (mounted) setState(() => _error = ilmsErrorMessage(error));
     } finally {
       if (mounted) {
         _password.clear();
-        // Discards an operator-typed secret; the build default is already in
-        // the binary, so restoring it leaks nothing and keeps the form usable.
-        _secret.text = ilmsDefaultClientSecret;
         setState(() => _busy = false);
       }
     }
   }
 
-  Widget _field(
-    TextEditingController controller,
-    String label, {
-    bool secret = false,
-  }) => Padding(
+  Widget _field(TextEditingController controller, String label) => Padding(
     padding: const EdgeInsets.only(bottom: 12),
     child: TextFormField(
       controller: controller,
       enabled: !_busy,
-      obscureText: secret,
       autocorrect: false,
       enableSuggestions: false,
       validator: (value) =>
@@ -270,7 +249,6 @@ class _IlmsLoginScreenState extends State<IlmsLoginScreen> {
                   ),
                   const Text('Connexion ILMS', textAlign: TextAlign.center),
                   const SizedBox(height: 24),
-                  _field(_gateway, 'Gateway ILMS'),
                   _field(_username, 'Identifiant ILMS'),
                   TextFormField(
                     controller: _password,
@@ -298,23 +276,6 @@ class _IlmsLoginScreenState extends State<IlmsLoginScreen> {
                     ),
                   ),
                   const SizedBox(height: 12),
-                  Align(
-                    alignment: Alignment.centerLeft,
-                    child: TextButton.icon(
-                      onPressed: _busy
-                          ? null
-                          : () => setState(() => _advanced = !_advanced),
-                      icon: Icon(
-                        _advanced ? Icons.expand_less : Icons.expand_more,
-                      ),
-                      label: const Text('Parametres avances'),
-                    ),
-                  ),
-                  if (_advanced) ...[
-                    const SizedBox(height: 12),
-                    _field(_clientId, 'Client OAuth'),
-                    _field(_secret, 'Secret du client OAuth', secret: true),
-                  ],
                   if (_error != null)
                     Padding(
                       padding: const EdgeInsets.only(bottom: 12),

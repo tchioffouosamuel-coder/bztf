@@ -268,12 +268,14 @@ void main() {
     });
   }
 
-  testWidgets('build defaults sign in and advanced settings override them', (
+  testWidgets('the deployment gateway and OAuth client are not configurable', (
     tester,
   ) async {
     final clients = <String>[];
+    final origins = <String>{};
     final auth = IlmsAuthService(
       client: MockClient((request) async {
+        origins.add(request.url.origin);
         if (request.url.path.endsWith('/oauth/token')) {
           final header = request.headers['authorization']!;
           clients.add(
@@ -320,23 +322,22 @@ void main() {
       await tap(tester, find.text('Se connecter'));
     }
 
-    // Closed by default: the operator never sees the deployment credentials.
-    expect(find.widgetWithText(TextFormField, 'Client OAuth'), findsNothing);
+    // ILMS is one product: the operator signs in, it never picks a backend.
+    // No field, and no hidden panel, can retarget the gateway or its client.
+    for (final label in [
+      'Gateway ILMS',
+      'Client OAuth',
+      'Secret du client OAuth',
+    ]) {
+      expect(find.widgetWithText(TextFormField, label), findsNothing);
+    }
+    expect(find.text('Parametres avances'), findsNothing);
+
     await signIn();
     expect(auth.signedIn, isTrue);
-    await tap(tester, find.byTooltip('Deconnexion'));
-    await tap(tester, find.text('Parametres avances'));
-    for (final entry in {
-      'Client OAuth': 'other-client',
-      'Secret du client OAuth': 'other-secret',
-    }.entries) {
-      await tester.enterText(
-        find.widgetWithText(TextFormField, entry.key),
-        entry.value,
-      );
-    }
-    await signIn();
-    expect(clients, [ilmsDefaultClientId, 'other-client']);
+    // Every call went to the gateway baked into the build, with its client.
+    expect(clients, [ilmsDefaultClientId]);
+    expect(origins, {Uri.parse(ilmsDefaultGatewayUrl).origin});
     await tester.pumpWidget(const SizedBox());
   });
 
