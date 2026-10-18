@@ -526,18 +526,29 @@ chantier, et sont listés ici pour ne pas les découvrir trop tard.
    garde sa place pour ce qu'Elasticsearch fait mieux (agrégats,
    recommandation), mais **il ne sert plus la recherche du catalogue** : deux
    moteurs pour la même question, c'est deux classements à expliquer.
-2. **Modèle** — faire correspondre `exemplaire` / `oeuvre` / `couverture` aux
-   entités existantes (`DocumentCopy` / `Document` / `DocumentImage`), et la
-   cote hiérarchique bâtiment/étagère/bloc/série/rang à `Building` / `Shelf` /
-   `Section` / `Cote`. L'écart est à mesurer avant d'écrire.
+2. ~~**Modèle** — faire correspondre `exemplaire` / `oeuvre` / `couverture`
+   aux entités existantes.~~
+   **Mesuré le 18 octobre 2026 : l'écart est faible.** `DocumentCopy` porte
+   déjà `rfidCode` (EPC), `rfidTid`, `barcode`, `quote` (la cote), `series`,
+   `buildingId`, `roomId`, `shelfId`, `sectionId`, `shelfRow`, `shelfColumn`.
+   Et surtout : **la couverture est déjà portée par `Document`**
+   (`coverImage`, `images`), pas par l'exemplaire — exactement la règle de la
+   3.0. Reste à confirmer la correspondance exacte bloc/série/rang.
 3. **Temps réel** — `LISTEN/NOTIFY` devient le `RfidWebSocketHandler` existant,
    ou un échange RabbitMQ ? Les trois canaux (`catalogue`, `index`, `prets`)
    doivent exister d'une façon ou d'une autre.
 4. **Migration des données** — reprise du `.dump` des 73 223 exemplaires vers le
    schéma cible, avec contrôle du nombre de lignes table par table, comme le
    faisait `migrer_depuis_sqlite.py` (154 s pour le fonds réel).
-5. **Hors ligne** — le journal durable du §2.4 vit côté poste ; côté serveur il
-   faut la **clé d'idempotence** sur les opérations de circulation.
+5. ~~**Hors ligne** — il faut la clé d'idempotence côté serveur.~~
+   **Déjà en place.** `loans.operation_id`, avec un index unique
+   (`idx_loans_operation_id`) : deux rejeux simultanés se départagent dans la
+   base, pas dans le service. Et depuis le 18 octobre 2026,
+   **`uq_loans_open_copy`** tient l'invariant « un livre ne peut pas être
+   prêté deux fois » — index unique **partiel**, limité aux prêts ouverts,
+   pour que l'historique d'un livre puisse s'accumuler. Vérifié avec deux
+   sessions concurrentes : un prêt accepté, un refus propre, exactement un
+   prêt ouvert en base.
 6. **Sauvegardes et restauration** — qui les porte, maintenant que le serveur
    est en ligne, et comment garder la règle « la restauration conserve les
    comptes actuels ».
@@ -551,7 +562,7 @@ Relevés sur les trois sources. Chacun a coûté un bogue réel.
 | Piège | Ce qui se passe | La règle |
 |---|---|---|
 | Fenêtre modale pendant un scan | la douchette tape dans la boîte de dialogue | message dans le bandeau + bip, **jamais** de fenêtre bloquante |
-| `WHERE code_barre=? OR cote=?` | index partiel inutilisable, parcours complet (58 ms) | deux requêtes séparées (0,02 ms) |
+| `WHERE code_barre=? OR cote=?` | sous SQLite, l'index **partiel** devenait inutilisable : parcours complet (58 ms). **Vérifié le 18/10/2026 : ne transpose pas.** Sous PostgreSQL, avec deux index d'**expression**, le `OR` est servi par un `BitmapOr` | interroger le chemin que l'on connaît — on sait presque toujours si l'on tient un code-barres ou une cote. Préférable (un parcours d'index au lieu de deux plus une revalidation), mais plus un écart d'un facteur mille |
 | Colonne absente de l'export | un cycle export → réimport la perd | toute colonne utile dans l'export **et** ses alias |
 | Insertion positionnelle | casse dès qu'une colonne est ajoutée | toujours nommer les colonnes |
 | Insertion « ignorer les doublons » | les lignes refusées sont comptées comme importées | compter les insertions réelles (avant/après) |
