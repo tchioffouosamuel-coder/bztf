@@ -15,7 +15,7 @@ Tu reprends une refonte en cours sur trois dépôts Git distincts, tous sous
 
 **Lis d'abord `sdk/BiblioRFID/docs/REFONTE-ILMS.md`.** C'est la spécification de
 référence : l'inventaire complet des trois sources, les invariants mesurés, le
-contrat matériel, et 25 pièges hérités qui ont chacun coûté un bogue réel. Tout
+contrat matériel, et 30 pièges hérités qui ont chacun coûté un bogue réel. Tout
 ce qui suit s'y appuie.
 
 ## La cible
@@ -68,28 +68,42 @@ si le geste est un prêt ou un retour — pas un mode F2/F3 choisi d'avance.
 `core/circulation/circulation.service.ts` ne lève jamais : il rend un état
 (`ok`, `refus`, `inconnu`, `injoignable`). Il n'y a volontairement **pas** de
 `queued` côté écran : le journal durable est celui du poste, et l'écran n'existe
-pas sans la passerelle. 10 essais pilotés au navigateur dans
+pas sans la passerelle. 15 essais pilotés au navigateur dans
 `e2e/circulation.spec.mjs`, contre un faux agent qui parle le contrat de
 BiblioRFID.
 
+**Prolongation et annulation** sont branchées des deux côtés
+(`/circulation/rfid/renewals`, `/cancellations`). Deux choses à ne pas défaire :
+
+- **Prolonger ou rendre ne se devine pas.** Prêter ou rendre se déduit de l'état
+  du livre ; rendre ou prolonger est une *intention*, et aucune donnée ne la
+  porte. D'où un commutateur, « se rend » par défaut — les modes F2/F3 de la
+  3.0, mais limités au seul cas que les tags ne tranchent pas, pour que poser un
+  livre continue d'agir sans un clic.
+- **Annuler n'est pas rendre.** Un retour laisserait dans l'historique du
+  lecteur un emprunt qu'il n'a jamais fait, rendu à la même seconde, et qui
+  compterait dans ses statistiques. `CHECKED_OUT → CANCELED` est ouvert depuis
+  les trois états où le livre est dehors, et refusé depuis ceux qui se sont
+  conclus : annuler un prêt perdu rendrait l'exemplaire disponible alors qu'il
+  ne l'est pas.
+
+La **durée de prêt** est une colonne de `libraries` (`loan_duration_days`),
+lue par l'écran à l'ouverture. L'opérateur peut en déroger pour un prêt
+exceptionnel. Si la passerelle est muette, l'écran retombe sur une durée de
+repli **et le dit** : prêter avec une durée que la bibliothèque n'a pas fixée
+est acceptable, en silence non.
+
 ## Ce qui reste
 
-1. **Prolongation et annulation**, qui manquent à l'écran Prêts et retours :
-   aucun endpoint RFID ne les porte. `LoanController` expose bien
-   `PUT /loans/{id}/status`, mais une prolongation y passerait sans nouvelle
-   échéance. À trancher côté backend avant de toucher l'écran.
-   Dans le même esprit : la **durée de prêt** est aujourd'hui saisie à l'écran,
-   faute de réglage exposé par la passerelle. Sa place est dans les réglages de
-   la bibliothèque.
-2. **Les huit autres zones** : tableau de bord, lecteurs, récolement, matériel
+1. **Les huit autres zones** : tableau de bord, lecteurs, récolement, matériel
    RFID, outils, import/export, poste public, comptes. Chacune est une coquille
    qui rappelle en commentaire les règles qu'elle devra tenir.
-3. **L'authentification** et la session opérateur. `LibraryContext` lit la
+2. **L'authentification** et la session opérateur. `LibraryContext` lit la
    bibliothèque dans `?library=` puis la retient — provisoire, assumé, et à
    coiffer par la session.
-4. **Les fonctions de la 3.0 absentes du backend** : contrôle qualité d'un
+3. **Les fonctions de la 3.0 absentes du backend** : contrôle qualité d'un
    catalogue Excel, récolement par bloc, étiquettes PDF, sauvegardes.
-5. **La migration des données** : reprendre le `.dump` de
+4. **La migration des données** : reprendre le `.dump` de
    `sdk/Nouveau dossier/BASE/` vers le schéma cible, avec contrôle du nombre de
    lignes table par table.
 
@@ -105,17 +119,46 @@ qui laissait l'écran bloqué sans aucun résultat. Compiler ne prouve rien.
   `C:\Users\SAMUEL TCHIOFFOUO\scoop\apps\postgresql\current\bin` (PostgreSQL
   18.6, avec `unaccent` et `pg_trgm`). Bancs d'essai rejouables dans
   `library-service/src/test/resources/db/` : `catalog_search_fixtures.sql`,
-  `catalog_search_checks.sql` (11 essais), `circulation_invariants_checks.sql`.
+  `catalog_search_checks.sql` (11 essais), `circulation_invariants_checks.sql`,
+  `loan_cancellation_checks.sql` (8 essais : l'annulation libère-t-elle
+  l'exemplaire, et les bornes de la durée de prêt).
+
+  L'ordre de chargement compte, et il n'est pas devinable : les fonctions
+  `library_normalize` et `library_search_refresh` d'abord, **puis** les
+  fixtures (qui créent les tables et ajoutent les colonnes calculées), **puis**
+  `library_search_documents`, qui lit `title_key` et ne se crée pas avant.
 - **Java** : JDK 21 obligatoire
   (`C:\Program Files\Eclipse Adoptium\jdk-21.0.11.10-hotspot`, le défaut est
-  17). Maven hors ligne :
+  17). **Et le Maven de `.tools`, pas celui du système** : le `mvn` du PATH est
+  en 3.10.0, dont le `maven-resources-plugin` par défaut (3.5.0) n'est pas dans
+  le dépôt hors ligne — la compilation échoue avant même de commencer.
   ```
-  mvn -o -s C:/laragon/www/ilms-migration/.tools/maven-settings.xml \
+  JAVA_HOME="/c/Program Files/Eclipse Adoptium/jdk-21.0.11.10-hotspot" \
+  /c/laragon/www/ilms-migration/.tools/apache-maven-3.9.9/bin/mvn -o \
+      -s C:/laragon/www/ilms-migration/.tools/maven-settings.xml \
       -Dmaven.repo.local=C:/laragon/www/ilms-migration/.tools/maven-repository \
       compile -DskipTests
   ```
   Si un artefact est « présent mais indisponible », supprime son
   `_remote.repositories`.
+
+  **`mvn test` ne peut pas tourner ici**, et c'est à savoir avant d'écrire un
+  test : aucune bibliothèque de test n'est dans le dépôt local —
+  `spring-boot-starter-test`, `reactor-test`, `junit-jupiter`, `mockito-core`,
+  `assertj-core` sont tous absents. Les `*Test.java` du dépôt n'ont donc jamais
+  été exécutés dans cet environnement, y compris
+  `CirculationRfidServiceImplTest`. En écrire d'autres sans pouvoir les lancer,
+  c'est livrer du code non éprouvé sous un nom qui prétend le contraire.
+
+  Ce qui marche, et qu'il faut préférer :
+  - **la base**, sur un cluster jetable (voir SQL ci-dessus) — c'est là que
+    vivent les invariants, et c'est le seul endroit où la concurrence se
+    mesure ;
+  - **une logique pure**, compilée contre `target/classes` et lancée à la main
+    avec le JDK, sans framework. C'est ainsi que les transitions de
+    `LoanStatus` ont été vérifiées (22 essais) : `javac -cp target/classes` puis
+    `java`, avec `jackson-annotations` du dépôt local sur le chemin de classes ;
+  - **l'écran**, piloté au navigateur.
 - **Frontend** : `npx ng build --configuration development`, puis pilote
   l'écran. `e2e/catalogue.spec.mjs` montre comment — il sert le build, intercepte
   les appels à la passerelle et vérifie le comportement réel :

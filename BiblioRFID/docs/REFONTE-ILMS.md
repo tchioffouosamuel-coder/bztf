@@ -119,6 +119,24 @@ et un ensemble d'endpoints.
 | **Catalogue** | recherche, fiche, vignette | recherche différée de 250 ms |
 | **Ajouter** | saisie, cote calculée en direct | séquence de code-barres partagée |
 | **Prêts** | comptoir : modes F2/F3, lecteur par carte ou par nom, prolongation, annulation | **jamais de fenêtre bloquante** : la douchette taperait dedans. Message dans le bandeau + bip |
+
+> **Les modes F2/F3, repris le 18 octobre 2026 — mais pas partout.** Prêter ou
+> rendre se *déduit* : le prêt en cours de l'exemplaire le dit, et demander un
+> mode pour cela ferait choisir l'opérateur à chaque livre. Rendre ou prolonger,
+> en revanche, est une **intention** qu'aucune donnée ne porte. Le mode ne
+> subsiste donc que là, et poser un livre continue d'agir sans un clic.
+>
+> **L'annulation n'est pas un retour.** Un retour laisserait dans l'historique
+> du lecteur un emprunt qu'il n'a jamais fait, rendu à la même seconde, et qui
+> compterait dans ses statistiques. Elle est ouverte depuis les trois états où
+> le livre est dehors (emprunté, prolongé, en retard) et refusée depuis ceux qui
+> se sont conclus : annuler un prêt perdu rendrait l'exemplaire disponible alors
+> qu'il ne l'est pas. Mesuré sur base : après annulation, l'exemplaire repart
+> immédiatement avec le bon lecteur, l'index partiel ne s'y oppose plus.
+>
+> **La durée de prêt est un réglage de la bibliothèque** (`loan_duration_days`),
+> pas du poste : écrite dans le code du frontend, deux comptoirs de la même
+> bibliothèque prêtaient pour des durées différentes sans que personne le voie.
 | **Lecteurs** | comptes lecteurs, cartes | |
 | **Récolement** | étagère entière **ou un seul bloc** ; quatre verdicts ; campagnes archivées | un livre de la même étagère mais d'un autre bloc est « déplacé (même étagère, mais bloc C1) », pas « inconnu » |
 | **Outils** | doublons, couvertures, étiquettes, catégories, contrôle qualité | étiquettes : un seul PDF pour tout le fonds, ou un PDF par étagère |
@@ -623,6 +641,11 @@ Relevés sur les trois sources. Chacun a coûté un bogue réel.
 | Tag retiré sur simple expiration d'un minuteur | l'agent ne publie que les **changements** : un livre posé dix minutes sans bouger disparaît de l'écran | la présence suit l'instantané ; seule la disparition est retardée |
 | Écran qui redit une règle de circulation | « déjà emprunté » finit maintenu à deux endroits, et la version de l'écran ment sur ce que la base a décidé | laisser partir la demande et afficher le refus du service, mot pour mot |
 | Bandeau qui garde la dernière mauvaise nouvelle | un rejeu réussi laisse le rouge affiché ; au bout d'une journée le bandeau n'est plus lu | le bandeau porte **le dernier geste**, et se répare donc tout seul |
+| Ancien statut relu **sur l'objet** qu'on vient de modifier | `saveLoanWithHistory` lisait `loan.getStatus()` après que le gestionnaire l'ait écrasé : toute la table `status_history` portait `old_status = new_status`, et l'historique d'un prêt ne disait plus d'où il venait | capturer l'ancienne valeur **avant** la mutation et la faire descendre jusqu'à l'écriture |
+| Prolongation qui recalcule son échéance | la date annoncée à l'usager au comptoir était jetée, et il repartait avec une autre | la date demandée fait foi ; le repli du service ne sert que si personne n'en donne |
+| Prolongation rejouée après une coupure | contrairement à un retour, elle **compte** : le rejeu consomme une seconde prolongation du quota du lecteur | redemander l'échéance que le prêt porte déjà ne fait rien — la seule signature du même geste, faute d'`operation_id` sur cette route |
+| Geste annulé en le « rendant » | l'historique du lecteur porte un emprunt qu'il n'a jamais fait, rendu à la même seconde, et il compte dans ses statistiques | une annulation, qui libère l'exemplaire sans fabriquer de retour |
+| Liste du comptoir qu'on ne peut plus vider sans carte | un tag déjà traité ne se rejoue jamais dans une session — c'est ce qui absorbe les disparitions transitoires — mais un livre refusé devenait impossible à reposer | un moyen de repartir à zéro qui ne dépende pas d'une carte posée |
 | Réglage de durée du buzzer | le firmware produit la même enveloppe sonore | ne pas exposer un réglage sans effet |
 | Agent lecteur ouvert sur une IP quelconque | il devient un relais HTTP/DNS | IP littérales privées seulement |
 | Report de prêt qui lève une exception | une coupure réseau annule un prêt déjà enregistré | renvoyer un **état** (`refused`/`skipped`/`queued`) |
