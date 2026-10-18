@@ -518,10 +518,14 @@ BiblioRFID.
 Ces points ne sont pas tranchés par les sources ; ils le seront en ouvrant le
 chantier, et sont listés ici pour ne pas les découvrir trop tard.
 
-1. **Recherche** — l'Elasticsearch du socle, ou le `tsvector` + `pg_trgm` de la
-   3.0 ? Les scores, synonymes anglais, signatures d'auteur et corrections par
-   trigrammes de la 3.0 sont un acquis mesuré ; il faut décider lequel des deux
-   moteurs les porte, puis **rejouer les mesures du §1.11**.
+1. ~~**Recherche** — Elasticsearch ou `tsvector` + `pg_trgm` ?~~
+   **Tranché le 18 octobre 2026 : `tsvector` + `pg_trgm`.** La recherche vit
+   donc dans PostgreSQL, et les scores, synonymes anglais, signatures d'auteur
+   et corrections par trigrammes de la 3.0 sont portés tels quels. Les mesures
+   du §1.11 restent à rejouer sur le schéma cible. L'`@AutoElastic` du socle
+   garde sa place pour ce qu'Elasticsearch fait mieux (agrégats,
+   recommandation), mais **il ne sert plus la recherche du catalogue** : deux
+   moteurs pour la même question, c'est deux classements à expliquer.
 2. **Modèle** — faire correspondre `exemplaire` / `oeuvre` / `couverture` aux
    entités existantes (`DocumentCopy` / `Document` / `DocumentImage`), et la
    cote hiérarchique bâtiment/étagère/bloc/série/rang à `Building` / `Shelf` /
