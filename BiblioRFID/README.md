@@ -76,6 +76,20 @@ La station garde une seule connexion ouverte avec le lecteur et reçoit les tags
 
 Le mode **Suspendre** ferme seulement le flux d'affichage de la page. Le service RFID local reste prêt, sauf lorsque l'application est arrêtée ou que le type de connexion change.
 
+## Agent lecteur
+
+Le poste expose l'antenne à l'ILMS servi par la passerelle, qui ne peut pas parler à l'USB depuis une page. C'est la **seule** surface publique du poste : tout le reste de `/api/` garde la session du poste.
+
+    GET /agent/reader/events
+
+Flux SSE, lecture seule, événements `snapshot` et `reader-error`. Un instantané porte la liste complète des tags présents — `epc`, `tid`, `rssi`, `antenna` — et l'état du lecteur. **Rien du fonds local du poste n'en sort** : ni livre, ni abonné, ni badge. Le poste dit ce que l'antenne voit, la passerelle dit ce que cela signifie, et mélanger les deux ferait afficher à l'ILMS un titre qu'il ignore ou un titre périmé.
+
+L'opérateur est authentifié par la passerelle, pas ici : c'est donc le contrôle d'origine qui tient lieu de porte. Le réglage `agent_origins` liste les origines servies, séparées par des virgules ou des espaces ; à défaut, la passerelle seule. Une origine doit être en **HTTPS**, ou en HTTP **uniquement** sur `localhost`, `127.0.0.1` ou `[::1]` — un flux en clair sur le réseau laisserait lire les identifiants de tags de toute la bibliothèque. L'origine demandée est renvoyée telle quelle, jamais `*`, et une demande sans en-tête `Origin` est refusée.
+
+Pour servir un ILMS en développement :
+
+    agent_origins = https://gateway.bibliotheque-ztf.org http://127.0.0.1:4200
+
 ## Catalogage assisté (OCR, notices, IA)
 
 L'onglet **Catalogage** remplace la saisie manuelle d'une fiche par une chaîne

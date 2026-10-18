@@ -21,6 +21,14 @@ import { parseCatalogWorkbook } from "./lib/xlsx-import.js";
 import { isBadgeEpc, isCardEpc, isValidEpc } from "./lib/epc.js";
 import { CataloguingService } from "./lib/cataloguing/service.js";
 import { handleCataloguingRequest } from "./lib/cataloguing/routes.js";
+import {
+  AGENT_EVENTS_PATH,
+  DEFAULT_AGENT_ORIGINS,
+  agentHeaders,
+  allowOrigin,
+  parseAgentOrigins,
+  publicSnapshot,
+} from "./lib/reader-agent.js";
 
 const execFileAsync = promisify(execFile);
 const root = path.dirname(fileURLToPath(import.meta.url));
@@ -59,6 +67,8 @@ const announcedTags = new Map();
 const pendingActivityTags = new Set();
 let presenceSessionId = 0;
 const eventClients = new Set();
+/** Les pages servies par la passerelle, abonnées à l'agent lecteur. */
+const agentClients = new Set();
 const presenceTimeoutMs = 450;
 const visualReleaseDelayMs = 200;
 const configuredRearmDelayMs = storedRearmDelayMs(
@@ -242,6 +252,13 @@ function broadcastSnapshot(force = false) {
   if (!force && signature === lastPresenceSignature) return;
   recordPresenceChange(snapshot, signature);
   for (const client of eventClients) sendEvent(client, "snapshot", snapshot);
+  if (!agentClients.size) return;
+  // L'agent ne voit que le matériel : l'instantané complet porte le livre, le
+  // lecteur et le badge reconnus par la base LOCALE du poste, qui n'est pas la
+  // référence du catalogue. Les laisser sortir ferait afficher à l'écran de la
+  // passerelle un titre qu'elle ignore.
+  const publique = publicSnapshot(snapshot);
+  for (const client of agentClients) sendEvent(client, "snapshot", publique);
 }
 
 function scheduleBroadcast(delay = 140) {
@@ -743,6 +760,75 @@ async function handlePhoneCameraPublicRequest(request, response, url) {
   } catch (error) {
     return json(response, 400, { error: error.message });
   }
+}
+
+/** Les origines que l'agent sert, telles qu'elles sont réglées. */
+function agentOrigins() {
+  const regle = db.getSetting("agent_origins", "");
+  return parseAgentOrigins(regle || DEFAULT_AGENT_ORIGINS);
+}
+
+/**
+ * L'agent lecteur : la seule surface publique du poste.
+ *
+ * <p>Elle est placée <b>avant</b> la porte d'authentification, et c'est
+ * volontaire : l'opérateur est authentifié par la passerelle, pas ici. C'est
+ * donc le contrôle d'origine qui tient lieu de porte, et il doit rester la
+ * première chose que fait cette fonction.
+ *
+ * <p>Lecture seule. Toute écriture — encodage, désencodage, réglage — reste
+ * derrière la session du poste : une page distante ne doit pas pouvoir
+ * réécrire un tag.
+ */
+function agent(request, response, url) {
+  const origine = allowOrigin(request.headers.origin, agentOrigins());
+  if (!origine) {
+    // Sans en-tête `Access-Control-Allow-Origin`, le navigateur refusera de
+    // toute façon la réponse ; le 403 est là pour que le journal du poste dise
+    // franchement ce qui s'est passé.
+    return json(response, 403, { error: "Origine non autorisée." });
+  }
+
+  if (request.method === "OPTIONS") {
+    response.writeHead(204, {
+      ...agentHeaders(origine, "text/plain"),
+      "Access-Control-Allow-Methods": "GET, OPTIONS",
+      "Access-Control-Max-Age": "600",
+    });
+    return response.end();
+  }
+
+  if (request.method !== "GET" || url.pathname !== AGENT_EVENTS_PATH) {
+    response.writeHead(404, agentHeaders(origine, "application/json"));
+    return response.end(JSON.stringify({ error: "Route inconnue." }));
+  }
+
+  response.writeHead(200, {
+    ...agentHeaders(origine, "text/event-stream; charset=utf-8"),
+    Connection: "keep-alive",
+    "X-Accel-Buffering": "no",
+  });
+  response.flushHeaders?.();
+  agentClients.add(response);
+  sendEvent(response, "snapshot", publicSnapshot(currentSnapshot()));
+
+  const keepAlive = setInterval(() => response.write(": ping\n\n"), 15000);
+  request.on("close", () => {
+    clearInterval(keepAlive);
+    agentClients.delete(response);
+  });
+
+  // Le lecteur se connecte sur la connexion réglée du poste : la page distante
+  // ne choisit pas le port série ni l'adresse du lecteur, qui sont des choses
+  // du poste et resteraient réglables à distance si on les prenait de l'URL.
+  ensureReaderConnection(
+    normalizeConnection({
+      type: db.getSetting("connection_type", "usb"),
+      endpoint: db.getSetting("connection_endpoint", ""),
+    }),
+  )
+    .then(() => sendEvent(response, "snapshot", publicSnapshot(currentSnapshot())))
+    .catch((error) => sendEvent(response, "reader-error", { error: error.message }));
 }
 
 async function api(request, response, url) {
@@ -1586,6 +1672,8 @@ async function api(request, response, url) {
 const server = http.createServer(async (request, response) => {
   const url = new URL(request.url, "http://localhost");
   try {
+    if (url.pathname.startsWith("/agent/"))
+      return agent(request, response, url);
     if (url.pathname.startsWith("/api/"))
       return await api(request, response, url);
     if (
@@ -1679,6 +1767,8 @@ async function shutdown() {
   clearTimeout(beepTimer);
   for (const client of eventClients) client.end();
   eventClients.clear();
+  for (const client of agentClients) client.end();
+  agentClients.clear();
   syncService.close();
   try {
     await cataloguingService.close();
