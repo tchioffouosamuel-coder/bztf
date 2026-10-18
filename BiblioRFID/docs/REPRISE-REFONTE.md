@@ -5,13 +5,19 @@
 ---
 
 Tu reprends une refonte en cours sur trois dépôts Git distincts, tous sous
-`C:\laragon\www\`. Rien n'est poussé : tout vit sur des branches locales.
+`C:\laragon\www\`. La première refonte a été fusionnée. Repartir de
+`main` / `master`, jamais des anciennes branches closes `refonte-ilms`,
+`refonte-recherche-catalogue` et `refonte-frontend`.
 
 | Dépôt | Branche | Rôle |
 |---|---|---|
-| `sdk` | `refonte-ilms` | le poste BiblioRFID (Node.js) et la spécification |
-| `library-service` | `refonte-recherche-catalogue` | le backend (Spring Boot 3 / Java 21 / R2DBC) |
-| `ilms` | `refonte-frontend` | le frontend (Angular 19, autonome) |
+| `sdk` | `main` | le poste BiblioRFID (Node.js) et la spécification |
+| `library-service` | `master` | le backend (Spring Boot 3 / Java 21 / R2DBC) |
+| `ilms` | `master` | le frontend (Angular 19, autonome) |
+
+La reprise de session opérateur du 18 octobre est préparée sur une nouvelle
+branche `refonte-session-operateur` dans chacun des trois dépôts. Ne pas la
+confondre avec les branches de la première refonte. Elle n'est pas déployée.
 
 **Lis d'abord `sdk/BiblioRFID/docs/REFONTE-ILMS.md`.** C'est la spécification de
 référence : l'inventaire complet des trois sources, les invariants mesurés, le
@@ -95,17 +101,49 @@ est acceptable, en silence non.
 
 ## Ce qui reste
 
-1. **Les huit autres zones** : tableau de bord, lecteurs, récolement, matériel
+**Session opérateur ajoutée et éprouvée localement avant les autres zones.**
+Le contrat auth-service a été relu : client OAuth serveur (`SCOPE_READ`), puis
+connexion du compte. Le JWT ne sort pas dans le JSON ni dans le stockage
+Angular : cookie HttpOnly / Secure / Strict, révocation et inactivité en base
+par empreinte. `LibraryContext` ne choisit plus que parmi les bibliothèques
+de cette session ; `?library=` et le stockage sont des préférences, jamais des
+autorisations. Boutons grisés, garde de route et contrôle avant chaque envoi ;
+habilitation RFID relue côté serveur, y compris via les anciennes routes de
+prêt et le service appelé directement. L'audit R2DBC inscrit l'UUID connecté
+dans `StatusHistory.changedBy`, correspondance de `mouvement.qui`.
+
+Mesuré : **38 contrôles Java sans JUnit**, sur un vrai serveur WebFlux et un
+cluster PostgreSQL 18.6 jetable ; **33 scénarios navigateur** (10 session,
+7 catalogue, 16 circulation). Le contrôle de l'audit insère effectivement une
+ligne avec `changed_by NOT NULL`. L'auth-service et la validation JWT du banc
+sont des doublures ; les secrets OAuth et les clés de production ne sont pas
+certifiés par ces essais. Les paramètres de déploiement et les limites sont
+dans `library-service/docs/SESSION-OPERATEUR.md`.
+
+1. **Activation réelle de la session** : fournir le client OAuth serveur et
+   les origines HTTPS exactes du frontend, appliquer la migration des sessions,
+   puis éprouver une connexion réelle sur l'environnement en ligne. Le rôle
+   global est celui du JWT signé et demande une reconnexion après changement ;
+   l'état activé du compte et l'habilitation par bibliothèque sont relus à
+   chaque demande. La façade est prête, elle ne justifie pas de mettre les
+   huit coquilles devant des utilisateurs.
+2. **Les huit autres zones** : tableau de bord, lecteurs, récolement, matériel
    RFID, outils, import/export, poste public, comptes. Chacune est une coquille
    qui rappelle en commentaire les règles qu'elle devra tenir.
-2. **L'authentification** et la session opérateur. `LibraryContext` lit la
-   bibliothèque dans `?library=` puis la retient — provisoire, assumé, et à
-   coiffer par la session.
 3. **Les fonctions de la 3.0 absentes du backend** : contrôle qualité d'un
    catalogue Excel, récolement par bloc, étiquettes PDF, sauvegardes.
 4. **La migration des données** : reprendre le `.dump` de
    `sdk/Nouveau dossier/BASE/` vers le schéma cible, avec contrôle du nombre de
    lignes table par table.
+
+**Dettes à conserver dans la reprise.** Les anciens tests JUnit restent non
+exécutés ; un job GitLab `test` lance désormais le banc manuel de session,
+mais son exécution distante n'est pas encore attestée. Les deux durées
+(`LoanStatusServiceImpl` : 30 jours ; bibliothèque : 21 par défaut) ne sont pas
+encore unifiées. Le transport des canaux `catalogue`, `index`, `prets` reste
+à trancher avant l'exploitation à deux postes. Aucune des huit autres zones,
+ni les fonctions manquantes de la 3.0, ni la migration du dump n'est terminée
+par le seul raccordement de session.
 
 ## Règles de travail, non négociables
 
@@ -172,12 +210,12 @@ qui laissait l'écran bloqué sans aucun résultat. Compiler ne prouve rien.
   `/circulation?library=…&agent=http://127.0.0.1:4310`, après avoir ajouté
   l'origine du build à `agent_origins` côté poste.
 
-**Ne commite jamais le travail d'autrui.** `library-service` porte du travail
-non committé préexistant (toute la fonctionnalité `LibraryRfid*`, plus
-`DatabaseTable.java`). Laisse-le exactement comme tu le trouves. Quand tu dois
-modifier `master.xml`, que les deux se partagent : écris dans l'index la version
-`HEAD` + ta seule ligne, puis restaure le fichier complet dans l'arbre de
-travail.
+**Ne commite jamais le travail d'autrui.** La fonctionnalité `LibraryRfid*`
+et son `DatabaseTable.java`, autrefois non committés, sont désormais fusionnés.
+Les trois arbres étaient propres au début de la reprise de session. Refaire
+néanmoins cet inventaire à chaque reprise. Quand `master.xml` porte aussi du
+travail préexistant : écris dans l'index la version `HEAD` + ta seule ligne,
+puis restaure le fichier complet dans l'arbre de travail.
 
 **N'écris pas de patch par heredoc.** Une barre oblique inverse suivie d'un `n`
 y devient un vrai retour à la ligne. Utilise l'outil d'édition.
