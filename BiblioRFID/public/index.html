@@ -108,9 +108,6 @@
           <button class="nav-item" data-view="station">
             <i data-lucide="radio-tower"></i><span>Station RFID</span>
           </button>
-          <button class="nav-item" data-view="ilms">
-            <i data-lucide="app-window"></i><span>ILMS</span>
-          </button>
           <button class="nav-item" data-view="history">
             <i data-lucide="history"></i><span>Historique</span>
           </button>
@@ -887,13 +884,6 @@
                     >
                   </div>
                 </div>
-                <section class="station-ilms hidden" id="station-ilms" aria-label="Catalogue ILMS">
-                  <div class="station-ilms-heading">
-                    <strong>Catalogue ILMS</strong>
-                    <button class="button ghost" type="button" id="station-ilms-refresh">Actualiser</button>
-                  </div>
-                  <div id="station-ilms-results" aria-live="polite"></div>
-                </section>
                 <div class="tag-preview hidden" id="tag-preview">
                   <div>
                     <span>EPC détecté</span><code id="scan-epc">—</code>
@@ -1044,27 +1034,6 @@
             </div>
           </section>
 
-          <section class="view" id="view-ilms">
-            <div class="ilms-frame-wrap">
-              <div class="ilms-notice" id="ilms-notice" hidden>
-                <i data-lucide="wifi-off"></i>
-                <p id="ilms-notice-text"></p>
-                <button
-                  class="button secondary"
-                  type="button"
-                  data-view-link="settings"
-                >
-                  <i data-lucide="settings-2"></i><span>Paramètres</span>
-                </button>
-              </div>
-              <iframe
-                id="ilms-frame"
-                class="ilms-frame"
-                title="Interface ILMS"
-                referrerpolicy="no-referrer"
-              ></iframe>
-            </div>
-          </section>
           <section class="view" id="view-settings">
             <div class="section-heading">
               <div>
@@ -1072,112 +1041,6 @@
                 <p>Connexion et comportement du lecteur RFID de bureau.</p>
               </div>
             </div>
-            <form class="settings-form" id="ilms-circ-form">
-              <div class="settings-section">
-                <div class="settings-copy">
-                  <h3>Session ILMS</h3>
-                  <p>
-                    Prêts et retours portés par le serveur ILMS. Le mot de passe
-                    n’est pas conservé et le jeton ne quitte pas ce poste.
-                  </p>
-                </div>
-                <div class="sync-fields">
-                  <label class="field wide"
-                    ><span>Passerelle</span
-                    ><input
-                      id="ilms-circ-gateway-url"
-                      name="gatewayUrl"
-                      type="url"
-                      inputmode="url"
-                      autocomplete="url"
-                      placeholder="https://gateway.bibliotheque-ztf.org"
-                  /></label>
-                  <label class="field"
-                    ><span>Identifiant</span
-                    ><input
-                      id="ilms-circ-username"
-                      name="username"
-                      type="text"
-                      maxlength="255"
-                      autocomplete="username"
-                  /></label>
-                  <label class="field"
-                    ><span>Mot de passe</span
-                    ><input
-                      id="ilms-circ-password"
-                      name="password"
-                      type="password"
-                      autocomplete="current-password"
-                  /></label>
-                  <label class="field"
-                    ><span>Client OAuth</span
-                    ><input
-                      id="ilms-circ-client-id"
-                      name="clientId"
-                      type="text"
-                      maxlength="255"
-                      placeholder="test-client"
-                  /></label>
-                  <label class="field"
-                    ><span>Secret OAuth</span
-                    ><input
-                      id="ilms-circ-client-secret"
-                      name="clientSecret"
-                      type="password"
-                      autocomplete="off"
-                  /></label>
-                  <label class="field" id="ilms-circ-library-field" hidden
-                    ><span>Bibliothèque</span
-                    ><select id="ilms-circ-library"></select
-                  ></label>
-                </div>
-              </div>
-              <div class="settings-actions sync-actions">
-                <div class="sync-status" id="ilms-circ-status" aria-live="polite">
-                  <span class="sync-status-dot"></span>
-                  <div>
-                    <strong id="ilms-circ-status-title">Non connecté</strong>
-                    <p id="ilms-circ-status-detail">Aucune session ILMS ouverte sur ce poste.</p>
-                  </div>
-                </div>
-                <div class="settings-action-buttons">
-                  <button
-                    class="button secondary"
-                    type="button"
-                    id="ilms-circ-logout"
-                    hidden
-                  >
-                    <i data-lucide="log-out"></i><span>Se déconnecter</span></button
-                  ><button class="button primary" type="submit" id="ilms-circ-login">
-                    <i data-lucide="log-in"></i><span>Se connecter</span>
-                  </button>
-                </div>
-              </div>
-              <div class="settings-section" id="ilms-circ-journal-section" hidden>
-                <div class="settings-copy">
-                  <h3>Demandes en attente</h3>
-                  <p>
-                    Prêts et retours enregistrés ici mais pas encore acquittés par
-                    ILMS. Les abandonner ne les annule pas côté serveur.
-                  </p>
-                </div>
-                <div class="table-wrap compact-table">
-                  <table>
-                    <thead>
-                      <tr>
-                        <th>Nature</th>
-                        <th>État</th>
-                        <th>Tentatives</th>
-                        <th>Dernier refus</th>
-                        <th>Enregistrée</th>
-                        <th></th>
-                      </tr>
-                    </thead>
-                    <tbody id="ilms-circ-journal-rows"></tbody>
-                  </table>
-                </div>
-              </div>
-            </form>
             <form class="settings-form sync-settings" id="sync-settings-form">
               <div class="settings-section">
                 <div class="settings-copy">
@@ -1232,72 +1095,6 @@
                     <i data-lucide="refresh-cw"></i
                     ><span>Synchroniser maintenant</span></button
                   ><button class="button primary" type="submit" id="save-sync">
-                    <i data-lucide="save"></i><span>Enregistrer</span>
-                  </button>
-                </div>
-              </div>
-            </form>
-            <form class="settings-form" id="ilms-settings-form">
-              <div class="settings-section">
-                <div class="settings-copy">
-                  <h3>Interface ILMS</h3>
-                  <p>
-                    Catalogage complet, autorités et circulation, ouverts dans
-                    l’onglet ILMS du poste.
-                  </p>
-                </div>
-                <div class="sync-fields">
-                  <label class="field wide"
-                    ><span>Adresse de la passerelle</span
-                    ><input
-                      id="ilms-gateway-url"
-                      name="gatewayUrl"
-                      type="url"
-                      inputmode="url"
-                      autocomplete="url"
-                      placeholder="https://gateway.bibliotheque-ztf.org"
-                  /></label>
-                  <label class="field"
-                    ><span>Compte du poste</span
-                    ><input
-                      id="ilms-username"
-                      name="username"
-                      type="text"
-                      autocomplete="off"
-                      placeholder="poste-rfid"
-                  /></label>
-                  <label class="field"
-                    ><span>Mot de passe</span
-                    ><input
-                      id="ilms-password"
-                      name="password"
-                      type="password"
-                      autocomplete="new-password"
-                      placeholder="Inchangé si laissé vide"
-                  /></label>
-                  <label class="field wide"
-                    ><span>Identifiant de la bibliothèque</span
-                    ><input
-                      id="ilms-library-id"
-                      name="libraryId"
-                      type="text"
-                      autocomplete="off"
-                      placeholder="UUID de la bibliothèque dans l’ILMS"
-                  /></label>
-                </div>
-              </div>
-              <div class="settings-actions">
-                <div class="sync-status" id="ilms-status" aria-live="polite">
-                  <span class="sync-status-dot"></span>
-                  <div>
-                    <strong id="ilms-status-title">Non configurée</strong>
-                    <p id="ilms-status-detail">
-                      Aucune passerelle ILMS renseignée.
-                    </p>
-                  </div>
-                </div>
-                <div class="settings-action-buttons">
-                  <button class="button primary" type="submit" id="save-ilms">
                     <i data-lucide="save"></i><span>Enregistrer</span>
                   </button>
                 </div>

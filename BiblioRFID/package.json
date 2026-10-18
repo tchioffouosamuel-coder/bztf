@@ -9,13 +9,8 @@
   "scripts": {
     "build:bridge": "powershell -NoProfile -ExecutionPolicy Bypass -File bridge/build.ps1",
     "start": "node --no-warnings=ExperimentalWarning server.js",
-    "agent:ilms": "node ilms-agent.js",
-    "sync:ilms": "node ilms-sync.js",
-    "test:agent:browser": "node tests/ilms-agent-browser-smoke.mjs",
-    "test:agent:bridge": "node tests/ilms-native-bridge-smoke.mjs",
     "test": "node --test tests/*.test.js",
     "test:ui": "node tests/ui-smoke.mjs",
-    "test:station:ilms": "node tests/station-ilms-smoke.mjs",
     "test:desktop": "node tests/desktop-smoke.mjs",
     "desktop": "electron .",
     "build:desktop": "electron-builder --win portable"
@@ -47,8 +42,6 @@
     "files": [
       "desktop/**/*",
       "server.js",
-      "ilms-agent.js",
-      "ilms-sync.js",
       "public/**/*",
       "lib/**/*",
       "bridge/**/*",
@@ -63,13 +56,6 @@
           "library.db",
           "library.db-wal",
           "library.db-shm"
-        ]
-      },
-      {
-        "from": "ilms",
-        "to": "ilms",
-        "filter": [
-          "**/*"
         ]
       }
     ],
