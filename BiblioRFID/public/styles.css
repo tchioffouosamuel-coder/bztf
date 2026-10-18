@@ -1416,34 +1416,6 @@ tbody tr.selected td {
 .multiple-notice svg {
   color: var(--cyan);
 }
-.station-ilms {
-  margin: 0 18px 16px;
-  border: 1px solid var(--line);
-  border-radius: 7px;
-  overflow: hidden;
-}
-.station-ilms-heading {
-  padding: 8px 14px;
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  background: var(--surface-soft);
-}
-.station-ilms-result {
-  padding: 12px 14px;
-  border-top: 1px solid var(--line);
-  overflow-wrap: anywhere;
-}
-.station-ilms-result p {
-  margin: 6px 0;
-  color: var(--muted);
-  font-size: 12px;
-}
-.station-ilms-result code {
-  color: var(--muted);
-  font-size: 10px;
-}
 .tag-preview {
   margin: 0 18px 16px;
   border: 1px solid var(--line);
@@ -2075,8 +2047,8 @@ dialog::backdrop {
 .toast.success svg {
   color: var(--primary);
 }
-/* Demande ILMS restee au journal : ce n'est pas un echec, mais il faut le
-   voir. L'ambre la distingue du rouge d'un refus. */
+/* Avis qui n'est pas un echec, mais qu'il faut voir : l'ambre le distingue
+   du rouge d'une erreur. */
 .toast.warn {
   border-left-color: var(--amber);
 }
@@ -2936,37 +2908,3 @@ dialog::backdrop {
   }
 }
 
-/* Onglet ILMS : le cadre occupe toute la hauteur utile du poste. */
-.ilms-frame-wrap {
-  position: relative;
-  display: flex;
-  flex-direction: column;
-  gap: 14px;
-  min-height: calc(100vh - 210px);
-}
-.ilms-frame {
-  flex: 1;
-  width: 100%;
-  min-height: 520px;
-  border: 1px solid var(--line);
-  border-radius: var(--radius);
-  background: var(--surface);
-  box-shadow: var(--shadow);
-}
-.ilms-notice {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  padding: 14px 16px;
-  border: 1px solid var(--line);
-  border-radius: var(--radius);
-  background: var(--surface);
-}
-.ilms-notice p {
-  flex: 1;
-  margin: 0;
-}
-/* `display: flex` l'emporterait sur le `display: none` de l'attribut hidden. */
-.ilms-notice[hidden] {
-  display: none;
-}

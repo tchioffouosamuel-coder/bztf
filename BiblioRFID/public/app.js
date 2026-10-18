@@ -65,7 +65,6 @@ import UsersRound from "/vendor/lucide/icons/users-round.js";
 import WifiOff from "/vendor/lucide/icons/wifi-off.js";
 import X from "/vendor/lucide/icons/x.js";
 import { initCataloguing } from "/cataloguing.js";
-import { StationCatalogue } from "/station-catalogue.js";
 
 const lucideIcons = {
   activity: Activity,
@@ -136,10 +135,6 @@ const lucideIcons = {
 };
 
 let cataloguing = null;
-const stationCatalogue = new StationCatalogue({
-  lookup: api,
-  changed: () => renderVisualTags(false),
-});
 
 const $ = (selector, root = document) => root.querySelector(selector);
 const $$ = (selector, root = document) => [...root.querySelectorAll(selector)];
@@ -208,7 +203,6 @@ const viewMeta = {
   staff: ["Équipe", "Personnel"],
   gate: ["Sécurité et fréquentation", "Portail antivol"],
   station: ["Opérations RFID", "Station RFID"],
-  ilms: ["Catalogue partagé", "Interface ILMS"],
   history: ["Traçabilité", "Historique"],
   settings: ["Configuration", "Paramètres"],
 };
@@ -248,7 +242,7 @@ async function api(path, options = {}) {
     headers: { "Content-Type": "application/json", ...(options.headers || {}) },
   });
   const payload = await response.json();
-  if (response.status === 401 && !path.startsWith("/api/auth/") && payload.code !== "ilms_catalogue") {
+  if (response.status === 401 && !path.startsWith("/api/auth/")) {
     showAuth({ setupRequired: false, message: "Votre session a expiré." });
   }
   if (!response.ok) throw new Error(payload.error || "Opération impossible.");
@@ -256,7 +250,6 @@ async function api(path, options = {}) {
 }
 
 function showAuth({ setupRequired = false, message = "" } = {}) {
-  resetStationCatalogue();
   state.setupRequired = setupRequired;
   state.user = null;
   state.readerStream?.close();
@@ -420,11 +413,8 @@ function setView(name) {
   if (name === "station") startAutoReading();
   if (name === "history") loadHistory();
   if (name === "cataloguing") cataloguing?.activate();
-  if (name === "ilms") openIlms();
   if (name === "settings") {
     loadSyncStatus(false);
-    loadIlmsSession(false);
-    loadIlmsStatus(false);
     cataloguing?.loadSettingsForm();
   }
 }
@@ -1531,7 +1521,6 @@ async function handleLoanRegister(event) {
       body: "{}",
     });
     toast("Retour enregistré.");
-    toastIlms(returned.ilms);
     await Promise.all([loadLoans(), loadDashboard()]);
   } catch (error) {
     toast(error.message, "error");
@@ -1729,7 +1718,6 @@ async function submitLoan(event) {
     state.detailLoan = result.activeLoan;
     renderBookDetails();
     toast(`Emprunt enregistré pour ${result.activeLoan.subscriber_name}.`);
-    toastIlms(result.ilms);
     await Promise.all([loadBooks(), loadDashboard()]);
   } catch (error) {
     toast(error.message, "error");
@@ -1904,7 +1892,6 @@ async function returnDetailBook() {
     state.detailLoan = result.activeLoan;
     renderBookDetails();
     toast("Retour enregistré.");
-    toastIlms(result.ilms);
     await Promise.all([loadBooks(), loadDashboard()]);
   } catch (error) {
     toast(error.message, "error");
@@ -2155,344 +2142,6 @@ async function loadSyncStatus(showError = true) {
   }
 }
 
-/**
- * Onglet ILMS. L'interface tourne sur son propre serveur local, sur la boucle
- * locale : elle y retrouve les chemins d'API relatifs qu'elle attend. Le cadre
- * n'est chargé qu'à la première ouverture.
- */
-async function openIlms() {
-  const frame = $("#ilms-frame");
-  let status = { available: true, gatewayUrl: "", origin: "" };
-  try {
-    status = await api("/api/ilms/status");
-  } catch {
-    // Statut indisponible : le cadre affichera lui-même le motif.
-  }
-  const notice = $("#ilms-notice");
-  const problem = !status.origin
-    ? "Le service local de l’interface ILMS n’a pas pu démarrer."
-    : status.available && !status.gatewayUrl
-      ? "Renseignez l’adresse de la passerelle ILMS dans Paramètres pour utiliser cet onglet."
-      : "";
-  notice.hidden = !problem;
-  if (problem) $("#ilms-notice-text").textContent = problem;
-  icons();
-  if (status.origin && !frame.dataset.loaded) {
-    frame.src = `${status.origin}/`;
-    frame.dataset.loaded = "1";
-  }
-}
-
-function renderIlmsStatus(status) {
-  const configured = Boolean(status.configured);
-  $("#ilms-status").classList.toggle("connected", configured);
-  $("#ilms-status-title").textContent = configured
-    ? "Interface disponible"
-    : "Non configurée";
-  $("#ilms-status-detail").textContent = !status.available
-    ? "Module ILMS absent de cette version de l’application."
-    : !status.origin
-      ? "Le service local de l’interface ILMS n’a pas démarré."
-      : !status.gatewayUrl
-        ? "Aucune passerelle ILMS renseignée."
-        : status.clientReady
-          ? `Passerelle : ${status.gatewayUrl} · compte ${status.username}`
-          : `Passerelle : ${status.gatewayUrl} · compte du poste incomplet`;
-  if (status.gatewayUrl) $("#ilms-gateway-url").value = status.gatewayUrl;
-  $("#ilms-username").value = status.username || "";
-  $("#ilms-library-id").value = status.libraryId || "";
-  // Le mot de passe enregistré n'est jamais renvoyé : le champ reste vide et
-  // le laisser vide conserve celui déjà en place.
-  $("#ilms-password").value = "";
-  $("#ilms-password").placeholder = status.passwordSet
-    ? "Inchangé si laissé vide"
-    : "Mot de passe du compte";
-}
-
-async function loadIlmsStatus(showError = true) {
-  try {
-    renderIlmsStatus(await api("/api/ilms/status"));
-  } catch (error) {
-    if (showError) toast(error.message, "error");
-  }
-}
-
-async function saveIlmsSettings(event) {
-  event.preventDefault();
-  const button = $("#save-ilms");
-  button.disabled = true;
-  try {
-    const status = await api("/api/ilms/settings", {
-      method: "PUT",
-      body: JSON.stringify({
-        gatewayUrl: $("#ilms-gateway-url").value,
-        username: $("#ilms-username").value,
-        password: $("#ilms-password").value,
-        libraryId: $("#ilms-library-id").value,
-      }),
-    });
-    renderIlmsStatus(status);
-    resetStationCatalogue();
-    // Le cadre doit repartir de l'adresse enregistrée.
-    const frame = $("#ilms-frame");
-    delete frame.dataset.loaded;
-    frame.removeAttribute("src");
-    toast(
-      status.gatewayUrl
-        ? "Passerelle ILMS enregistrée."
-        : "Passerelle ILMS effacée.",
-    );
-  } catch (error) {
-    toast(error.message, "error");
-  } finally {
-    button.disabled = false;
-  }
-}
-
-async function saveSyncSettings(event) {
-  event.preventDefault();
-  const button = $("#save-sync");
-  button.disabled = true;
-  try {
-    const result = await api("/api/sync/settings", {
-      method: "PUT",
-      body: JSON.stringify({
-        serverUrl: $("#sync-server-url").value,
-        apiKey: $("#sync-api-key").value,
-        deviceName: $("#sync-device-name").value,
-      }),
-    });
-    $("#sync-api-key").value = "";
-    renderSyncStatus(result, true);
-    if (result.error)
-      toast(`Paramètres enregistrés. ${result.error}`, "error");
-    else toast("Serveur distant connecté et catalogue synchronisé.");
-  } catch (error) {
-    toast(error.message, "error");
-  } finally {
-    button.disabled = false;
-  }
-}
-
-async function runSyncNow() {
-  const button = $("#sync-now");
-  button.disabled = true;
-  renderSyncStatus({ ...state.sync, syncing: true });
-  try {
-    const result = await api("/api/sync/run", {
-      method: "POST",
-      body: "{}",
-    });
-    renderSyncStatus(result);
-    if (result.error) toast(result.error, "error");
-    else toast("Catalogue synchronisé.");
-  } catch (error) {
-    toast(error.message, "error");
-    await loadSyncStatus(false);
-  }
-}
-
-/**
- * Avis du report vers ILMS apres une opération locale.
- *
- * Le prêt local a déjà abouti quand ceci s’affiche : le message complète,
- * il ne contredit pas. Trois cas seulement intéressent l’opérateur — c’est
- * parti, c’est en attente, ou ILMS a refusé — et seuls les deux derniers
- * valent une alerte.
- */
-function toastIlms(ilms) {
-  if (!ilms || ilms.status === "sent") return;
-  if (ilms.status === "queued") return toast(ilms.message, "warn");
-  if (ilms.status === "refused") return toast("ILMS : " + ilms.message, "error");
-  // `skipped` couvre l’absence de session ou d’étiquette : c’est le
-  // fonctionnement normal d’un poste hors ILMS, pas un incident.
-}
-
-/**
- * Session ILMS du poste.
- *
- * Les identifiants ne sont pas gardes par l’interface : ils partent au
- * serveur local, qui ouvre la session et conserve le jeton en memoire. Le
- * navigateur n’en voit jamais la valeur.
- */
-function renderIlms(data) {
-  resetStationCatalogue();
-  const signedIn = Boolean(data?.signed_in);
-  const active = Boolean(data?.active);
-  const journal = data?.journal || null;
-
-  let title = "Non connecté";
-  let detail = "Aucune session ILMS ouverte sur ce poste.";
-  if (signedIn && !active) {
-    title = "Session expirée";
-    detail = "Le jeton a expiré. Reconnectez-vous pour reprendre les envois.";
-  } else if (signedIn && !data.library_id) {
-    title = "Bibliothèque à choisir";
-    detail = "Ce compte dessert plusieurs bibliothèques. Choisissez celle de ce poste.";
-  } else if (signedIn) {
-    const library = (data.libraries || []).find((entry) => entry.id === data.library_id);
-    title = "Connecté · " + (library ? library.name : "bibliothèque inconnue");
-    detail = journal
-      ? journal.pending + " demande(s) en attente, " + journal.blocked + " bloquée(s)."
-      : "Journal local indisponible : les demandes ne peuvent pas être acquittées.";
-  }
-  if (data?.journal_error && signedIn) {
-    detail = "Journal local indisponible : les demandes ne peuvent pas être acquittées.";
-  }
-
-  $("#ilms-circ-status-title").textContent = title;
-  $("#ilms-circ-status-detail").textContent = detail;
-  $("#ilms-circ-logout").hidden = !signedIn;
-  $("#ilms-circ-login span").textContent = signedIn ? "Se reconnecter" : "Se connecter";
-  if (data?.gateway_url) $("#ilms-circ-gateway-url").value = data.gateway_url;
-  // Le mot de passe ne survit pas a un aller-retour : le laisser affiche
-  // l’exposerait sur un poste partage sans rien apporter.
-  $("#ilms-circ-password").value = "";
-  $("#ilms-circ-client-secret").value = "";
-
-  const libraries = data?.libraries || [];
-  const field = $("#ilms-circ-library-field");
-  const select = $("#ilms-circ-library");
-  field.hidden = libraries.length < 2;
-  if (!field.hidden) {
-    select.innerHTML = libraries
-      .map(
-        (entry) =>
-          '<option value="' +
-          escapeHtml(entry.id) +
-          '"' +
-          (entry.id === data.library_id ? " selected" : "") +
-          ">" +
-          escapeHtml(entry.name) +
-          "</option>",
-      )
-      .join("");
-  }
-
-  const section = $("#ilms-circ-journal-section");
-  section.hidden = !journal || journal.total === 0;
-  if (!section.hidden) {
-    $("#ilms-circ-journal-rows").innerHTML = journal.entries
-      .map(
-        (entry) =>
-          "<tr><td>" +
-          (entry.kind === "checkout" ? "Prêt" : "Retour") +
-          "</td><td>" +
-          (entry.state === "blocked" ? "Bloquée" : "En attente") +
-          "</td><td>" +
-          entry.attempts +
-          "</td><td>" +
-          (entry.last_status ? escapeHtml(String(entry.last_status)) : "—") +
-          "</td><td>" +
-          escapeHtml(formatDate(entry.created_at)) +
-          '</td><td class="row-actions">' +
-          '<button class="button ghost" type="button" data-ilms-retry="' +
-          escapeHtml(entry.id) +
-          '">Réessayer</button>' +
-          '<button class="button ghost danger" type="button" data-ilms-discard="' +
-          escapeHtml(entry.id) +
-          '">Abandonner</button>' +
-          "</td></tr>",
-      )
-      .join("");
-  }
-  window.lucide?.createIcons();
-}
-
-async function loadIlmsSession(showError = true) {
-  try {
-    renderIlms(await api("/api/ilms/session"));
-  } catch (error) {
-    if (showError) toast(error.message, "error");
-  }
-}
-
-async function signInIlms(event) {
-  event.preventDefault();
-  const button = $("#ilms-circ-login");
-  button.disabled = true;
-  try {
-    const result = await api("/api/ilms/session", {
-      method: "POST",
-      body: JSON.stringify({
-        gateway_url: $("#ilms-circ-gateway-url").value,
-        username: $("#ilms-circ-username").value,
-        password: $("#ilms-circ-password").value,
-        client_id: $("#ilms-circ-client-id").value,
-        client_secret: $("#ilms-circ-client-secret").value,
-      }),
-    });
-    renderIlms(result);
-    toast(
-      result.library_id
-        ? "Session ILMS ouverte."
-        : "Session ouverte. Choisissez la bibliothèque de ce poste.",
-    );
-  } catch (error) {
-    toast(error.message, "error");
-  } finally {
-    button.disabled = false;
-  }
-}
-
-async function signOutIlms() {
-  try {
-    renderIlms(await api("/api/ilms/session", { method: "DELETE" }));
-    toast("Session ILMS fermée.");
-  } catch (error) {
-    toast(error.message, "error");
-  }
-}
-
-async function selectIlmsLibrary(event) {
-  try {
-    renderIlms(
-      await api("/api/ilms/session/library", {
-        method: "PUT",
-        body: JSON.stringify({ library_id: event.target.value }),
-      }),
-    );
-  } catch (error) {
-    toast(error.message, "error");
-    await loadIlmsSession(false);
-  }
-}
-
-async function retryIlmsEntry(id) {
-  try {
-    const result = await api(
-      "/api/ilms/journal/" + encodeURIComponent(id) + "/retry",
-      { method: "POST", body: "{}" },
-    );
-    renderIlms(result);
-    toast("Demande acquittée par ILMS (" + result.loan.number + ").");
-  } catch (error) {
-    toast(error.message, "error");
-    await loadIlmsSession(false);
-  }
-}
-
-async function discardIlmsEntry(id) {
-  // Abandonner n’annule rien chez ILMS : la demande a pu y arriver avant
-  // que la reponse se perde. L’operateur doit le savoir avant de cliquer.
-  const confirmed = window.confirm(
-    "Abandonner cette demande ? Elle n’est pas annulée dans ILMS : si elle y est déjà arrivée, le prêt existe toujours.",
-  );
-  if (!confirmed) return;
-  try {
-    renderIlms(
-      await api(
-        "/api/ilms/journal/" + encodeURIComponent(id) + "?confirm=local-discard",
-        { method: "DELETE" },
-      ),
-    );
-    toast("Demande retirée du journal local.");
-  } catch (error) {
-    toast(error.message, "error");
-    await loadIlmsSession(false);
-  }
-}
-
 function timingStatus(timing, prefix) {
   const mode =
     timing.beepMode === "native"
@@ -2597,7 +2246,6 @@ function setAutoMode(
 }
 
 function stopAutoReading(disable = true) {
-  resetStationCatalogue();
   state.readerStream?.close();
   state.readerStream = null;
   state.readerStreamKey = "";
@@ -2711,57 +2359,6 @@ function updateTagPreview(tag) {
   $("#scan-rssi").textContent = `${tag.rssi ?? "—"}`;
 }
 
-function resetStationCatalogue() {
-  stationCatalogue.reset();
-  $("#station-ilms").classList.add("hidden");
-  $("#station-ilms-results").replaceChildren();
-}
-
-function renderStationCatalogue(tags) {
-  const entries = stationCatalogue.sync(tags);
-  $("#station-ilms").classList.toggle("hidden", entries.length === 0);
-  $("#station-ilms-results").innerHTML = entries.map(entry => {
-    const copy = entry.copy;
-    const title = copy?.document?.title || (copy ? `Exemplaire ${copy.number || copy.id}` : {
-      loading: "Recherche dans ILMS…",
-      unknown: "Tag absent du catalogue ILMS",
-      unconfigured: "Catalogue ILMS non connecté",
-      error: "Recherche ILMS impossible",
-    }[entry.state]);
-    const detail = copy ? [
-      copy.document?.authors?.join(", "),
-      copy.number && `Exemplaire : ${copy.number}`,
-      copy.documentNumber && `Notice : ${copy.documentNumber}`,
-      copy.quote && `Cote : ${copy.quote}`,
-      copy.section, copy.shelf,
-      copy.document?.isbn && `ISBN : ${copy.document.isbn}`,
-      ({ 1: "Bon état", 2: "En cours de saisie", 3: "Détérioré", 4: "Perdu", 5: "Consultation sur place", 6: "En dépôt" })[copy.status],
-      copy.documentError,
-    ].filter(Boolean).join(" · ") : entry.state === "error" ? entry.message
-      : entry.state === "unconfigured" ? "Ouvrez une session ILMS ou configurez le compte du poste dans les réglages."
-      : entry.state === "unknown" ? "Aucun exemplaire trouvé dans la bibliothèque sélectionnée."
-      : "Le catalogue local reste consultable pendant la recherche.";
-    return `<article class="station-ilms-result"><strong>${escapeHtml(title)}</strong><p>${escapeHtml(detail)}</p><code>${escapeHtml(entry.tag.tid || entry.tag.epc)}</code></article>`;
-  }).join("");
-}
-
-function showIlmsCopy(copy) {
-  state.selectedBook = null;
-  state.pendingBook = null;
-  $("#unknown-panel").classList.add("hidden");
-  $("#quick-register-form").classList.add("hidden");
-  const container = $("#selected-book");
-  container.className = "selected-book recognized";
-  container.innerHTML = `<i data-lucide="library-big"></i><div class="selected-book-copy">
-    <span class="selection-label">Exemplaire reconnu dans ILMS</span>
-    <h3>${escapeHtml(copy.document?.title || copy.number || "Exemplaire ILMS")}</h3>
-    <p>${escapeHtml(copy.document?.authors?.join(", ") || copy.documentError || "Notice ILMS")}</p>
-    <div class="selected-identifiers"><strong>${escapeHtml(copy.number || copy.id)}</strong></div>
-  </div>`;
-  setWriteStatus("Exemplaire ILMS identifié", "Consultation du catalogue. Aucun encodage ni prêt effectué.", "success");
-  setReaderBanner("Lecture confirmée", "Retirez le livre pour traiter le suivant.");
-  icons();
-}
 
 function resetStationDisplay() {
   state.selectedBook = null;
@@ -2942,7 +2539,7 @@ function showMultipleIdentification(tags, changed) {
   $("#unknown-panel").classList.add("hidden");
   $("#quick-register-form").classList.add("hidden");
   const panel = $("#multiple-identification");
-  const recognized = tags.filter((tag) => tag.book || stationCatalogue.get(tag)?.copy).length;
+  const recognized = tags.filter((tag) => tag.book).length;
   const cards = tags.filter((tag) => tag.subscriber || tag.staff).length;
   const unknown = tags.length - recognized - cards;
   panel.classList.remove("hidden");
@@ -2967,12 +2564,6 @@ function showMultipleIdentification(tags, changed) {
         ? `<div class="multiple-book-item">
         <i data-lucide="book-check"></i>
         <div><strong>${escapeHtml(tag.book.title)}</strong><small>${escapeHtml(tag.book.author || tag.book.accession)} · ${escapeHtml(tag.book.accession)}</small><code>${escapeHtml(tag.tid || tag.epc)}</code></div>
-        <span class="multiple-signal">Signal<b>${tag.rssi ?? "—"}</b></span>
-      </div>`
-        : stationCatalogue.get(tag)?.copy
-        ? `<div class="multiple-book-item">
-        <i data-lucide="library-big"></i>
-        <div><strong>${escapeHtml(stationCatalogue.get(tag).copy.document?.title || stationCatalogue.get(tag).copy.number || "Exemplaire ILMS")}</strong><small>Catalogue ILMS · ${escapeHtml(stationCatalogue.get(tag).copy.number)}</small><code>${escapeHtml(tag.tid || tag.epc)}</code></div>
         <span class="multiple-signal">Signal<b>${tag.rssi ?? "—"}</b></span>
       </div>`
         : `<div class="multiple-book-item unknown">
@@ -3165,7 +2756,6 @@ function visualTagKey(tag) {
 async function renderVisualTags(notify = true) {
   if (state.registrationOpen || state.activeView !== "station") return;
   const tags = [...state.visualTags.values()];
-  renderStationCatalogue(tags);
   if (tags.length === 0) {
     if (state.presenceSessionId == null) state.visualSessionAnnounced = false;
     resetStationDisplay();
@@ -3193,11 +2783,6 @@ async function renderVisualTags(notify = true) {
   const key = `${tag.tid}:${tag.epc}`;
   const changed = key !== state.currentTagKey;
   state.currentTagKey = key;
-  const ilmsCopy = stationCatalogue.get(tag)?.copy;
-  if (ilmsCopy && !tag.book) {
-    showIlmsCopy(ilmsCopy);
-    return;
-  }
   if (tag.book) {
     state.pendingBook = null;
     $("#unknown-panel").classList.add("hidden");
@@ -3236,17 +2821,6 @@ async function renderVisualTags(notify = true) {
       "Badge du personnel détecté",
       "Un badge du personnel ne peut pas être encodé comme livre.",
     );
-    return;
-  }
-
-  if (stationCatalogue.get(tag)?.state === "loading") {
-    state.selectedBook = null;
-    $("#unknown-panel").classList.add("hidden");
-    $("#quick-register-form").classList.add("hidden");
-    const container = $("#selected-book");
-    container.className = "selected-book";
-    container.innerHTML = '<div class="selected-book-copy"><h3>Identification en cours</h3><p>Recherche de cet exemplaire dans le catalogue ILMS…</p></div>';
-    setWriteStatus("Recherche ILMS en cours", "Laissez le tag sur le lecteur.");
     return;
   }
 
@@ -3419,10 +2993,6 @@ function bindEvents() {
     }),
   );
   $("#auto-read-toggle").addEventListener("click", toggleAutoReading);
-  $("#station-ilms-refresh").addEventListener("click", () => {
-    resetStationCatalogue();
-    renderVisualTags(false);
-  });
   $("#register-tag-button").addEventListener("click", beginRegistration);
   $("#cancel-registration").addEventListener("click", cancelRegistration);
   $("#quick-title").addEventListener("input", (event) => {
@@ -3510,17 +3080,7 @@ function bindEvents() {
   $("#test-connection").addEventListener("click", () => probeConnection());
   $("#settings-form").addEventListener("submit", saveSettings);
   $("#sync-settings-form").addEventListener("submit", saveSyncSettings);
-  $("#ilms-settings-form").addEventListener("submit", saveIlmsSettings);
   $("#sync-now").addEventListener("click", runSyncNow);
-  $("#ilms-circ-form").addEventListener("submit", signInIlms);
-  $("#ilms-circ-logout").addEventListener("click", signOutIlms);
-  $("#ilms-circ-library").addEventListener("change", selectIlmsLibrary);
-  $("#ilms-circ-journal-rows").addEventListener("click", (event) => {
-    const retry = event.target.closest("[data-ilms-retry]");
-    if (retry) return retryIlmsEntry(retry.dataset.ilmsRetry);
-    const discard = event.target.closest("[data-ilms-discard]");
-    if (discard) return discardIlmsEntry(discard.dataset.ilmsDiscard);
-  });
   $("#reader-timing-form").addEventListener("submit", saveReaderTiming);
   $("#test-buzzer").addEventListener("click", testBuzzer);
   $$("input[name=beepMode]").forEach((input) =>

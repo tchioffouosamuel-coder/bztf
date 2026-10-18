@@ -62,57 +62,6 @@ Dans l’application Windows empaquetée, la recompilation du pont utilise la co
 native extraite dans le profil `%APPDATA%\biblio-rfid\native`. Le contenu de
 `app.asar` reste ainsi en lecture seule.
 
-## Interface ILMS embarquée
-
-L’onglet **ILMS** ouvre l’interface complète du système de gestion — notices et
-autorités, exemplaires, circulation, abonnés, statistiques — sans quitter
-l’application. Tout ce qui demande le lecteur RFID (station, encodage,
-inventaire, portail, poste d’emprunt) reste dans les onglets du poste.
-
-L’application Angular appelle son API par des chemins relatifs à sa propre
-origine (`/api/library-service/…`, `/api/auth-service/…`), jamais par une
-adresse absolue : en production, un proxy placé devant elle sert le paquet et
-relaie `/api/**` vers la passerelle. Le poste reproduit ce montage sur un
-**second serveur local**, lié à la seule boucle locale : le paquet y est servi
-à la racine et les appels d’API sont relayés vers la passerelle, le préfixe
-`/api` retiré pour retrouver les routes de celle-ci (`/library-service/**`).
-
-C’est ce qui permet d’embarquer l’ILMS **sans modifier une ligne de son code**,
-et sans empiéter sur `/api/`, déjà occupé par l’API du poste. Le port est choisi
-automatiquement (celui du poste + 10, puis le suivant s’il est pris) et peut
-être imposé par `BIBLIORFID_ILMS_PORT`.
-
-Renseigner l’adresse de la passerelle dans **Paramètres > Interface ILMS**
-(`https://gateway.bibliotheque-ztf.org`). Le jeton de l’ILMS circule inchangé
-et n’est jamais journalisé ; le relais n’écoute pas sur le réseau, à la
-différence du serveur du poste.
-
-Trois situations sont annoncées explicitement plutôt que par un écran vide :
-exécutable produit sans le module, passerelle non renseignée, passerelle
-injoignable. Le relais ne transporte que HTTP ; les canaux WebSocket de la
-passerelle doivent être contactés à leur adresse publique.
-
-La préparation du paquet est décrite dans [`ilms/README.md`](ilms/README.md).
-Sans ce paquet, l’application se construit et fonctionne normalement.
-
-### Le poste comme client de l’ILMS
-
-L’ILMS garde le catalogue ; le poste n’apporte que la chaîne RFID. Il interroge
-donc l’ILMS pour son propre compte, directement auprès de la passerelle — il
-tourne côté serveur, sans la contrainte d’origine d’un navigateur.
-
-L’authentification utilise un **compte de service propre au poste**, créé dans
-l’ILMS : identifiant, mot de passe et identifiant de la bibliothèque, à
-renseigner dans **Paramètres > Interface ILMS**. Le mot de passe ne ressort
-jamais de la base locale, et laisser le champ vide conserve celui déjà
-enregistré. Le jeton obtenu est gardé en mémoire jusqu’à son expiration, et
-redemandé une fois si la passerelle le refuse. Ni identifiants ni jeton ne sont
-journalisés.
-
-`GET /api/ilms/copies/by-tag?epc=&tid=` renvoie l’exemplaire de l’ILMS portant
-ce tag. Un tag absent du catalogue renvoie `null` : c’est une réponse
-ordinaire, le portail en lit toute la journée qui n’appartiennent pas au fonds.
-
 ## Premier essai
 
 1. Ouvrir **Paramètres**, choisir **Simulation**, puis enregistrer.
@@ -126,6 +75,20 @@ ordinaire, le portail en lit toute la journée qui n’appartiennent pas au fond
 La station garde une seule connexion ouverte avec le lecteur et reçoit les tags en continu. Le navigateur est alimenté par un flux local SSE : aucune relance du pilote ni fenêtre de lecture de deux secondes n'est nécessaire entre deux livres. Un nouveau tag est regroupé pendant environ 140 ms pour permettre l'identification multiple, puis affiché et signalé par un bip unique.
 
 Le mode **Suspendre** ferme seulement le flux d'affichage de la page. Le service RFID local reste prêt, sauf lorsque l'application est arrêtée ou que le type de connexion change.
+
+## Agent lecteur
+
+Le poste expose l'antenne à l'ILMS servi par la passerelle, qui ne peut pas parler à l'USB depuis une page. C'est la **seule** surface publique du poste : tout le reste de `/api/` garde la session du poste.
+
+    GET /agent/reader/events
+
+Flux SSE, lecture seule, événements `snapshot` et `reader-error`. Un instantané porte la liste complète des tags présents — `epc`, `tid`, `rssi`, `antenna` — et l'état du lecteur. **Rien du fonds local du poste n'en sort** : ni livre, ni abonné, ni badge. Le poste dit ce que l'antenne voit, la passerelle dit ce que cela signifie, et mélanger les deux ferait afficher à l'ILMS un titre qu'il ignore ou un titre périmé.
+
+L'opérateur est authentifié par la passerelle, pas ici : c'est donc le contrôle d'origine qui tient lieu de porte. Le réglage `agent_origins` liste les origines servies, séparées par des virgules ou des espaces ; à défaut, la passerelle seule. Une origine doit être en **HTTPS**, ou en HTTP **uniquement** sur `localhost`, `127.0.0.1` ou `[::1]` — un flux en clair sur le réseau laisserait lire les identifiants de tags de toute la bibliothèque. L'origine demandée est renvoyée telle quelle, jamais `*`, et une demande sans en-tête `Origin` est refusée.
+
+Pour servir un ILMS en développement :
+
+    agent_origins = https://gateway.bibliotheque-ztf.org http://127.0.0.1:4200
 
 ## Catalogage assisté (OCR, notices, IA)
 

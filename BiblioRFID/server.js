@@ -21,17 +21,14 @@ import { parseCatalogWorkbook } from "./lib/xlsx-import.js";
 import { isBadgeEpc, isCardEpc, isValidEpc } from "./lib/epc.js";
 import { CataloguingService } from "./lib/cataloguing/service.js";
 import { handleCataloguingRequest } from "./lib/cataloguing/routes.js";
-import { IlmsCirculationClient } from "./lib/ilms-circulation-client.js";
-import { IlmsCirculationJournal } from "./lib/ilms-circulation-journal.js";
-import { IlmsSessionStore } from "./lib/ilms-session.js";
-import { handleIlmsRequest } from "./lib/ilms-routes.js";
-import { mirrorCheckout, mirrorReturn } from "./lib/ilms-circulation-bridge.js";
 import {
-  normalizeGatewayUrl,
-  resolveIlmsRoot,
-  startIlmsServer,
-} from "./lib/ilms.js";
-import { IlmsClient } from "./lib/ilms-client.js";
+  AGENT_EVENTS_PATH,
+  DEFAULT_AGENT_ORIGINS,
+  agentHeaders,
+  allowOrigin,
+  parseAgentOrigins,
+  publicSnapshot,
+} from "./lib/reader-agent.js";
 
 const execFileAsync = promisify(execFile);
 const root = path.dirname(fileURLToPath(import.meta.url));
@@ -55,56 +52,6 @@ const cataloguingService = new CataloguingService(db, { dataRoot });
 // Photos abandonnées lors d'un catalogage interrompu : elles ne servent plus.
 cataloguingService.purgeStaleCaptures(48);
 
-// Session ILMS du poste. Le jeton reste en memoire de ce processus : le
-// poste est partage, et un jeton ecrit sur disque survivrait a la fermeture
-// de la session de son porteur.
-const ilmsSession = new IlmsSessionStore();
-// Le journal, lui, est durable : une demande acceptee ici doit survivre a
-// une coupure, sinon le poste acquitterait un pret qu'ILMS n'a jamais recu.
-let ilmsJournal = null;
-// Null quand le journal est illisible : l'interface doit pouvoir le dire,
-// et une exception ici empecherait toute reponse, y compris celle qui
-// explique la panne.
-function circulationClient() {
-  try {
-    if (!ilmsJournal) ilmsJournal = new IlmsCirculationJournal(path.join(dataRoot, "ilms-journal.db"));
-  } catch {
-    ilmsJournal = null;
-    return null;
-  }
-  return new IlmsCirculationClient({journal: ilmsJournal, getSession: () => ilmsSession.session ?? {}});
-}
-
-// Interface ILMS embarquée. Elle tourne sur son propre serveur local parce
-// que l'application Angular appelle son API en chemins relatifs (`/api/...`),
-// là où le poste a déjà son API : lui donner son port, c'est reproduire le
-// montage de production sans modifier une ligne de l'ILMS.
-const ilmsRoot = resolveIlmsRoot({
-  root,
-  override: process.env.BIBLIORFID_ILMS_DIR || "",
-});
-let ilmsOrigin = "";
-// La consultation suit la bibliotheque de l'operateur. Sans session ouverte,
-// le compte de service conserve son usage non surveille et sa propre portee.
-const ilmsClient = new IlmsClient(db, {
-  getSession: () => ilmsSession.signedIn ? { ...ilmsSession.session, generation: ilmsSession.generation } : null,
-});
-
-/** Ce que l'interface du poste doit savoir pour proposer l'onglet ILMS. */
-function ilmsStatus() {
-  const gatewayUrl = db.getSetting("ilms_gateway_url", "");
-  return {
-    available: Boolean(ilmsRoot),
-    gatewayUrl,
-    origin: ilmsOrigin,
-    configured: Boolean(ilmsRoot && gatewayUrl && ilmsOrigin),
-    username: db.getSetting("ilms_username", ""),
-    libraryId: db.getSetting("ilms_library_id", ""),
-    // Le mot de passe du compte de service ne sort pas de la base.
-    passwordSet: Boolean(db.getSetting("ilms_password", "")),
-    clientReady: ilmsClient.configured,
-  };
-}
 const marker = "__RFID_JSON__";
 const EMPTY_EPC = "000000000000000000000000";
 let simulatedTag = {
@@ -120,6 +67,8 @@ const announcedTags = new Map();
 const pendingActivityTags = new Set();
 let presenceSessionId = 0;
 const eventClients = new Set();
+/** Les pages servies par la passerelle, abonnées à l'agent lecteur. */
+const agentClients = new Set();
 const presenceTimeoutMs = 450;
 const visualReleaseDelayMs = 200;
 const configuredRearmDelayMs = storedRearmDelayMs(
@@ -303,6 +252,13 @@ function broadcastSnapshot(force = false) {
   if (!force && signature === lastPresenceSignature) return;
   recordPresenceChange(snapshot, signature);
   for (const client of eventClients) sendEvent(client, "snapshot", snapshot);
+  if (!agentClients.size) return;
+  // L'agent ne voit que le matériel : l'instantané complet porte le livre, le
+  // lecteur et le badge reconnus par la base LOCALE du poste, qui n'est pas la
+  // référence du catalogue. Les laisser sortir ferait afficher à l'écran de la
+  // passerelle un titre qu'elle ignore.
+  const publique = publicSnapshot(snapshot);
+  for (const client of agentClients) sendEvent(client, "snapshot", publique);
 }
 
 function scheduleBroadcast(delay = 140) {
@@ -806,6 +762,75 @@ async function handlePhoneCameraPublicRequest(request, response, url) {
   }
 }
 
+/** Les origines que l'agent sert, telles qu'elles sont réglées. */
+function agentOrigins() {
+  const regle = db.getSetting("agent_origins", "");
+  return parseAgentOrigins(regle || DEFAULT_AGENT_ORIGINS);
+}
+
+/**
+ * L'agent lecteur : la seule surface publique du poste.
+ *
+ * <p>Elle est placée <b>avant</b> la porte d'authentification, et c'est
+ * volontaire : l'opérateur est authentifié par la passerelle, pas ici. C'est
+ * donc le contrôle d'origine qui tient lieu de porte, et il doit rester la
+ * première chose que fait cette fonction.
+ *
+ * <p>Lecture seule. Toute écriture — encodage, désencodage, réglage — reste
+ * derrière la session du poste : une page distante ne doit pas pouvoir
+ * réécrire un tag.
+ */
+function agent(request, response, url) {
+  const origine = allowOrigin(request.headers.origin, agentOrigins());
+  if (!origine) {
+    // Sans en-tête `Access-Control-Allow-Origin`, le navigateur refusera de
+    // toute façon la réponse ; le 403 est là pour que le journal du poste dise
+    // franchement ce qui s'est passé.
+    return json(response, 403, { error: "Origine non autorisée." });
+  }
+
+  if (request.method === "OPTIONS") {
+    response.writeHead(204, {
+      ...agentHeaders(origine, "text/plain"),
+      "Access-Control-Allow-Methods": "GET, OPTIONS",
+      "Access-Control-Max-Age": "600",
+    });
+    return response.end();
+  }
+
+  if (request.method !== "GET" || url.pathname !== AGENT_EVENTS_PATH) {
+    response.writeHead(404, agentHeaders(origine, "application/json"));
+    return response.end(JSON.stringify({ error: "Route inconnue." }));
+  }
+
+  response.writeHead(200, {
+    ...agentHeaders(origine, "text/event-stream; charset=utf-8"),
+    Connection: "keep-alive",
+    "X-Accel-Buffering": "no",
+  });
+  response.flushHeaders?.();
+  agentClients.add(response);
+  sendEvent(response, "snapshot", publicSnapshot(currentSnapshot()));
+
+  const keepAlive = setInterval(() => response.write(": ping\n\n"), 15000);
+  request.on("close", () => {
+    clearInterval(keepAlive);
+    agentClients.delete(response);
+  });
+
+  // Le lecteur se connecte sur la connexion réglée du poste : la page distante
+  // ne choisit pas le port série ni l'adresse du lecteur, qui sont des choses
+  // du poste et resteraient réglables à distance si on les prenait de l'URL.
+  ensureReaderConnection(
+    normalizeConnection({
+      type: db.getSetting("connection_type", "usb"),
+      endpoint: db.getSetting("connection_endpoint", ""),
+    }),
+  )
+    .then(() => sendEvent(response, "snapshot", publicSnapshot(currentSnapshot())))
+    .catch((error) => sendEvent(response, "reader-error", { error: error.message }));
+}
+
 async function api(request, response, url) {
   const pathname = url.pathname;
 
@@ -853,23 +878,6 @@ async function api(request, response, url) {
   request.authUser = user;
   if (request.method === "GET" && pathname === "/api/auth/me")
     return json(response, 200, { authenticated: true, user });
-
-  // Prefixes precis, et non `/api/ilms` : l'ILMS embarque sert deja
-  // `/api/ilms/status`, `/settings` et `/copies/by-tag` sous ce prefixe, et
-  // les avaler ici les ferait repondre 404.
-  if (
-    pathname.startsWith("/api/ilms/session") ||
-    pathname.startsWith("/api/ilms/journal")
-  )
-    return handleIlmsRequest({
-      request,
-      response,
-      url,
-      session: ilmsSession,
-      client: circulationClient(),
-      json,
-      readBody,
-    });
 
   if (pathname.startsWith("/api/cataloguing"))
     return handleCataloguingRequest({
@@ -1075,30 +1083,12 @@ async function api(request, response, url) {
   const borrowMatch = pathname.match(/^\/api\/books\/(\d+)\/borrow$/);
   if (borrowMatch && request.method === "POST") {
     const result = db.borrowBook(borrowMatch[1], await readBody(request));
-    // Le pret local est deja enregistre : le report vers ILMS ne peut plus
-    // l’empecher. Une coupure laisse la demande au journal, elle partira.
-    const ilms = await mirrorCheckout({
-      client: circulationClient(),
-      session: ilmsSession,
-      book: db.getBook(borrowMatch[1]),
-      subscriber: db.getSubscriber(result.loan.subscriber_id),
-      dueAt: result.loan.due_at,
-      // Identifiant durable du pret local : le reutiliser rend l’envoi
-      // idempotent, un rejeu ne cree donc pas un second pret dans ILMS.
-      operationId: result.loan.server_id,
-    });
-    return json(response, 201, { ...result, ilms });
+    return json(response, 201, result);
   }
   const returnMatch = pathname.match(/^\/api\/books\/(\d+)\/return$/);
   if (returnMatch && request.method === "POST") {
-    const book = db.getBook(returnMatch[1]);
     const result = db.returnBook(returnMatch[1]);
-    const ilms = await mirrorReturn({
-      client: circulationClient(),
-      session: ilmsSession,
-      book,
-    });
-    return json(response, 200, { ...result, ilms });
+    return json(response, 200, result);
   }
   if (bookMatch && request.method === "GET") {
     const book = db.getBook(bookMatch[1]);
@@ -1144,47 +1134,6 @@ async function api(request, response, url) {
       connection_endpoint: connection.endpoint,
     });
     return json(response, 200, db.settings());
-  }
-  if (request.method === "GET" && pathname === "/api/ilms/status")
-    return json(response, 200, ilmsStatus());
-  if (request.method === "PUT" && pathname === "/api/ilms/settings") {
-    const input = await readBody(request);
-    let gatewayUrl;
-    try {
-      gatewayUrl = normalizeGatewayUrl(input.gatewayUrl);
-    } catch (error) {
-      return json(response, 400, { error: error.message });
-    }
-    const settings = {
-      ilms_gateway_url: gatewayUrl,
-      ilms_username: String(input.username ?? "").trim(),
-      ilms_library_id: String(input.libraryId ?? "").trim(),
-    };
-    // Un champ laissé vide conserve le mot de passe déjà enregistré : le
-    // formulaire ne le réaffiche jamais.
-    const password = String(input.password ?? "");
-    if (password) settings.ilms_password = password;
-    db.setSettings(settings);
-    ilmsClient.reset();
-    return json(response, 200, ilmsStatus());
-  }
-  if (request.method === "GET" && pathname === "/api/ilms/copies/by-tag") {
-    if (!ilmsSession.signedIn && !ilmsClient.configured)
-      return json(response, 200, { configured: false, copy: null });
-    try {
-      const copy = await ilmsClient.findCopyByTag({
-        epc: url.searchParams.get("epc") || "",
-        tid: url.searchParams.get("tid") || "",
-        includeDocument: true,
-      });
-      return json(response, 200, { configured: true, copy });
-    } catch (error) {
-      return json(response, error.offline ? 503 : error.status >= 400 && error.status <= 599 ? error.status : 400, {
-        code: "ilms_catalogue",
-        error: error.message,
-        offline: Boolean(error.offline),
-      });
-    }
   }
   if (request.method === "GET" && pathname === "/api/sync/status")
     return json(response, 200, syncService.status());
@@ -1723,6 +1672,8 @@ async function api(request, response, url) {
 const server = http.createServer(async (request, response) => {
   const url = new URL(request.url, "http://localhost");
   try {
+    if (url.pathname.startsWith("/agent/"))
+      return agent(request, response, url);
     if (url.pathname.startsWith("/api/"))
       return await api(request, response, url);
     if (
@@ -1808,16 +1759,6 @@ server.on("listening", () => {
 });
 server.listen(port, listenHost);
 
-// Second serveur, sur la boucle locale uniquement : l'interface ILMS et le
-// relais de sa passerelle n'ont pas à être joignables depuis le réseau.
-const ilmsServer = await startIlmsServer({
-  ilmsRoot,
-  baseUrl: () => db.getSetting("ilms_gateway_url", ""),
-  port: Number(process.env.BIBLIORFID_ILMS_PORT) || port + 10,
-});
-ilmsOrigin = ilmsServer.origin;
-if (ilmsOrigin) console.log(`Interface ILMS disponible sur ${ilmsOrigin}`);
-
 let shuttingDown = false;
 async function shutdown() {
   if (shuttingDown) return;
@@ -1826,6 +1767,8 @@ async function shutdown() {
   clearTimeout(beepTimer);
   for (const client of eventClients) client.end();
   eventClients.clear();
+  for (const client of agentClients) client.end();
+  agentClients.clear();
   syncService.close();
   try {
     await cataloguingService.close();
@@ -1833,7 +1776,6 @@ async function shutdown() {
   try {
     await reader.shutdown();
   } catch {}
-  ilmsServer.server?.close();
   server.close(() => {
     db.close();
     process.exit(0);
