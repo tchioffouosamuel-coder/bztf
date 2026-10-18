@@ -15,7 +15,7 @@ Tu reprends une refonte en cours sur trois dépôts Git distincts, tous sous
 
 **Lis d'abord `sdk/BiblioRFID/docs/REFONTE-ILMS.md`.** C'est la spécification de
 référence : l'inventaire complet des trois sources, les invariants mesurés, le
-contrat matériel, et 21 pièges hérités qui ont chacun coûté un bogue réel. Tout
+contrat matériel, et 25 pièges hérités qui ont chacun coûté un bogue réel. Tout
 ce qui suit s'y appuie.
 
 ## La cible
@@ -32,9 +32,16 @@ référence est `sdk/Nouveau dossier` plus la couche matériel de
 
 ## Ce qui est fait
 
-**BiblioRFID** — toute la couche ILMS retirée (7 418 lignes). 75 tests passent
+**BiblioRFID** — toute la couche ILMS retirée (7 418 lignes). 81 tests passent
 (`npm test`). C'est maintenant un pur service matériel : RFID/UHF, pont, OTA,
 catalogue local, synchronisation.
+
+L'**agent lecteur** a été rétabli (`lib/reader-agent.js`, `GET
+/agent/reader/events`) : il était parti avec la couche ILMS, et sans lui une
+page servie par la passerelle ne voit pas l'antenne. Lecture seule, événements
+nommés `snapshot` / `reader-error`, matériel uniquement — le fonds local du
+poste n'en sort pas. Origines réglées par `agent_origins` (défaut : la
+passerelle seule). Voir §2.5 de la spécification.
 
 **Backend** — la recherche du catalogue est portée en PostgreSQL
 (`tsvector` + `pg_trgm`), avec le barème mesuré de la 3.0 :
@@ -52,14 +59,28 @@ L'invariant « un livre ne peut pas être prêté deux fois » est posé
 **Frontend** — ossature autonome (`bootstrapApplication`, pas de NgModule),
 dix zones en chargement différé, passerelle figée dans `core/gateway`, droits
 de la 3.0 dans `core/auth/rights`, service du lecteur RFID avec son anti-rebond
-dans `core/rfid`. **La zone Catalogue est la seule branchée** et fonctionne.
+dans `core/rfid`. **Les zones Catalogue et Prêts et retours sont branchées** et
+fonctionnent.
+
+La zone **Prêts et retours** tient les sept règles ci-dessous. La carte ouvre la
+session, les livres suivent ; c'est `active_loan`, relu à chaque geste, qui dit
+si le geste est un prêt ou un retour — pas un mode F2/F3 choisi d'avance.
+`core/circulation/circulation.service.ts` ne lève jamais : il rend un état
+(`ok`, `refus`, `inconnu`, `injoignable`). Il n'y a volontairement **pas** de
+`queued` côté écran : le journal durable est celui du poste, et l'écran n'existe
+pas sans la passerelle. 10 essais pilotés au navigateur dans
+`e2e/circulation.spec.mjs`, contre un faux agent qui parle le contrat de
+BiblioRFID.
 
 ## Ce qui reste
 
-1. **Prêts et retours** — la prochaine étape. Les endpoints existent déjà
-   (`/api/v1/libraries/{id}/circulation/rfid/checkouts`, `/returns`,
-   `/members/resolve`, `/copies/resolve`), l'invariant est posé. Il reste
-   l'écran. C'est celui où les règles héritées sont les plus exigeantes.
+1. **Prolongation et annulation**, qui manquent à l'écran Prêts et retours :
+   aucun endpoint RFID ne les porte. `LoanController` expose bien
+   `PUT /loans/{id}/status`, mais une prolongation y passerait sans nouvelle
+   échéance. À trancher côté backend avant de toucher l'écran.
+   Dans le même esprit : la **durée de prêt** est aujourd'hui saisie à l'écran,
+   faute de réglage exposé par la passerelle. Sa place est dans les réglages de
+   la bibliothèque.
 2. **Les huit autres zones** : tableau de bord, lecteurs, récolement, matériel
    RFID, outils, import/export, poste public, comptes. Chacune est une coquille
    qui rappelle en commentaire les règles qu'elle devra tenir.
@@ -102,6 +123,11 @@ qui laissait l'écran bloqué sans aucun résultat. Compiler ne prouve rien.
   PLAYWRIGHT=C:/laragon/www/sdk/BiblioRFID/node_modules/playwright-core/index.mjs \
     node e2e/catalogue.spec.mjs
   ```
+  `e2e/circulation.spec.mjs` va plus loin : il monte en plus un faux agent
+  lecteur qui parle le contrat SSE de BiblioRFID. À reprendre pour toute zone
+  qui touche au lecteur. Contre l'agent **réel**, servir le build et ouvrir
+  `/circulation?library=…&agent=http://127.0.0.1:4310`, après avoir ajouté
+  l'origine du build à `agent_origins` côté poste.
 
 **Ne commite jamais le travail d'autrui.** `library-service` porte du travail
 non committé préexistant (toute la fonctionnalité `LibraryRfid*`, plus
@@ -142,6 +168,14 @@ Elles viennent de la 3.0 et du matériel. Chacune a une raison.
   pas un second prêt.
 - **La disponibilité se relit, ne se mémorise pas.** Promettre un livre qui
   vient de partir est pire qu'une jointure de plus.
-- **Un tag qui disparaît une fraction de seconde reste affiché** : 700 ms côté
-  agent, puis 1,5 s d'anti-rebond visuel. Sinon la liste clignote et les
-  notifications se rejouent.
+- **Un tag qui disparaît une fraction de seconde reste affiché** : 650 ms côté
+  agent (mesuré : `presenceTimeoutMs` 450 + `visualReleaseDelayMs` 200, et non
+  700), puis 1,5 s d'anti-rebond visuel **que l'interface doit tenir
+  elle-même**. Sinon la liste clignote et les notifications se rejouent.
+  Attention : l'agent ne publie que les **changements**. Retirer un tag sur
+  simple expiration d'un minuteur ferait disparaître un livre posé dix minutes
+  sans bouger — la présence suit l'instantané, seule la disparition est
+  retardée.
+
+Ces règles sont tenues par la zone Prêts et retours : s'en servir comme modèle
+pour les zones qui touchent au lecteur (récolement, matériel, poste public).

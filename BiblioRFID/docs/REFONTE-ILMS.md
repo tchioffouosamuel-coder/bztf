@@ -312,13 +312,22 @@ l'application tourne :
 7. si un nouveau TID apparaît : mode **natif** (sonnerie unique gérée par le
    firmware) ou **contrôlé** (marche, maintien configuré, arrêt explicite), puis
    verrou du bip pour ce TID ;
-8. tag considéré retiré après **700 ms** sans nouvelle remontée.
+8. tag considéré retiré après **650 ms** sans nouvelle remontée.
 
-Anti-rebond : 700 ms de présence serveur, puis **1,5 s** d'anti-rebond visuel
-par TID, puis le délai de réarmement configuré. Tant que le tag est présent, le
-verrou sonore ne peut pas expirer. Conséquence à respecter dans l'UI : **la
-disparition transitoire d'un tag ne modifie pas la liste, ne change pas le
-bandeau et ne rejoue pas les notifications** si le tag revient dans ce délai.
+Anti-rebond — **relu dans le code le 18 octobre 2026, et plus court que ce qui
+était écrit ici** : `presenceTimeoutMs` vaut 450 ms et `visualReleaseDelayMs`
+200 ms, soit **650 ms** côté agent, et non 700. Les 1,5 s d'anti-rebond visuel
+ne sont **pas** tenues par l'agent : elles sont à la charge de l'interface, et
+s'ajoutent à ces 650 ms. Vient ensuite le délai de réarmement configuré. Tant
+que le tag est présent, le verrou sonore ne peut pas expirer.
+
+Conséquence à respecter dans l'UI : **la disparition transitoire d'un tag ne
+modifie pas la liste, ne change pas le bandeau et ne rejoue pas les
+notifications** si le tag revient dans ce délai. Et le détail qui coûte un
+bogue : l'agent ne publie **que les changements**. Une interface qui retirerait
+un tag sur simple expiration d'un minuteur ferait disparaître de l'écran un
+livre posé dix minutes sans bouger. La présence suit l'instantané — un tag
+listé annule son minuteur de retrait ; seule la disparition est retardée.
 
 > Mesure utile : la durée audible du buzzer n'est **pas** modulable sur ce
 > firmware, même si la commande est acquittée (21 ms demandé → 21 ms mesuré,
@@ -411,6 +420,38 @@ conserver :
 - connexion TCP restreinte aux **IP littérales privées** (10/8, 172.16/12,
   192.168/16) : l'agent ne doit jamais devenir un relais HTTP ou DNS ;
 - série limitée au motif `COM1`–`COM9999`.
+
+**Rétabli le 18 octobre 2026**, après avoir été retiré avec le reste de la
+couche ILMS au chantier 1. Le manque ne s'est pas vu à la relecture : il s'est
+vu en pilotant l'écran Prêts et retours, qui ne voyait plus l'antenne du tout.
+`/api/reader/events` exige la session du poste et ne porte aucun en-tête
+d'origine — le navigateur n'ouvrait même pas le flux. L'agent n'est pas de
+l'ILMS : c'est du matériel, et le poste reste le seul à pouvoir parler à l'USB.
+
+Ce qui a été remis, et le périmètre qu'il ne doit pas dépasser :
+
+| | |
+|---|---|
+| Route | `GET /agent/reader/events` — **et rien d'autre** |
+| Flux | SSE, événements **nommés** `snapshot` et `reader-error` |
+| Instantané | `epc`, `tid`, `rssi`, `antenna`, plus l'état du lecteur |
+| Écriture | aucune : encodage, désencodage et réglages restent derrière la session du poste |
+| Fonds local | **n'en sort pas** : ni livre, ni abonné, ni badge |
+| Origine | réglage `agent_origins` ; à défaut la passerelle seule |
+
+Le fonds local reste dedans parce que **le poste n'est plus la référence du
+catalogue** : sa base reconnaît encore des livres, et laisser sortir son titre
+ferait afficher à l'ILMS un titre que la passerelle ignore, ou pire, un titre
+périmé. Le poste dit ce que l'antenne voit ; la passerelle dit ce que cela
+signifie. La page résout donc ses tags par `copies/resolve` et
+`members/resolve`.
+
+L'opérateur étant authentifié par la passerelle et non par le poste, **c'est le
+contrôle d'origine qui tient lieu de porte** : il est la première chose que fait
+la route. L'origine demandée est renvoyée telle quelle, jamais `*`, et une
+demande sans en-tête `Origin` est refusée. La connexion du lecteur vient des
+réglages du poste et non de l'URL — prise de l'URL, le port série et l'adresse
+du lecteur deviendraient réglables à distance.
 
 ### 2.6 Autres pièces à garder
 
@@ -577,7 +618,11 @@ Relevés sur les trois sources. Chacun a coûté un bogue réel.
 | Recherche en français sur un fonds anglais | « priere » : 3 livres | synonymes anglais en **mot entier** |
 | Restaurer une sauvegarde | ramène les comptes d'alors, ou aucun | instantané des comptes avant, réinstallation après |
 | Écriture RFID non relue | un TID se retrouve associé au mauvais livre | relire en filtrant le TID, valider sur égalité exacte |
-| Disparition transitoire d'un tag | la liste clignote, les notifications se rejouent | 700 ms serveur + 1,5 s d'anti-rebond visuel par TID |
+| Disparition transitoire d'un tag | la liste clignote, les notifications se rejouent | 650 ms agent + 1,5 s d'anti-rebond visuel par TID, **à la charge de l'interface** |
+| Flux SSE à événements nommés lu par `onmessage` | le gestionnaire par défaut ne reçoit **jamais** rien. Compile, se déploie, et l'écran reste vide sans une ligne d'erreur | s'abonner par nom (`snapshot`, `reader-error`) ; un flux ne se relit pas, il s'écoute |
+| Tag retiré sur simple expiration d'un minuteur | l'agent ne publie que les **changements** : un livre posé dix minutes sans bouger disparaît de l'écran | la présence suit l'instantané ; seule la disparition est retardée |
+| Écran qui redit une règle de circulation | « déjà emprunté » finit maintenu à deux endroits, et la version de l'écran ment sur ce que la base a décidé | laisser partir la demande et afficher le refus du service, mot pour mot |
+| Bandeau qui garde la dernière mauvaise nouvelle | un rejeu réussi laisse le rouge affiché ; au bout d'une journée le bandeau n'est plus lu | le bandeau porte **le dernier geste**, et se répare donc tout seul |
 | Réglage de durée du buzzer | le firmware produit la même enveloppe sonore | ne pas exposer un réglage sans effet |
 | Agent lecteur ouvert sur une IP quelconque | il devient un relais HTTP/DNS | IP littérales privées seulement |
 | Report de prêt qui lève une exception | une coupure réseau annule un prêt déjà enregistré | renvoyer un **état** (`refused`/`skipped`/`queued`) |
