@@ -470,12 +470,44 @@ Ce qui a été remis, et le périmètre qu'il ne doit pas dépasser :
 
 | | |
 |---|---|
-| Route | `GET /agent/reader/events` — **et rien d'autre** |
+| Route | `GET /agent/reader/events`, et depuis le 21/10/2026 `POST /agent/reader/write` et `POST /agent/reader/erase` |
 | Flux | SSE, événements **nommés** `snapshot` et `reader-error` |
 | Instantané | `epc`, `tid`, `rssi`, `antenna`, plus l'état du lecteur |
-| Écriture | aucune : encodage, désencodage et réglages restent derrière la session du poste |
+| Écriture | **appairée** : origine autorisée *et* clé du poste (`X-Agent-Key`). Les réglages du lecteur, eux, restent derrière la session du poste |
 | Fonds local | **n'en sort pas** : ni livre, ni abonné, ni badge |
 | Origine | réglage `agent_origins` ; à défaut la passerelle seule |
+
+**L'écriture, ouverte le 21 octobre 2026.** La ligne précédente de ce tableau
+disait « Écriture : aucune ». Elle était juste tant qu'aucun écran n'encodait.
+La zone Matériel RFID de l'ILMS encode, et **seul le poste parle à l'USB** :
+maintenir l'interdiction aurait voulu dire encoder dans la fenêtre du poste et
+cataloguer dans celle de l'ILMS, pour un seul geste, à chaque livre. C'est la
+justification qui change, pas la prudence :
+
+- le contrôle d'origine reste la première chose faite, et il ne suffit plus.
+  Une écriture exige en plus la **clé d'appairage** du poste, remise **une seule
+  fois** à sa création (`POST /api/agent/key`), notée sur papier comme la clé de
+  secours de la 3.0, et ensuite seulement attestée par `agent_key_set`. La
+  comparaison est à durée constante ;
+- **fermé par défaut** : sans clé réglée, aucune écriture ne passe. Un poste mis
+  à jour vers une version qui sait écrire ne doit pas s'ouvrir tout seul ;
+- l'agent écrit sur **le tag posé**, et seulement s'il est seul et porte un TID.
+  Il ne choisit ni le contenu — l'EPC vient de la passerelle, qui tient la
+  séquence — ni la connexion du lecteur, qui reste celle réglée sur le poste ;
+- la procédure sûre n'est pas raccourcie : écriture, **relecture en filtrant le
+  TID**, validation sur égalité exacte. Une écriture non vérifiée n'associe
+  jamais le tag ;
+- **aucune écriture ne touche le catalogue local.** Le poste dit ce que
+  l'antenne a accepté ; c'est la passerelle qui enregistre. La frontière du
+  §2.5 tient donc toujours : le poste parle du matériel, la passerelle dit ce
+  que cela signifie ;
+- lire n'abîme rien : le flux de présence, lui, ne demande toujours que
+  l'origine.
+
+Éprouvé contre un vrai poste (`tests/agent-write-smoke.mjs`, 9 essais) : base
+jetable, connexion simulée, origine étrangère refusée, écriture fermée sans clé,
+clé illisible après sa remise, écriture relue, désencodage refusé sur un autre
+TID, et réouverture impossible après retrait de la clé.
 
 Le fonds local reste dedans parce que **le poste n'est plus la référence du
 catalogue** : sa base reconnaît encore des livres, et laisser sortir son titre
