@@ -27,7 +27,7 @@ branchées ; deux l'étaient déjà.
 | Récolement | branché | lot 4 |
 | Outils | branché | lot 5 |
 | Import et export | branché | lot 6 |
-| Poste public | **partiel** | lot 7 |
+| Poste public | branché | lot 7, complété au lot C |
 | Comptes | **partiel** | lot 8 |
 
 En ligne, non fusionné :
@@ -143,22 +143,82 @@ refus d'annuler un import prêté), `src/test/manual/run-restore-smoke.ps1`
 habilitation accordée après la sauvegarde qui survit, une habilitation retirée
 qui ne revient pas), et `ilms/e2e/maintenance.spec.mjs` (12 essais).
 
-### Lot C — Le kiosque (poste public)
+### Lot C — Le kiosque (poste public) — **fait**
 
-`kiosque.py` fait 1 502 lignes et n'a aucun équivalent. C'est l'écran que voit
-le lecteur : recherche, vitrine de nouveautés, thèmes, coups de cœur.
+L'écran que voit le lecteur existe : `/kiosque?library=<id>`, à ouvrir en
+plein écran sur l'ordinateur du hall. Recherche, fiche avec **où trouver le
+livre**, coups de cœur, nouveautés, « à découvrir », thèmes.
 
-La zone « Poste public » livrée au lot 7 regarde **la fréquentation** du
-kiosque, pas le kiosque lui-même. Les deux manques à combler :
+**Une route de l'ILMS, pas une application à part.** Une seconde application
+aurait dupliqué la configuration de la passerelle, les jetons de thème et la
+chaîne de construction, pour un seul écran. La coquille s'efface d'elle-même
+sur cette adresse (`AppComponent.plein`) : ni barre, ni bandeau, ni demande de
+connexion.
 
-- l'écran public (application à part, ou route de l'ILMS en plein écran) ;
-- les **coups de cœur** et les **réglages de l'écran libre** : table à créer
-  côté passerelle, aucune n'existe.
+**Sans session, et c'est le propos.** Les lectures passent par
+`/api/v1/online/kiosk/**`, déjà `permitAll` côté service. Il a fallu ouvrir la
+même porte côté navigateur : l'intercepteur de session refusait toute adresse
+finissant par `/libraries/<id>/…` quand aucune session n'était ouverte —
+**avant même de partir**. L'exemption est nommée, et testée sur le *chemin*
+seul : une recherche dont le terme contiendrait `/api/v1/online/` ne doit pas
+désarmer le contrôle de portée.
 
-Règle à ne pas perdre : **le poste public ne doit jamais figer**. En 3.0 ses
-lectures passaient par un fil séparé ; ici, cela veut dire qu'une passerelle
-lente ne doit pas bloquer l'écran, et qu'il faut un état affichable sans
-réseau.
+Deux tables ont été créées, comme prévu : `kiosk_settings` (un réglage d'écran
+par bibliothèque) et `kiosk_picks` (les coups de cœur). Trois décisions prises
+en chemin :
+
+1. **Un coup de cœur porte une NOTICE, pas un exemplaire.** La 3.0
+   enregistrait un code-barres et devait ensuite vérifier à chaque lecture
+   qu'un autre exemplaire de la même œuvre n'était pas déjà en vitrine — tout
+   son `dans_selection` ne fait que cela. Ici l'œuvre est une ligne : un index
+   unique partiel suffit, et la question ne se pose plus.
+2. **Les réglages ont leur table plutôt que six colonnes sur `libraries`.**
+   Ce sont les réglages d'un *écran*, pas des propriétés de la bibliothèque ;
+   une bibliothèque sans poste public n'a pas de ligne, et c'est la bonne
+   façon de le dire.
+3. **« En rayon » se calcule avec la même expression qu'au comptoir.** Si le
+   poste public et la circulation comptaient différemment, un lecteur verrait
+   « disponible » sur un livre que l'opérateur sait sorti.
+
+**La règle tenue : le poste public ne jamais figer.** Elle se traduit par
+quatre choses, chacune éprouvée au navigateur :
+
+- l'accueil part en **un seul appel** — six requêtes, c'est six occasions de
+  laisser l'écran à moitié rempli devant un lecteur ;
+- chaque vitrine a **son propre délai et son propre filet** : celle qui
+  n'aboutit pas revient vide, les autres s'affichent ;
+- le **dernier accueil connu est gardé dans l'appareil**. Passerelle coupée,
+  l'écran continue de montrer le fonds et dit seulement depuis quand ;
+- la recherche part **après** la frappe et ne bloque jamais le clavier ; le
+  journal des recherches attend son tour et repart par lots.
+
+Côté administration, la zone « Poste public » ne se contente plus de regarder
+la fréquentation : elle règle l'écran (titre, mot d'accueil, retour à
+l'accueil, vitrines allumées, fenêtre des nouveautés) et tient la vitrine des
+coups de cœur. Elle affiche aussi **l'adresse à ouvrir sur le poste de hall**,
+pour qu'on n'ait pas à la reconstituer.
+
+Un détail qui n'est pas cosmétique : l'écran de réglage réaffiche **ce que la
+passerelle a retenu**, pas ce qui a été tapé. Angular ne retouche pas un champ
+dont l'expression liée n'a pas changé — taper `0` dans une durée qui valait
+déjà 120 laissait `0` affiché comme s'il avait été accepté. Le champ est donc
+réécrit explicitement.
+
+Éprouvé : `run-pure-checks.ps1` (26 contrôles de plus : défauts et bornes des
+réglages), `src/test/resources/db/kiosk_checks.sql` (10 bancs sur cluster
+jetable), `src/test/manual/run-kiosk-queries.ps1` — qui va **chercher les
+requêtes dans les annotations compilées** et les joue telles quelles, parce
+que les requêtes du kiosque sont composées et qu'une concaténation fautive ne
+se voit pas dans les morceaux — et `ilms/e2e/kiosque.spec.mjs` (16 essais,
+dont passerelle coupée, passerelle lente, et absence de session) plus
+`consultation.spec.mjs` porté de 6 à 13 essais.
+
+**Ce qui reste du kiosque.** La 3.0 proposait au lecteur de **suggérer un
+achat** quand un livre manque (`kiosque.py`, `suggerer`), et dessinait le
+**plan de l'étagère** avec le bloc en surbrillance. Ni l'un ni l'autre n'est
+repris ici : la suggestion demande une table et un écran de traitement côté
+administration, et le plan dépend de la maille « bloc » — la décision n° 1
+ci-dessous, toujours ouverte.
 
 ### Lot D — Le service mobile
 
@@ -282,7 +342,7 @@ Plus petits, et sans dépendance entre eux.
 Rien de ce qui suit ne demande de connexion au serveur de production.
 
 ```bash
-# Frontend : 14 suites, 121 essais pilotés au navigateur
+# Frontend : 15 suites, 144 essais pilotés au navigateur
 cd ilms && npx ng build --configuration development
 PLAYWRIGHT=C:/laragon/www/sdk/BiblioRFID/node_modules/playwright-core/index.mjs \
   node e2e/<zone>.spec.mjs
@@ -303,6 +363,12 @@ library-service\src\test\manual\run-restore-smoke.ps1
 psql -f db/functions/library_normalize.sql -f db/functions/library_quality.sql
 psql -f src/test/resources/db/<zone>_fixtures.sql \
      -f src/test/resources/db/<zone>_checks.sql
+```
+
+```powershell
+# Les requetes du poste public, lues dans les annotations compilees et jouees
+# telles quelles. Le script monte son propre cluster.
+library-service\src\test\manual\run-kiosk-queries.ps1
 ```
 
 **Exécute ce que tu écris.** Sur ce chantier, quatre défauts n'ont été trouvés
