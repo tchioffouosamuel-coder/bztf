@@ -79,26 +79,69 @@ touchant titre, auteur, cote ou ISBN doit reconstruire les colonnes de
 recherche — c'est tenu par un déclencheur depuis le chantier 2, donc **ne pas
 le refaire dans le code**.
 
-### Lot B — Sauvegardes, restauration, vidage
+### Lot B — Sauvegardes, restauration, vidage — **fait**
 
-**Pourquoi ensuite.** Aucune bibliothèque ne doit exploiter un fonds qu'elle
-ne sait pas restaurer. C'est l'onglet 7 de la 3.0 (`Maintenance`) et il est
-entièrement absent.
+Les quatre pièces sont écrites, et l'onglet Maintenance les porte.
 
-- **sauvegarde `.dump`** : chaque soir par le serveur, une par jour par le
-  premier poste de gestion (verrou serveur `pg_try_advisory_lock`) ;
-- **restauration** : demande le mot de passe du propriétaire et **conserve les
-  comptes actuels** — un instantané des comptes est pris avant, réinstallé
-  après. Sans cela, restaurer ramène les comptes d'alors, ou aucun ;
-- **vidage protégé** du catalogue : confirmation, puis un mot à taper, et une
-  sauvegarde part avant ;
-- **annulation d'un import par son étiquette** : chaque livre importé porte la
-  marque de son lot (`import_lot` en 3.0), ce qui permet de défaire un import
-  entier. Le schéma cible n'a pas cette colonne — à ajouter.
+- **sauvegarde `.dump`** : `pg_dump` lancé par le service lui-même, chaque
+  soir à 23 h. La règle « une par jour » est portée par un `INSERT`
+  conditionnel, pas par `pg_try_advisory_lock` : avec un pool R2DBC la
+  connexion peut être recyclée entre deux requêtes, et le verrou partirait
+  avec elle. Déclenchement manuel depuis l'écran, réservé aux administrateurs.
+- **annulation d'un import par son étiquette** : colonne `import_lot` ajoutée,
+  retrait doux (la notice n'est jamais touchée), **refusée si un livre du lot
+  est encore prêté** — la règle de la 3.0.
+- **restauration** : `pg_restore --clean --if-exists --no-owner
+  --no-privileges --single-transaction`, sous le compte **propriétaire** de la
+  base, dont le mot de passe est saisi à chaque fois. Dans l'ordre : le mot
+  `RESTAURER`, la vérification du compte (un `pg_dump -s` jeté aussitôt), une
+  copie de sécurité qui doit réussir, l'instantané de ce qui ne doit pas
+  voyager dans le temps, puis `pg_restore`, puis la réinstallation.
+- **vidage protégé** : le mot `SUPPRIMER`, une sauvegarde forcée qui doit
+  réussir, puis **une seule instruction** (CTE modifiantes) qui supprime les
+  notices de la bibliothèque — les exemplaires et les prêts partent par
+  cascade.
 
-Question ouverte, posée dès la spécification (§5.6) : **qui porte les
-sauvegardes maintenant que le serveur est en ligne ?** Un job GitLab planifié,
-un `cron` sur l'hôte, ou le service lui-même. À trancher avant d'écrire.
+Trois décisions prises en chemin, qui ne sont pas dans la 3.0 :
+
+1. **Le vidage porte une bibliothèque, pas la base.** Le schéma cible en sert
+   plusieurs là où la 3.0 n'en servait qu'une ; vider « le catalogue » sans
+   dire lequel effacerait le fonds des voisines.
+2. **L'instantané couvre trois tables** : les habilitations
+   (`library_rfid_operators` — l'équivalent ici des comptes de la 3.0 ;
+   l'annuaire lui-même vit dans `auth-service`, que la restauration ne touche
+   pas), les postes RFID déclarés, et le **journal des sauvegardes**, parce
+   qu'il contient la copie de sécurité prise une minute plus tôt. Seules les
+   lignes vivantes sont prises, et chaque table est **vidée** avant d'être
+   réécrite : une habilitation retirée ne revient pas. Les sessions opérateur
+   ne sont pas reprises — une reconnexion vaut mieux qu'une session périmée.
+3. **Le journal d'activité n'est jamais effacé**, même avec « aussi
+   l'historique » : il porte la trace du vidage, et une suppression qui
+   effacerait son propre enregistrement serait exactement ce qu'un journal est
+   là pour empêcher.
+
+Question tranchée (§5.6) : **les sauvegardes sont portées par le service
+lui-même**, pas par un job GitLab ni un `cron` d'hôte. Un planificateur
+interne, protégé par ShedLock, tient la nuit ; la règle « une par jour » vaut
+aussi pour un clic manuel.
+
+Deux limites à connaître, dites dans l'écran :
+
+- **le service doit être redémarré après une restauration** : la base restaurée
+  porte le `databasechangelog` de la sauvegarde, donc peut-être un schéma plus
+  ancien que celui que le code interroge. Seul un redémarrage rejoue les
+  migrations manquantes ;
+- **les prêts partent avec les exemplaires**. `fk_loans_copy_id` est en
+  `ON DELETE CASCADE` : on ne peut pas proposer de les garder, seulement
+  demander à l'opérateur de dire qu'il l'a compris.
+
+Éprouvé : `src/test/manual/run-pure-checks.ps1` (23 contrôles : le mot à taper,
+la lecture de l'URL JDBC), `src/test/resources/db/maintenance_checks.sql`
+(7 bancs sur cluster jetable : portée du vidage, cascades, comptes rendus,
+refus d'annuler un import prêté), `src/test/manual/run-restore-smoke.ps1`
+(18 contrôles de bout en bout, cluster compris : `pg_restore` réel, une
+habilitation accordée après la sauvegarde qui survit, une habilitation retirée
+qui ne revient pas), et `ilms/e2e/maintenance.spec.mjs` (12 essais).
 
 ### Lot C — Le kiosque (poste public)
 
@@ -228,7 +271,7 @@ Plus petits, et sans dépendance entre eux.
 | # | Question | Pourquoi elle bloque |
 |---|---|---|
 | 1 | Le « bloc » de la 3.0 est porté par `shelf_row` : est-ce la bonne maille ? | Le récolement et les étiquettes en dépendent. La spécification laissait la correspondance bloc/série/rang à confirmer. |
-| 2 | Qui porte les sauvegardes, maintenant que le serveur est en ligne ? | Bloque le lot B en entier. |
+| 2 | ~~Qui porte les sauvegardes ?~~ **Tranché : le service lui-même**, par un planificateur interne protégé par ShedLock. Ni job GitLab, ni `cron` d'hôte. | — |
 | 3 | Transport des avis temps réel : WebSocket existant ou RabbitMQ ? | Bloque le lot E, et donc l'exploitation à deux postes. |
 | 4 | Les comptes PBKDF2 du dump : adaptateur de vérification ou réinitialisation ? | Bloque le lot F. |
 
@@ -239,7 +282,7 @@ Plus petits, et sans dépendance entre eux.
 Rien de ce qui suit ne demande de connexion au serveur de production.
 
 ```bash
-# Frontend : 12 suites, 102 essais pilotés au navigateur
+# Frontend : 14 suites, 121 essais pilotés au navigateur
 cd ilms && npx ng build --configuration development
 PLAYWRIGHT=C:/laragon/www/sdk/BiblioRFID/node_modules/playwright-core/index.mjs \
   node e2e/<zone>.spec.mjs
@@ -247,8 +290,14 @@ PLAYWRIGHT=C:/laragon/www/sdk/BiblioRFID/node_modules/playwright-core/index.mjs 
 # Poste : 87 tests unitaires, plus un banc contre un vrai poste
 cd sdk/BiblioRFID && npm test && node tests/agent-write-smoke.mjs
 
-# Règles pures : verdicts du récolement, EPC, étiquettes, contrôle d'un classeur
+# Règles pures : verdicts du récolement, EPC, étiquettes, contrôle d'un
+# classeur, mot à taper avant une opération irréversible, URL JDBC
 library-service\src\test\manual\run-pure-checks.ps1
+
+# Restauration, de bout en bout : le script monte son propre cluster, prend un
+# vrai pg_dump, le rejoue avec pg_restore --clean --single-transaction, et
+# vérifie que les habilitations d'aujourd'hui ont survécu au voyage.
+library-service\src\test\manual\run-restore-smoke.ps1
 
 # Base : un cluster jetable, puis les recettes
 psql -f db/functions/library_normalize.sql -f db/functions/library_quality.sql
