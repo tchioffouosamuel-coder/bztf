@@ -360,17 +360,139 @@ dont la coupure et la reconnexion).
 silence. Ce lot n'utilise ni l'une ni l'autre, mais le défaut reste à trancher
 avant qu'une de ces routes serve vraiment.
 
-### Lot F — Migration des données
+### Lot F — Migration des données — **fait**
 
-Reprendre `sdk/Nouveau dossier/BASE/bztf catalogue migre 2026-09-25.dump`
-(73 223 exemplaires) vers le schéma cible, **avec contrôle du nombre de lignes
-table par table**, comme le faisait `migrer_depuis_sqlite.py` (154 s sur le
-fonds réel).
+Le fonds réel est repris : **50 268 notices, 73 223 exemplaires, 30 936
+mouvements d'historique**, avec contrôle du nombre de lignes table par table.
+Programme dans `library-service/src/main/resources/db/reprise-3.0/`, banc dans
+`src/test/manual/run-reprise-3.0.ps1`, et
+`library-service/docs/REPRISE-FONDS-3.0.md`.
 
-Deux points mesurés à rejouer après migration : les temps du §1.11 de la
-spécification, et les empreintes PBKDF2 des comptes — elles ne sont pas des
-mots de passe à remettre à BCrypt, elles demandent un adaptateur de
-vérification ou une réinitialisation explicite.
+**Le dump est du PostgreSQL, pas du SQLite.** La 3.0 avait déjà fait sa propre
+migration ; `migrer_depuis_sqlite.py` ne servait donc pas de modèle de code,
+seulement de modèle de **discipline** — déclencheurs coupés pendant la copie,
+index reconstruit en une passe, compteurs réavancés, et la fin qui ne pardonne
+pas : « chaque table a le même nombre de lignes des deux côtés ».
+
+**Les quatre décisions, et le relevé qui les a dictées.** Rien ici ne vient
+d'une supposition : le dump a été restauré et mesuré avant d'écrire une ligne.
+
+| Mesure sur le fonds réel | Ce qu'elle décide |
+|---|---|
+| 1 946 œuvres portent **plusieurs titres** parmi leurs exemplaires, 568 plusieurs auteurs, 1 313 plusieurs catégories | la notice est l'**œuvre de la 3.0**, pas un regroupement par titre : regrouper nous-mêmes refait un arbitrage déjà rendu, et le rend autrement |
+| 8 506 œuvres portent un `auteur_sig` **absent** de la table des auteurs, et le champ auteur est une **liste** (36 noms, 672 caractères) | les auteurs sont **dérivés de la liste**, pas repris de la table `auteur` — s'y fier aurait perdu les auteurs de 8 506 œuvres sans rien signaler |
+| 10 465 exemplaires **sans étagère** | ils arrivent hors circulation, donc hors du compte « en rayon » du hall. Presque un livre sur sept : la décision la plus discutable du lot, et c'est pour cela qu'elle est écrite trois fois |
+| **un seul compte** dans tout le dump (`bztf`, PBKDF2, 200 000 itérations) | **la décision n° 4 est tranchée : réinitialisation.** Voir plus bas |
+
+Les identifiants sont **calculés** (`md5(bibliothèque‖genre‖clé)::uuid`), pas
+tirés au hasard : aucune table de correspondance à tenir entre les étapes, et
+la reprise est **rejouable** — relancée, elle réécrit les mêmes lignes au lieu
+d'en créer un second jeu.
+
+**Trois valeurs mesurées ne tiennent pas dans leur colonne cible**, et dans
+les trois cas la valeur complète est conservée ailleurs plutôt que coupée : un
+ISBN de 59 caractères (colonne de 50) partirait dans `general_note`, dix noms
+d'auteur de plus de 150 caractères dans `biography`, une date de publication
+de 42 caractères dans `mention`. Un ISBN tronqué est un ISBN faux, et un ISBN
+faux est pire qu'un ISBN absent.
+
+Sur ce fonds, **deux de ces trois gardes n'ont pas eu à jouer** — le bilan
+rend `0` et `0` — et c'est écrit ainsi exprès. Une garde qui ne se déclenche
+pas n'est pas inutile : c'est une garde dont le bilan prouve qu'elle n'a pas
+eu besoin de mentir.
+
+**Le contrôle, durci.** La 3.0 comparait ce qu'elle avait **lu** à ce qu'elle
+avait **écrit** — deux comptes tenus par le même programme. Ici l'attendu est
+relu de la **source** et l'obtenu de la **cible**, après validation de la
+transaction : un déclencheur qui aurait mangé des lignes se verrait. Trois
+verdicts, un seul fait échouer :
+
+- `EXACT` — le compte attendu, à l'unité ;
+- `ECARTE` — un écart **attendu, avec sa raison écrite** (la raison est
+  obligatoire : un écart sans raison serait un échec déguisé) ;
+- `ECHEC` — un écart non expliqué, et la reprise est déclarée ratée.
+
+**Chaque table source est soit reprise avec son compte, soit déclarée non
+reprise avec sa raison.** Aucune ne disparaît en silence — y compris les
+25 425 mots de vocabulaire, qui sont **reconstruits** et non copiés : copier un
+index, c'est se donner deux vérités dont l'une se taira. C'est le même
+raisonnement qui a fait choisir un déclencheur plutôt qu'un courtier au lot E.
+
+**Ce que le fonds réel a trouvé, et qu'aucun échantillon n'aurait trouvé.**
+La première course du banc **ne finissait pas** :
+`library_document_search_refresh()` interroge
+`document_copies WHERE document_id = NEW.id` à chaque écriture de notice, et
+**aucun index n'existait sur cette colonne** — seulement la clé étrangère
+`fk_document_copy_document`, qui n'en crée pas. Reconstruire l'index de
+50 268 notices demandait 50 268 parcours de 73 223 exemplaires. Corrigé par
+`V1__2026_10_22_0002_index_document_copies_document.xml`, qui pose aussi
+l'index manquant sous `fk_loans_document_id` — en `ON DELETE CASCADE`, lui
+aussi sans index.
+
+C'est la justification de tout le lot : sur un catalogue d'essai de quelques
+dizaines de lignes, ce défaut est **invisible**.
+
+**Décision n° 4 — les empreintes PBKDF2 : réinitialisation.** Le relevé
+tranche la question à la place de l'architecture. Il y a **un** compte dans
+tout le dump. Écrire un adaptateur de vérification PBKDF2 à côté de BCrypt
+pour un unique administrateur, c'est ajouter un second chemin
+d'authentification — « exactement le genre de chemin parallèle où une
+vérification se perd » — et l'y laisser pour toujours. Les empreintes ne sont
+donc pas reprises, et le bilan le **dit** (rang 35) plutôt que de les laisser
+disparaître. C'est de toute façon un geste à faire : le mot de passe 3.0 était
+celui d'une application de bureau, pas d'un service exposé.
+
+**La course réelle du 22 octobre 2026**, cluster jetable, poste de
+développement : **reprise en 104 s** (repère 3.0 : 154 s), chargement du dump
+en 28 s, pose du schéma cible en 10 s. Tous les comptes `EXACT` — 50 268
+notices, 73 223 exemplaires, 30 936 mouvements, 40 729 éditions, 27 802
+auteurs découpés de la liste, 8 125 éditeurs, 107 catégories, 59 étagères — et
+les neuf cohérences à `0` : aucun orphelin, aucun code-barres en double,
+aucune notice sans colonnes de recherche, aucun compteur resté en arrière.
+
+Deux chiffres qu'on relit deux fois : **29 142 mots de vocabulaire**
+reconstruits contre 25 425 en 3.0 — écart attendu, le vocabulaire cible porte
+deux genres (`TITLE` et `AUTHOR`) quand la 3.0 n'en avait qu'un ; et **10 464
+exemplaires hors circulation**, exactement le nombre d'exemplaires sans
+étagère dans la source. Une décision assumée doit se compter.
+
+**Les temps du §1.11 rejoués**, et ils tiennent — `04-chronometrer.sql`, ou le
+banc avec `-Chronometrer` :
+
+| Opération | Plan | Mesuré | Repère 3.0 |
+|---|---|---|---|
+| accès direct par code-barres | index | **0,12 ms** | 0,02 ms |
+| accès direct par cote | index | **0,17 ms** | — |
+| « normal christian life » | fonction du service | **62 / 68 / 64 ms** à chaud | 65 ms |
+| plein texte pondéré | index GIN | **14 ms** | ~60 ms |
+| accueil du poste public | parcours de 73 223 | **97 ms** | 4 à 70 ms |
+
+La recherche complète **tombe sur son repère**, et c'est le chiffre qui compte
+puisque c'est le chemin que l'application emprunte vraiment. Ce qu'on regarde
+n'est d'ailleurs pas la milliseconde — ni la machine ni le volume ne sont ceux
+de la 3.0 — mais le **plan** : c'est ainsi que l'index manquant a été trouvé.
+
+**Un seul écart est un sujet, et il est documenté comme tel.** L'accueil du
+poste public parcourt les 73 223 exemplaires : compter tout en lit forcément
+tout. C'est le **prix mesuré d'une décision du lot C** — « la disponibilité est
+recalculée à chaque lecture, jamais lue d'une colonne », parce que cet écran
+envoie quelqu'un marcher jusqu'au rayon. La 3.0 tenait 4 à 70 ms en lisant sa
+table `theme` pré-calculée, précisément celle que la reprise refuse de
+reprendre. Le chiffre manquait ; il ne manque plus. Trancher entre le cache
+déjà présent côté hall et des compteurs dans `document_metrics` demande de
+savoir combien de postes publics tournent — ce n'est pas de ce lot.
+
+Le second parcours, celui du `LIKE '%christ%'`, **n'est pas un défaut** : le
+GIN trigramme existe et le planeur préfère le parcours à 8,6 % de sélectivité,
+à raison. Et ce n'est pas le chemin de l'application.
+
+**Ce que le lot n'a pas fait.** Les couvertures portées par 41 323 exemplaires ne sont
+pas transportées : `cover_image` reçoit le chemin relatif de la 3.0, et le passage
+au service de médias appartient au lot G, qui porte déjà le rattachement des
+couvertures. L'éditeur, la date et la pagination sont **repris tels quels,
+sans nettoyage** — le fonds contient un ISBN dans la colonne « pages » et un
+nombre à douze chiffres dans « éditeur » ; les corriger ici en silence les
+rendrait introuvables.
 
 ### Lot G — Finitions d'Outils et de Comptes
 
@@ -490,11 +612,19 @@ library-service\src\test\manual\run-notices-checks.ps1
 # « mvn compile » ne couvre pas src/test/manual, et un banc casse n'apparait
 # qu'en CI — c'est arrive une fois.
 library-service\src\test\manual\run-compile-checks.ps1
+
+# La reprise du fonds REEL, de bout en bout : cluster jetable, schema cible
+# pose par la vraie migration, dump 3.0 charge, reprise, puis le controle du
+# nombre de lignes table par table. 12 controles, ~3 minutes, 1,5 Go de place.
+# C'est ce banc qui a trouve l'index manquant sous le declencheur de
+# recherche : sur un catalogue d'essai, ce defaut est invisible.
+library-service\src\test\manual\run-reprise-3.0.ps1 [-Chronometrer]
 ```
 
-**Exécute ce que tu écris.** Sur ce chantier, quatre défauts n'ont été trouvés
+**Exécute ce que tu écris.** Sur ce chantier, cinq défauts n'ont été trouvés
 qu'en lançant le code : un écran de récolement qui ne reprenait pas sa
 campagne après rechargement, un typage qui ne cassait que le build complet,
 une planche d'étiquettes au mauvais format — et un contrôle qui comptait mal
-parce que `"re\s"` vaut « re + espace » en Java depuis la version 15. Aucun ne
-se voyait à la relecture.
+parce que `"re\s"` vaut « re + espace » en Java depuis la version 15 — et
+une reprise de fonds qui ne finissait pas, parce qu'une colonne de clé
+étrangère n'avait pas d'index. Aucun ne se voyait à la relecture.
