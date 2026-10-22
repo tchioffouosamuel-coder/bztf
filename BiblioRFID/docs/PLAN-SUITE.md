@@ -494,6 +494,85 @@ sans nettoyage** — le fonds contient un ISBN dans la colonne « pages » et un
 nombre à douze chiffres dans « éditeur » ; les corriger ici en silence les
 rendrait introuvables.
 
+### Lot H — Le CRUD d'écran et le personnel — **en cours**
+
+Deux manques relevés le 22 octobre 2026 et absents du plan, parce que le plan
+les croyait faits.
+
+**Le CRUD existait côté API et nulle part côté écran.** `DocumentController`,
+`MemberController`, `CategoryController` et `DocumentCopyController` portent
+chacun `POST` / `GET` / `PUT` / `DELETE` depuis le début. Mais l'écran
+Catalogue ne savait que chercher et ajouter, l'écran Lecteurs que consulter et
+associer une carte, et **aucune route ne menait aux catégories** — alors que
+le lot F venait d'en créer 107.
+
+| Écran | État |
+|---|---|
+| **Rayons** (catégories et sous-catégories) | **fait** — 11 essais |
+| **Personnel** | **fait** — 16 essais |
+| Catalogue : modifier et retirer une notice | à faire |
+| Lecteurs : créer, modifier, désactiver | à faire |
+
+**Rayons.** Une sous-catégorie est une catégorie qui porte un parent : même
+fiche, même formulaire, et deux écrans auraient laissé croire à deux tables.
+L'arbre se recompose **côté écran**, la route rendant une liste à plat ; une
+fille dont le parent manque remonte en racine plutôt que de disparaître. Le
+retrait est **chiffré** avant d'être proposé — « supprimer Bible » et
+« supprimer Bible, qui porte 7 090 notices et 2 sous-catégories » n'engagent
+pas la même décision.
+
+> **Et il a fait tomber un défaut du lot F.** L'application fabrique ses slugs
+> avec `Slugify` — des tirets. La reprise utilisait `library_normalize` — des
+> espaces. `getOrCreateCategoryId` cherche par (slug, parent), n'aurait rien
+> trouvé, et **aurait recréé chaque catégorie en double au premier import**.
+> Les 15 racines du fonds réel auraient doublé. Corrigé, avec trois contrôles
+> de plus — c'est leur absence qui avait laissé passer le défaut.
+
+**Le personnel.** Il vivait dans BiblioRFID (table SQLite `staff`, badges,
+passages au portique) et nulle part ici. Porté dans `library-service` : table,
+index, contrôleur, séquence, écran. **Ce n'est pas un lecteur** — un lecteur
+emprunte, un membre du personnel fait emprunter — et les deux ne sont pas
+fondus.
+
+Trois règles reprises de BiblioRFID parce qu'elles y ont été payées : le
+matricule unique **à la casse près**, le refus qui **nomme le porteur**, et le
+départ qui **se désactive** au lieu de se supprimer.
+
+- **La journée est locale, pas UTC.** À Douala (UTC+1), découper en UTC ferait
+  commencer le jour à 01 h locale : une entrée à 00 h 30 tomberait dans la
+  veille et le portique semblerait avoir oublié quelqu'un.
+- **« Présent » = dernière trace DU JOUR est une entrée.** Quelqu'un entré
+  hier et jamais ressorti n'est pas « encore là » : c'est une sortie manquée.
+  L'écran le montre dans la liste avec **sa date**, et ne le compte pas.
+- **Un passage garde le code lu même sans fiche** : un badge inconnu franchit
+  le portique, et perdre son passage effacerait le seul indice de qui est
+  entré.
+
+**Deux défauts trouvés en exécutant.** `ON CONFLICT (operation_id)` ne
+fonctionne **pas** avec un index unique *partiel* ; la clause
+`WHERE operation_id IS NOT NULL` n'achetait rien — les `NULL` échappent déjà à
+l'unicité — et cassait l'idempotence des passages. Index plein, comme `loans`
+depuis le lot D. Et `generateNextNumber` rend un `Mono` **vide** quand la
+séquence manque, sans rien signaler : la création se serait tue.
+
+Éprouvé : `run-staff-checks.ps1` (13 contrôles purs sur le découpage de la
+journée, fuseau **fixé** à Africa/Douala sinon le banc passerait ici et
+échouerait en CI ; 24 contrôles SQL sur cluster jetable, requêtes **extraites
+des annotations réelles** par réflexion), `e2e/categories.spec.mjs` (11) et
+`e2e/personnel.spec.mjs` (16).
+
+**Ce que ce lot n'a pas fait, et qui n'est pas un oubli.** BiblioRFID attend un
+contrat de synchronisation de **quatre routes** vers un serveur configurable —
+`POST /api/v1/devices/register`, `POST /api/v1/sync/push` (sept types
+d'entités par lots de 500), `GET /api/v1/sync?since=`, et
+`POST /api/v1/devices/{id}/report`. **Aucune n'existe**, ni dans
+`library-service`, ni dans `gateway-service`, ni dans `auth-service`. Le
+`server_id` du personnel est gardé dès maintenant comme clef de rapprochement,
+parce que l'ajouter après coup demanderait de rapprocher des fiches à la main —
+mais la synchronisation elle-même est un chantier à part entière.
+
+---
+
 ### Lot G — Finitions d'Outils et de Comptes
 
 Plus petits, et sans dépendance entre eux.
