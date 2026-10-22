@@ -220,25 +220,68 @@ repris ici : la suggestion demande une table et un écran de traitement côté
 administration, et le plan dépend de la maille « bloc » — la décision n° 1
 ci-dessous, toujours ouverte.
 
-### Lot D — Le service mobile
+### Lot D — Le service mobile — **fait**
 
-`mobile.py` + `service_mobile.py`, 1 284 lignes. C'est la pièce la plus
-directement transposable : **c'est déjà une application web**, servie en
-HTTPS, sans magasin d'applications.
+Le plan avait vu juste : il ne restait qu'à en faire une PWA et à brancher la
+caméra. La 3.0 servait son propre serveur web aux téléphones du Wi-Fi, avec
+son autorité de certification à poser sur chaque appareil ; l'ILMS est déjà
+une application web en HTTPS derrière la passerelle, avec sa session et ses
+droits. Rien de cela n'était à refaire.
 
-- pour tous : chercher, voir la couverture, la disponibilité, et **où le livre
-  se range** ; scanner un ISBN ;
-- pour le personnel : fiche d'un livre scanné, prêt, retour, prolongation,
-  annulation, **récolement** d'une étagère ou d'un bloc ;
-- caméra en guise de douchette, douchette Bluetooth et clavier acceptés.
+**L'installation** se fait depuis le navigateur — « Ajouter à l'écran
+d'accueil », pas de magasin, pas de certificat à poser. Le service worker
+garde la coquille pour que l'application s'ouvre au fond d'un magasin sans
+Wi-Fi ; il **ne met jamais une réponse de la passerelle en cache**, parce
+qu'une disponibilité ou un prêt périmés font agir sur un état qui n'existe
+plus. Écrit à la main plutôt que produit par `@angular/pwa` : cette règle est
+la seule qui compte, et elle doit tenir sur un écran.
 
-**Le récolement hors réseau du lot 4 est réutilisable tel quel** : la file
-d'attente, l'horodatage par l'appareil et la clé d'idempotence sont déjà dans
-`ilms/src/app/core/inventory/inventory.service.ts`, et les routes
-`/inventory/campaigns/{id}/scans` acceptent déjà un lot.
+**La caméra** est un seul composant pour les quatre écrans qui prennent un
+code — comptoir, récolement, catalogue, poste public. `BarcodeDetector` quand
+le navigateur l'a ; `zxing.min.js` (336 ko, celui de la 3.0) chargé seulement
+s'il manque, et seulement à l'ouverture de la caméra. Deux modes : simple, et
+**continu** pour récoler une étagère ou poser une pile de retours. Le même
+code ne compte qu'une fois par seconde et demie — une caméra voit vingt fois
+le même code-barres pendant qu'une main tient le livre.
 
-Ce qu'il reste : en faire une PWA (manifeste, service worker), et brancher la
-caméra.
+**Le clavier reste ouvert sous la vidéo.** Ce n'est pas un repli : c'est le
+chemin d'une douchette Bluetooth, et le seul quand la caméra est refusée.
+
+**Ce qu'il a fallu ajouter au service.** Le comptoir est entièrement piloté
+par les tags RFID ; un téléphone n'a pas d'antenne. `RfidTagRequest` accepte
+donc un `code` — l'étiquette imprimée — et deux recherches le prennent après
+le tag : code-barres puis cote pour un exemplaire, numéro pour une carte. Le
+tag d'abord, toujours. **Et rien d'autre ne change** : une fois l'exemplaire
+retrouvé, c'est le même prêt, les mêmes invariants, la même idempotence.
+
+**Un défaut attrapé par les essais, et il valait le banc.** Le premier
+nettoyage d'un code *supprimait* les espaces intérieures. Or
+`library_normalize` transforme toute ponctuation en espace puis fusionne :
+`A-E44-R1-0001` et `A-E44 R1-0001` sont le même code pour la base, mais
+`A-E44R1-0001` ne l'est pas. Un nettoyage plus zélé que celui de la base est
+un nettoyage qui casse la comparaison. Les espaces sont donc fusionnées, pas
+supprimées.
+
+**Ce qui n'a pas eu besoin d'être ajouté.** Scanner un ISBN marche déjà :
+`search_text` contient `isbn`, `isbn13`, `issn`, `ddc`, `oclc` et `upc`. Le
+code entre par la barre de recherche, comme un mot — lui donner une route
+séparée aurait voulu dire deux façons de trouver un livre. Et le récolement
+hors réseau du lot 4 a servi tel quel : la caméra alimente la file existante,
+qui horodate sur l'appareil et rejoue avec sa clé d'idempotence.
+
+Éprouvé : `run-pure-checks.ps1` (24 contrôles de plus : le nettoyage d'un code
+lu), `src/test/resources/db/scan_checks.sql` (7 bancs — la rencontre des deux
+nettoyages, la portée par bibliothèque, l'exemplaire retiré), et
+`ilms/e2e/mobile.spec.mjs` (12 essais, avec une fausse caméra et un
+`BarcodeDetector` simulé : on y éprouve l'anti-rebond, le mode continu, et le
+fait que le comptoir envoie `code` et jamais un EPC inventé).
+
+**Ce qui reste du service mobile.** La **fiche d'un livre scanné** côté
+personnel, telle que `mobile.py` la montrait : aujourd'hui un code scanné
+ouvre une ligne de circulation au comptoir, une recherche au catalogue — ce
+qui couvre l'essentiel sans l'écran dédié. Et le mode continu n'affiche pas de
+compteur de session (« 14 livres depuis l'ouverture »), utile sur un
+récolement long.
 
 ### Lot E — Multi-postes et temps réel
 
@@ -342,7 +385,7 @@ Plus petits, et sans dépendance entre eux.
 Rien de ce qui suit ne demande de connexion au serveur de production.
 
 ```bash
-# Frontend : 15 suites, 144 essais pilotés au navigateur
+# Frontend : 16 suites, 156 essais pilotés au navigateur
 cd ilms && npx ng build --configuration development
 PLAYWRIGHT=C:/laragon/www/sdk/BiblioRFID/node_modules/playwright-core/index.mjs \
   node e2e/<zone>.spec.mjs
@@ -369,6 +412,13 @@ psql -f src/test/resources/db/<zone>_fixtures.sql \
 # Les requetes du poste public, lues dans les annotations compilees et jouees
 # telles quelles. Le script monte son propre cluster.
 library-service\src\test\manual\run-kiosk-queries.ps1
+```
+
+```bash
+# Le service mobile : la rencontre des deux nettoyages d'un code lu.
+psql -f src/main/resources/db/functions/library_normalize.sql \
+     -f src/test/resources/db/scan_fixtures.sql \
+     -f src/test/resources/db/scan_checks.sql
 ```
 
 **Exécute ce que tu écris.** Sur ce chantier, quatre défauts n'ont été trouvés
