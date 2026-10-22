@@ -283,22 +283,82 @@ qui couvre l'essentiel sans l'écran dédié. Et le mode continu n'affiche pas d
 compteur de session (« 14 livres depuis l'ouverture »), utile sur un
 récolement long.
 
-### Lot E — Multi-postes et temps réel
+### Lot E — Multi-postes et temps réel — **fait**
 
-Les trois canaux de la 3.0 — `catalogue`, `index`, `prets` — n'existent sous
-aucune forme. **Deux postes ne se voient pas encore travailler.**
+Deux postes se voient désormais travailler. **La décision n° 3 est tranchée, et
+la réponse n'est aucune des deux options proposées.**
 
-Le choix du transport reste à trancher (§5.3 de la spécification) :
-`RfidWebSocketHandler`, déjà présent dans `infrastructure/rfid/`, ou un
-échange RabbitMQ. Ce qui ne se négocie pas :
+| | Source des avis | Livraison aux postes |
+|---|---|---|
+| **Retenu** | Déclencheur PostgreSQL → `NOTIFY` | Évènements envoyés par le serveur |
+| Écarté | RabbitMQ | WebSocket |
 
-- aucun état partagé en mémoire entre postes ; tout cache est invalidé par les
-  avis ;
-- un seul poste met l'index à jour à la fois ;
-- coupure réseau ou redémarrage : reconnexion seule, lecture rejouée, écriture
-  interrompue **jamais** rejouée à moitié.
+**Pourquoi la base, et pas un courtier.** Les deux options du plan partagent le
+même défaut : c'est le *code* qui doit penser à publier. Ce chantier a déjà payé
+cette leçon — les colonnes de recherche étaient reconstruites par le code en
+3.0, et l'oubli était le bogue le plus courant. Un avis émis par un déclencheur
+ne peut pas être oublié : il part sur un import, une correction à la main en
+`psql`, une restauration. Et il ne part **que si la transaction est validée**,
+ce qu'aucun appel applicatif ne donne gratuitement. C'est d'ailleurs ce que
+faisait la 3.0 ; on reprend le mécanisme, pas l'architecture.
 
-À faire **avant** d'ouvrir une deuxième station de circulation.
+**Pourquoi SSE, et pas un WebSocket.** Le flux va dans un seul sens ; un canal
+de retour ne sert à personne — et le `LibraryWebSocketHandler` déjà présent
+montre ce qui arrive quand il existe : il rediffuse à toute la bibliothèque ce
+qu'un navigateur lui envoie. Surtout, `EventSource` se reconnecte seul : la
+règle « coupure réseau ou redémarrage : reconnexion seule » est tenue **sans
+une ligne de code**, et l'essai 6 le vérifie en coupant le flux pour de bon.
+
+**Un seul avis par transaction, mesuré.** PostgreSQL replie les avis dont le
+couple (canal, contenu) est identique dans une même transaction : 2 000 lignes
+insérées d'un coup sur deux bibliothèques produisent exactement **deux** avis.
+Un import de 73 223 exemplaires en émet un par bibliothèque. C'est pour cela
+que le contenu ne porte que la bibliothèque et le genre — y mettre
+l'identifiant de la ligne ferait un avis par ligne.
+
+**Trois genres** : `catalogue`, `prets`, `vitrine`. Le canal `index` de la 3.0
+n'est pas repris : il servait à son index d'œuvres côté poste, et ici
+`search_text` est tenu par un déclencheur dans la transaction de l'écriture.
+Reproduire un canal qui n'a rien derrière aurait été du mimétisme.
+
+**Qui se rafraîchit, et qui se contente de le dire** — la décision la plus
+discutable du lot :
+
+- le **poste public** se rafraîchit tout seul. Personne ne le tient, aucun
+  geste à interrompre, et un hall qui dormirait sur les chiffres d'hier serait
+  un écran qui ment. Il diffère sa mise à jour si un lecteur regarde une fiche,
+  et l'applique à son retour ;
+- le **catalogue** affiche « le catalogue a changé — relire ». Voir sa liste se
+  réordonner pendant qu'on la lit est pire qu'une liste d'il y a dix secondes ;
+- le **comptoir** pose un bandeau et ne touche à rien, jamais pendant qu'une
+  ligne est en cours. Une ligne qui disparaîtrait pendant qu'un opérateur pose
+  un livre serait un accident.
+
+Les trois invariants du plan :
+
+- *aucun état partagé en mémoire entre postes* — tenu par construction : chaque
+  instance du service écoute la même base et relaie à ses propres postes. Rien
+  à synchroniser, et le nombre d'instances n'a plus d'importance ;
+- *un seul poste met l'index à jour à la fois* — tenu **structurellement**, pas
+  par un verrou : il n'y a plus d'index côté poste. Ajouter un verrou aurait
+  été protéger quelque chose qui n'existe plus ;
+- *reconnexion seule, écriture jamais rejouée à moitié* — la reconnexion est
+  celle du navigateur ; rien n'est rejoué parce qu'un avis ne porte aucune
+  écriture. Un avis perdu pendant une coupure n'a pas besoin d'être rattrapé :
+  un poste qui se reconnecte relit.
+
+Éprouvé : `run-pure-checks.ps1` (22 contrôles de plus : la lecture d'un avis,
+qui arrive par un canal PostgreSQL **ouvert** et n'est donc pas digne de
+confiance), `run-notices-checks.ps1` (7 contrôles sur cluster jetable, avec les
+déclencheurs **extraits de la migration** plutôt que recopiés), et
+`ilms/e2e/temps-reel.spec.mjs` (9 essais avec un vrai flux `text/event-stream`,
+dont la coupure et la reconnexion).
+
+**Ce qui reste, et qui n'est pas de ce lot.** `WebSocketConfig` et
+`RfidWebSocketConfig` déclarent toutes deux un bean nommé `handlerAdapter` ;
+`allow-bean-definition-overriding` étant à `true`, l'une des deux gagne en
+silence. Ce lot n'utilise ni l'une ni l'autre, mais le défaut reste à trancher
+avant qu'une de ces routes serve vraiment.
 
 ### Lot F — Migration des données
 
@@ -375,7 +435,7 @@ Plus petits, et sans dépendance entre eux.
 |---|---|---|
 | 1 | Le « bloc » de la 3.0 est porté par `shelf_row` : est-ce la bonne maille ? | Le récolement et les étiquettes en dépendent. La spécification laissait la correspondance bloc/série/rang à confirmer. |
 | 2 | ~~Qui porte les sauvegardes ?~~ **Tranché : le service lui-même**, par un planificateur interne protégé par ShedLock. Ni job GitLab, ni `cron` d'hôte. | — |
-| 3 | Transport des avis temps réel : WebSocket existant ou RabbitMQ ? | Bloque le lot E, et donc l'exploitation à deux postes. |
+| 3 | ~~Transport des avis temps réel ?~~ **Tranché : ni l'un ni l'autre.** Déclencheur PostgreSQL `NOTIFY` pour la source, évènements envoyés par le serveur pour la livraison. Voir le lot E. | — |
 | 4 | Les comptes PBKDF2 du dump : adaptateur de vérification ou réinitialisation ? | Bloque le lot F. |
 
 ---
@@ -385,7 +445,7 @@ Plus petits, et sans dépendance entre eux.
 Rien de ce qui suit ne demande de connexion au serveur de production.
 
 ```bash
-# Frontend : 16 suites, 156 essais pilotés au navigateur
+# Frontend : 17 suites, 165 essais pilotés au navigateur
 cd ilms && npx ng build --configuration development
 PLAYWRIGHT=C:/laragon/www/sdk/BiblioRFID/node_modules/playwright-core/index.mjs \
   node e2e/<zone>.spec.mjs
@@ -419,6 +479,17 @@ library-service\src\test\manual\run-kiosk-queries.ps1
 psql -f src/main/resources/db/functions/library_normalize.sql \
      -f src/test/resources/db/scan_fixtures.sql \
      -f src/test/resources/db/scan_checks.sql
+```
+
+```powershell
+# Les avis de changement : combien en part-il vraiment ? Le script monte son
+# cluster et extrait les declencheurs de la migration.
+library-service\src\test\manual\run-notices-checks.ps1
+
+# Et la garde qui manquait : compile TOUS les bancs manuels sans les lancer.
+# « mvn compile » ne couvre pas src/test/manual, et un banc casse n'apparait
+# qu'en CI — c'est arrive une fois.
+library-service\src\test\manual\run-compile-checks.ps1
 ```
 
 **Exécute ce que tu écris.** Sur ce chantier, quatre défauts n'ont été trouvés
