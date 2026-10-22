@@ -510,8 +510,44 @@ le lot F venait d'en créer 107.
 |---|---|
 | **Rayons** (catégories et sous-catégories) | **fait** — 11 essais |
 | **Personnel** | **fait** — 16 essais |
-| Catalogue : modifier et retirer une notice | à faire |
-| Lecteurs : créer, modifier, désactiver | à faire |
+| **Modifier une notice** | **fait** — 11 essais |
+| **Fiche d'un lecteur** | **fait** — 11 essais |
+
+Les quatre écrans sont livrés. Et chacun a fait tomber un défaut du service
+qu'une relecture n'aurait pas montré.
+
+**Retirer une notice effaçait son historique de circulation.** Suppression
+dure, et presque toutes les clés étrangères vers `documents` en
+`ON DELETE CASCADE`. Mesure du banc : une seule notice retirée faisait passer
+les exemplaires de 3 à 0 et les prêts de 2 à 0. Corrigé — retrait doux, refusé
+tant qu'un exemplaire est sorti.
+
+**Aucun lecteur du fonds réel n'était supprimable.**
+`fk_membership_cards_member_id` n'a aucune cascade, et la reprise du lot F a
+créé une carte pour *chaque* lecteur : la base répondait
+`violates foreign key constraint`. Et la garde précédente interdisait le
+retrait à quiconque avait emprunté une fois dans sa vie — un doublon de saisie
+était incorrigible à jamais. Corrigé de la même façon.
+
+> **Deux routes d'écriture remplacent TOUT**, vérifié sur les mappers générés :
+> `PUT /notice/{id}` et `PUT /members/{id}` assignent chaque champ sans
+> condition, donc un champ absent de la requête est écrit à `NULL`. Les deux
+> écrans relisent donc la fiche entière et **renvoient tout** — vingt champs
+> pour une notice, douze pour un lecteur, dont des dates que l'écran n'affiche
+> même pas. Sans cela, corriger un titre effacerait l'ISBN, et corriger un nom
+> effacerait l'ancienneté du lecteur. La recomposition vit dans une fonction
+> nommée (`composer()`), et un essai compte les champs un par un.
+
+**Et un motif, pas un incident : trois routes de lecture à ajouter.** Pour les
+catégories, les notices et les lecteurs, la route existante passait par
+**Elastic** — que le fonds repris ne peuplera jamais, puisqu'il a été écrit
+directement en base. Les trois rendaient vide sur le fonds réel. Chaque fois il
+a fallu une route `/edition` lisant PostgreSQL.
+
+Reste une friction assumée : la **nationalité** est `@NotNull` côté service
+alors que la colonne est nullable en base. Les lecteurs repris n'en ont aucune,
+donc la première modification de chacun en réclamera une. L'écran le dit en
+couleur ; si c'est de trop, c'est le DTO qu'il faut changer.
 
 **Rayons.** Une sous-catégorie est une catégorie qui porte un parent : même
 fiche, même formulaire, et deux écrans auraient laissé croire à deux tables.
