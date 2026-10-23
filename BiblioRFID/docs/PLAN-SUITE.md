@@ -714,7 +714,7 @@ Plus petits, et sans dépendance entre eux.
 | 1 | Le « bloc » de la 3.0 est porté par `shelf_row` : est-ce la bonne maille ? | Le récolement et les étiquettes en dépendent. La spécification laissait la correspondance bloc/série/rang à confirmer. |
 | 2 | ~~Qui porte les sauvegardes ?~~ **Tranché : le service lui-même**, par un planificateur interne protégé par ShedLock. Ni job GitLab, ni `cron` d'hôte. | — |
 | 3 | ~~Transport des avis temps réel ?~~ **Tranché : ni l'un ni l'autre.** Déclencheur PostgreSQL `NOTIFY` pour la source, évènements envoyés par le serveur pour la livraison. Voir le lot E. | — |
-| 4 | Les comptes PBKDF2 du dump : adaptateur de vérification ou réinitialisation ? | Bloque le lot F. |
+| 4 | ~~Les comptes PBKDF2 du dump : adaptateur ou réinitialisation ?~~ **Tranché par les données : réinitialisation.** Il y a **un seul** compte dans tout le dump. Un adaptateur PBKDF2 à côté de BCrypt serait un second chemin d'authentification permanent, pour un unique administrateur. Voir le lot F. | — |
 
 ---
 
