@@ -615,14 +615,55 @@ Plus petits, et sans dépendance entre eux.
 
 **Outils** :
 
-- rattachement des couvertures. En 3.0 il lisait des dossiers d'images sur le
-  disque du poste ; la passerelle n'a pas ce disque et les images passent par
-  le service de médias. Les règles à reprendre : le chemin fait foi, un
-  nettoyeur **dédié aux chemins** (le général fusionne les espaces et rend un
-  fichier introuvable), rattachement par nom **seulement si le fichier n'a
-  aucune colonne d'image**, et **titre seul désactivé par défaut** — mesuré
-  sur le fonds réel, il se trompait une fois sur deux ;
-- renommage d'une catégorie dans tout le catalogue ;
+- **rattachement des couvertures — les règles sont faites, le transport
+  non.** Voir `library-service/docs/COUVERTURES.md`.
+
+  Une route `/images/affiliate` existait déjà, avec trois conventions — ISBN,
+  cote, et « le nom correspond à la colonne image ». Aucune ne reconnaissait
+  celle des 41 323 fichiers du 3.0
+  (`OEU-xxxxx__titre-slug__auteur-slug.jpg`). Elles sont **cinq**
+  maintenant, et les deux ajoutées sont celles de la 3.0.
+
+  **L'identifiant se recalcule, et c'est le gain direct du lot F.** La reprise
+  a calculé les identifiants — `md5(bibliothèque‖'|oeuvre|'‖clé)::uuid` — donc
+  un fichier `OEU-02212__…` désigne une notice dont l'identifiant **se
+  recalcule**. Le rattachement par identifiant est une lecture par clé
+  primaire, là où il aurait fallu tenir une table de correspondance.
+
+  > **Le piège écarté avant d'être payé.** `UUID.nameUUIDFromBytes` calcule
+  > bien un MD5 mais **force les bits de version** : elle ne rend pas la même
+  > valeur que `md5(...)::uuid`. Le rattachement aurait échoué **en silence**
+  > sur les 41 323 fichiers — aucune exception, aucune correspondance. Les
+  > valeurs attendues du banc ont été relevées sur un cluster, pas déduites.
+
+  **Les quatre règles du plan, vérifiées dans la source 3.0** plutôt que
+  reprises de mémoire — et une cinquième qu'il ne disait pas :
+
+  | Règle | Ce que la source montre |
+  |---|---|
+  | le chemin fait foi | `resoudre_chemin` : deux sortes de barres, guillemets, `file:///`, et le chemin d'un **autre poste** rattrapé sous le `COUVERTURES` local |
+  | nettoyeur dédié | `chemin_propre` ne touche qu'aux bords ; `nz` fusionne les espaces intérieures et rendrait introuvable un fichier à double espace |
+  | par nom seulement sans image | la requête ne prend que `image IS NULL OR image=''` sauf `--remplacer` |
+  | titre seul désactivé | **non reprise du tout** : une règle juste une fois sur deux n'est pas une règle, et un drapeau finit par être activé « pour voir » |
+  | *(non dit par le plan)* | **l'ambiguïté se compte, elle ne se tranche pas.** Les slugs sont tronqués (40 et 20 caractères) dans les noms de fichier, donc deux titres qui ne diffèrent qu'après 40 caractères tombent sur la même clé |
+
+  **Et l'index qui manquait, trouvé à la première lecture du code.** La règle
+  « colonne image » appelait `findWithCoverImage(libraryId)` — tous les
+  documents portant une image — puis filtrait en mémoire, **une fois par
+  fichier**. Sur le fonds réel : 41 323 fichiers × ~41 000 notices, et 41 323
+  parcours de table. Le rattachement n'aurait pas fini.
+
+  Éprouvé : `CoverFileNameChecks.java` (28 contrôles au JDK seul) et
+  `run-cover-affiliation-checks.ps1` (15 contrôles sur **20 006 notices** — avec
+  dix lignes le planificateur parcourrait la table et il aurait raison).
+
+  **Ce qui reste** : le transport des 41 323 fichiers vers le service de médias
+  — un geste d'opérateur, qui ne peut pas tourner sur la passerelle — et
+  l'écran, qui porte encore un paragraphe d'excuse. La route répond déjà en
+  **essai à blanc** par défaut, ce qui est le bon comportement : on montre ce
+  qui serait rattaché avant d'écrire ;
+- renommage d'une catégorie dans tout le catalogue — **l'écran Rayons le fait
+  désormais** (lot H) ;
 - corrections de masse des inversions titre/auteur et des auteurs factices.
   Écartées au lot 5 parce qu'ici **l'auteur est une entité, pas un texte** :
   l'échange demanderait de créer ou de détruire des fiches d'auteur. À
