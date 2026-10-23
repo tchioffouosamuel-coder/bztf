@@ -657,11 +657,49 @@ Plus petits, et sans dépendance entre eux.
   `run-cover-affiliation-checks.ps1` (15 contrôles sur **20 006 notices** — avec
   dix lignes le planificateur parcourrait la table et il aurait raison).
 
+  **L'écran est fait.** Il remplace le paragraphe d'excuse de la zone Outils, et
+  garde l'ordre qui compte : **essai à blanc, lecture, puis application**. Le
+  bouton d'application n'apparaît qu'après un essai et annonce le nombre exact ;
+  changer de dossier le retire, sinon on appliquerait le compte-rendu d'un autre
+  lot.
+
+  > **Le navigateur donne les noms, pas les fichiers.** Choisir un dossier fait
+  > lire la liste de ses fichiers, et l'écran ne garde que `fichier.name` — tout
+  > ce dont le rattachement a besoin. 41 323 images font plusieurs gigaoctets :
+  > les téléverser pour découvrir *ensuite* que la convention de nommage n'a pas
+  > tenu serait une soirée perdue.
+
+  Deux entrées, et c'est une correction plutôt qu'une redondance : la première
+  version n'offrait que le choix d'un dossier entier, ce qui **empêche** de
+  sélectionner quelques fichiers — un opérateur qui réessaie vingt images
+  renommées ne doit pas re-sélectionner les 41 323.
+
+  Le serveur refusant au-delà de 20 000 fichiers par appel, l'écran découpe en
+  lots de 5 000, les **enchaîne** (jamais en parallèle : le service traite déjà
+  fichier par fichier pour ne pas ouvrir des milliers de connexions) et recoud
+  les comptes-rendus. `balanced` est recalculé sur le total recousu — un lot
+  équilibré et un lot bancal font un ensemble bancal.
+
+  **Et le compte-rendu rend compte de chaque fichier soumis** :
+
+  ```
+  total = affiliated + ambiguous + unaffiliated + ignored
+  ```
+
+  Posé après avoir constaté deux trous, tous deux silencieux. Un fichier
+  **ambigu** était compté comme rattaché — défaut introduit en ajoutant la règle
+  elle-même, et le compte-rendu annonçait donc plus de couvertures posées qu'il
+  n'y en avait. Et un fichier qui **n'est pas une image** était écarté par le
+  filtre et compté *nulle part* : on annonçait 100 fichiers, on en expliquait 70.
+
+  Éprouvé : `AffiliationReportChecks.java` (22 contrôles, dont un total posé
+  volontairement de travers pour vérifier qu'il est dénoncé) et
+  `e2e/couvertures.spec.mjs` (15 essais, dont 12 000 noms partis en trois lots).
+
   **Ce qui reste** : le transport des 41 323 fichiers vers le service de médias
-  — un geste d'opérateur, qui ne peut pas tourner sur la passerelle — et
-  l'écran, qui porte encore un paragraphe d'excuse. La route répond déjà en
-  **essai à blanc** par défaut, ce qui est le bon comportement : on montre ce
-  qui serait rattaché avant d'écrire ;
+  — un geste d'opérateur, qui ne peut pas tourner sur la passerelle. L'écran le
+  rappelle après chaque application plutôt que de laisser croire que les images
+  sont arrivées ;
 - renommage d'une catégorie dans tout le catalogue — **l'écran Rayons le fait
   désormais** (lot H) ;
 - corrections de masse des inversions titre/auteur et des auteurs factices.
