@@ -2559,6 +2559,10 @@ export class LibraryDatabase {
       "sync_api_key",
       "cataloguing_vision_api_key",
       "cataloguing_ai_key",
+      // La clé d'appairage de l'agent se lit une seule fois, à sa création :
+      // ensuite, seule sa présence sort. Une clé qu'on peut relire à tout
+      // moment finit copiée dans une capture d'écran de dépannage.
+      "agent_key",
     ];
     const rows = this.db.prepare("SELECT key, value FROM settings").all();
     const values = Object.fromEntries(

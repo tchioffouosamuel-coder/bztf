@@ -1,12 +1,19 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import {
+  AGENT_EMPTY_EPC,
+  AGENT_MAX_BODY_BYTES,
   DEFAULT_AGENT_ORIGINS,
   agentHeaders,
+  agentKeyAccepted,
   allowOrigin,
+  generateAgentKey,
   normalizeAgentOrigin,
+  normalizeEpcToWrite,
   parseAgentOrigins,
   publicSnapshot,
+  readAgentBody,
+  writeTarget,
 } from "../lib/reader-agent.js";
 
 test("n'accepte le clair qu'en local", () => {
@@ -117,4 +124,98 @@ test("supporte un instantané vide ou abîmé", () => {
   assert.deepEqual(publicSnapshot({}).tags, []);
   assert.equal(publicSnapshot(null).count, 0);
   assert.equal(publicSnapshot(undefined).reader.connected, false);
+});
+
+// --- L'écriture, ouverte le 21 octobre 2026 -------------------------------
+
+test("une écriture sans clé réglée est refusée", () => {
+  // Fermé par défaut : un poste mis à jour vers une version qui sait écrire ne
+  // doit pas se mettre à accepter des écritures parce que personne n'a encore
+  // ouvert ses réglages.
+  assert.equal(agentKeyAccepted("peu-importe", ""), false);
+  assert.equal(agentKeyAccepted("peu-importe", null), false);
+  assert.equal(agentKeyAccepted("peu-importe", "   "), false);
+  // Et une clé réglée ne s'ouvre pas sur une demande qui n'en présente aucune.
+  assert.equal(agentKeyAccepted("", "cle-du-poste"), false);
+  assert.equal(agentKeyAccepted(undefined, "cle-du-poste"), false);
+});
+
+test("la clé d'appairage est comparée en entier", () => {
+  assert.equal(agentKeyAccepted("cle-du-poste", "cle-du-poste"), true);
+  assert.equal(agentKeyAccepted(" cle-du-poste ", "cle-du-poste"), true);
+  assert.equal(agentKeyAccepted("cle-du-poste-x", "cle-du-poste"), false);
+  assert.equal(agentKeyAccepted("cle-du-postf", "cle-du-poste"), false);
+  // Une casse différente est une autre clé : la clé n'est pas un identifiant.
+  assert.equal(agentKeyAccepted("CLE-DU-POSTE", "cle-du-poste"), false);
+});
+
+test("n'écrit que 96 bits, et rien d'autre", () => {
+  assert.equal(
+    normalizeEpcToWrite("42434d0120260000000100ab"),
+    "42434D0120260000000100AB",
+  );
+  assert.equal(normalizeEpcToWrite(" 42434D0120260000000100AB "), "42434D0120260000000100AB");
+  // 23 ou 25 caractères, c'est un tag que personne ne saura relire.
+  assert.equal(normalizeEpcToWrite("42434D0120260000000100A"), "");
+  assert.equal(normalizeEpcToWrite("42434D0120260000000100ABC"), "");
+  assert.equal(normalizeEpcToWrite("ZZ434D0120260000000100AB"), "");
+  assert.equal(normalizeEpcToWrite(""), "");
+  assert.equal(normalizeEpcToWrite(null), "");
+  // Le désencodage écrit 24 zéros : c'est un EPC écrivable comme un autre.
+  assert.equal(normalizeEpcToWrite(AGENT_EMPTY_EPC), AGENT_EMPTY_EPC);
+});
+
+test("refuse d'écrire sans un seul tag portant un TID", () => {
+  assert.match(writeTarget({ tags: [] }).error, /Aucun tag/);
+  assert.match(
+    writeTarget({ tags: [{ tid: "E2800001" }, { tid: "E2800002" }] }).error,
+    /Plusieurs tags/,
+  );
+  // Sans TID, l'écriture ne peut pas être relue en filtrant la puce, donc pas
+  // vérifiée — et une écriture non vérifiée associe un jour le mauvais livre.
+  assert.match(writeTarget({ tags: [{ epc: "AABB", tid: "" }] }).error, /TID/);
+  assert.match(writeTarget(null).error, /Aucun tag/);
+
+  const cible = writeTarget({ tags: [{ epc: "42434d01", tid: "e2800001" }] });
+  assert.equal(cible.error, undefined);
+  // Majuscules, comme partout dans le contrat : l'index ne rattrape pas deux
+  // écritures de casse différente.
+  assert.deepEqual(cible.tag, { epc: "42434D01", tid: "E2800001" });
+});
+
+test("borne le corps pendant la lecture, pas après", async () => {
+  const { Readable } = await import("node:stream");
+  const petit = Readable.from([Buffer.from(JSON.stringify({ epc: "A".repeat(24) }))]);
+  assert.deepEqual(await readAgentBody(petit), { epc: "A".repeat(24) });
+
+  const vide = Readable.from([Buffer.from("")]);
+  assert.deepEqual(await readAgentBody(vide), {});
+
+  const abime = Readable.from([Buffer.from("{ceci n'est pas du json")]);
+  await assert.rejects(() => readAgentBody(abime), /JSON/);
+
+  // Attendre la fin pour mesurer laisserait un client occuper la mémoire du
+  // poste avec un corps sans fin.
+  const enorme = Readable.from([Buffer.alloc(AGENT_MAX_BODY_BYTES + 1, 0x20)]);
+  await assert.rejects(() => readAgentBody(enorme), /volumineuse/);
+});
+
+test("la clé d'appairage évite les caractères qu'on recopie de travers", async () => {
+  const { randomBytes } = await import("node:crypto");
+  const cle = generateAgentKey(randomBytes);
+  assert.equal(cle.length, 24);
+  // Ni O ni 0, ni I ni 1 : la clé se note sur un papier et se retape ailleurs.
+  assert.match(cle, /^[ABCDEFGHJKLMNPQRSTUVWXYZ23456789]{24}$/);
+  assert.notEqual(cle, generateAgentKey(randomBytes));
+
+  // Mesure du 21 octobre 2026 : l'alphabet compte 32 symboles et 256 en est un
+  // multiple exact, donc AUCUN octet n'est rejeté et chaque octet donne une
+  // lettre. C'est ce qui rend le tirage uniforme — le rejet prévu dans le code
+  // ne sert que si l'alphabet change de taille.
+  const octets = (n) => Buffer.from(Array.from({ length: n }, (_, i) => (i % 2 ? 255 : 0)));
+  assert.equal(generateAgentKey(octets, 4), "A9A9");
+  // Toutes les valeurs d'octet tombent dans l'alphabet, aucune n'est perdue.
+  const toutes = generateAgentKey((n) => Buffer.from(Array.from({ length: n }, (_, i) => i)), 256);
+  assert.equal(toutes.length, 256);
+  assert.equal(new Set(toutes).size, 32);
 });

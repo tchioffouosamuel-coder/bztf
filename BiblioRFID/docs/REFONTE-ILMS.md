@@ -33,9 +33,9 @@ Trois chantiers, dans cet ordre :
 
 | # | Chantier | Dépôt | État |
 |---|---|---|---|
-| 1 | Purge de la couche ILMS | `sdk/BiblioRFID` | à faire |
-| 2 | Nouveau cœur métier sur le socle | `library-service`, `gateway-service`, `auth-service` | à faire |
-| 3 | Frontend réécrit de zéro | `C:\laragon\www\ilms` | à faire |
+| 1 | Purge de la couche ILMS | `sdk/BiblioRFID` | fusionnée |
+| 2 | Nouveau cœur métier sur le socle | `library-service`, `gateway-service`, `auth-service` | recherche et circulation fusionnées ; session éprouvée localement, activation en ligne à faire |
+| 3 | Frontend réécrit de zéro | `C:\laragon\www\ilms` | catalogue et circulation branchés ; huit zones restantes |
 
 Décisions arrêtées :
 
@@ -170,8 +170,10 @@ C'est le cœur de l'expérience et la partie la plus facile à rater.
   « Watchman Nee ».
 - **Disponibilité** relue à chaque recherche (prêts ouverts), sans reconstruire.
 - **Accès direct** : code-barres, cote ou ISBN exacts par index.
-  Attention : `WHERE code_barre=? OR cote=?` rend l'index partiel inutilisable
-  (58 ms de parcours complet) → **deux requêtes** (0,02 ms).
+  La mesure de 58 ms avec `WHERE code_barre=? OR cote=?` concernait l'index
+  partiel de **SQLite**. Elle ne transpose pas à PostgreSQL : le `OR` peut
+  utiliser un `BitmapOr` sur les deux index d'expression. Interroger directement
+  l'identifiant dont on connaît la nature évite néanmoins ce double parcours.
 
 Le socle a déjà Elasticsearch ; le choix index PG vs Elasticsearch est à
 trancher au chantier 2 (voir §5).
@@ -240,6 +242,24 @@ niveau — la dernière base qui a servi en premier.
   sauvegarde automatique avant.
 - Verrouillage automatique après N minutes sans activité — **jamais** pendant
   une tâche longue.
+
+**Transposition au socle en ligne, 18 octobre 2026.** Ces empreintes PBKDF2
+décrivent les comptes de la source Python. `auth-service` utilise déjà BCrypt :
+le nouvel ILMS lui délègue la vérification des mots de passe et conserve ses
+comptes, sans réencoder un hash existant ni introduire un deuxième annuaire.
+Les empreintes PBKDF2 du dump ne sont donc pas des mots de passe à remettre à
+BCrypt ; leur éventuelle reprise demande un adaptateur de vérification ou une
+réinitialisation, à traiter explicitement lors de la migration.
+
+La façade navigateur du `library-service` garde le JWT validé dans un cookie
+HttpOnly / Secure / SameSite=Strict. La base ne garde que son empreinte pour
+la révocation et l'inactivité. L'URL choisit seulement parmi les bibliothèques
+autorisées par la session. Le rôle global provient du JWT signé ; les comptes
+activés et les habilitations RFID par bibliothèque sont relus pour chaque
+action, y compris les anciennes routes de prêt. Même un administrateur doit
+être habilité nominativement à la circulation. L'UUID authentifié alimente
+`StatusHistory.changedBy` et l'audit, correspondance de `mouvement.qui`.
+Contrat, limites et configuration : `library-service/docs/SESSION-OPERATEUR.md`.
 
 ### 1.8 Le service mobile (déjà une application web)
 
@@ -450,12 +470,44 @@ Ce qui a été remis, et le périmètre qu'il ne doit pas dépasser :
 
 | | |
 |---|---|
-| Route | `GET /agent/reader/events` — **et rien d'autre** |
+| Route | `GET /agent/reader/events`, et depuis le 21/10/2026 `POST /agent/reader/write` et `POST /agent/reader/erase` |
 | Flux | SSE, événements **nommés** `snapshot` et `reader-error` |
 | Instantané | `epc`, `tid`, `rssi`, `antenna`, plus l'état du lecteur |
-| Écriture | aucune : encodage, désencodage et réglages restent derrière la session du poste |
+| Écriture | **appairée** : origine autorisée *et* clé du poste (`X-Agent-Key`). Les réglages du lecteur, eux, restent derrière la session du poste |
 | Fonds local | **n'en sort pas** : ni livre, ni abonné, ni badge |
 | Origine | réglage `agent_origins` ; à défaut la passerelle seule |
+
+**L'écriture, ouverte le 21 octobre 2026.** La ligne précédente de ce tableau
+disait « Écriture : aucune ». Elle était juste tant qu'aucun écran n'encodait.
+La zone Matériel RFID de l'ILMS encode, et **seul le poste parle à l'USB** :
+maintenir l'interdiction aurait voulu dire encoder dans la fenêtre du poste et
+cataloguer dans celle de l'ILMS, pour un seul geste, à chaque livre. C'est la
+justification qui change, pas la prudence :
+
+- le contrôle d'origine reste la première chose faite, et il ne suffit plus.
+  Une écriture exige en plus la **clé d'appairage** du poste, remise **une seule
+  fois** à sa création (`POST /api/agent/key`), notée sur papier comme la clé de
+  secours de la 3.0, et ensuite seulement attestée par `agent_key_set`. La
+  comparaison est à durée constante ;
+- **fermé par défaut** : sans clé réglée, aucune écriture ne passe. Un poste mis
+  à jour vers une version qui sait écrire ne doit pas s'ouvrir tout seul ;
+- l'agent écrit sur **le tag posé**, et seulement s'il est seul et porte un TID.
+  Il ne choisit ni le contenu — l'EPC vient de la passerelle, qui tient la
+  séquence — ni la connexion du lecteur, qui reste celle réglée sur le poste ;
+- la procédure sûre n'est pas raccourcie : écriture, **relecture en filtrant le
+  TID**, validation sur égalité exacte. Une écriture non vérifiée n'associe
+  jamais le tag ;
+- **aucune écriture ne touche le catalogue local.** Le poste dit ce que
+  l'antenne a accepté ; c'est la passerelle qui enregistre. La frontière du
+  §2.5 tient donc toujours : le poste parle du matériel, la passerelle dit ce
+  que cela signifie ;
+- lire n'abîme rien : le flux de présence, lui, ne demande toujours que
+  l'origine.
+
+Éprouvé contre un vrai poste (`tests/agent-write-smoke.mjs`, 9 essais) : base
+jetable, connexion simulée, origine étrangère refusée, écriture fermée sans clé,
+clé illisible après sa remise, écriture relue, désencodage refusé sur un autre
+TID, et réouverture impossible après retrait de la clé.
 
 Le fonds local reste dedans parce que **le poste n'est plus la référence du
 catalogue** : sa base reconnaît encore des livres, et laisser sortir son titre
@@ -620,6 +672,10 @@ Relevés sur les trois sources. Chacun a coûté un bogue réel.
 
 | Piège | Ce qui se passe | La règle |
 |---|---|---|
+| Habilitation RFID seulement enregistrée | les comptes habilités se voient dans l'administration, mais les routes de prêt ne lisent jamais cette table | relire le compte actif et l'habilitation pour chaque action ; protéger aussi les anciennes routes `/loans` et les appels directs au service |
+| Compte « introuvable ou vide » traité comme présent | `getUserInfoOrEmpty` renvoie une fiche vide après absence ou panne ; `switchIfEmpty` ne la détecte pas et une habilitation sans compte est enregistrée | vérifier l'UUID attendu et l'état activé, pas seulement la présence d'un objet |
+| Deux générations du pilote R2DBC sur le classpath | le support déclare `io.r2dbc:r2dbc-postgresql:0.8` et `org.postgresql:r2dbc-postgresql:1.0` ; le premier peut se charger mais refuse `Parameters$InParameter` au premier paramètre lié | exclure le pilote 0.8 ; exécuter une vraie requête paramétrée, une compilation ne révèle pas cette incompatibilité |
+| Cookie remplacé dans un autre onglet | l'écran garde le nom du premier opérateur mais le navigateur envoie déjà le cookie du suivant | lier chaque appel, même une lecture, à la preuve de sa session ; refuser une preuve périmée ; fermer le flux lecteur et les abonnements avec l'écran |
 | Fenêtre modale pendant un scan | la douchette tape dans la boîte de dialogue | message dans le bandeau + bip, **jamais** de fenêtre bloquante |
 | `WHERE code_barre=? OR cote=?` | sous SQLite, l'index **partiel** devenait inutilisable : parcours complet (58 ms). **Vérifié le 18/10/2026 : ne transpose pas.** Sous PostgreSQL, avec deux index d'**expression**, le `OR` est servi par un `BitmapOr` | interroger le chemin que l'on connaît — on sait presque toujours si l'on tient un code-barres ou une cote. Préférable (un parcours d'index au lieu de deux plus une revalidation), mais plus un écart d'un facteur mille |
 | Colonne absente de l'export | un cycle export → réimport la perd | toute colonne utile dans l'export **et** ses alias |

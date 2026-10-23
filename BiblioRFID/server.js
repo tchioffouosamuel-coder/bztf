@@ -22,12 +22,21 @@ import { isBadgeEpc, isCardEpc, isValidEpc } from "./lib/epc.js";
 import { CataloguingService } from "./lib/cataloguing/service.js";
 import { handleCataloguingRequest } from "./lib/cataloguing/routes.js";
 import {
+  AGENT_EMPTY_EPC,
+  AGENT_ERASE_PATH,
   AGENT_EVENTS_PATH,
+  AGENT_KEY_HEADER,
+  AGENT_WRITE_PATH,
   DEFAULT_AGENT_ORIGINS,
   agentHeaders,
+  agentKeyAccepted,
   allowOrigin,
+  generateAgentKey as buildAgentKey,
+  normalizeEpcToWrite,
   parseAgentOrigins,
   publicSnapshot,
+  readAgentBody,
+  writeTarget,
 } from "./lib/reader-agent.js";
 
 const execFileAsync = promisify(execFile);
@@ -762,10 +771,140 @@ async function handlePhoneCameraPublicRequest(request, response, url) {
   }
 }
 
+/** Une clé d'appairage neuve, tirée du générateur du système. */
+function generateAgentKey() {
+  return buildAgentKey(randomBytes);
+}
+
 /** Les origines que l'agent sert, telles qu'elles sont réglées. */
 function agentOrigins() {
   const regle = db.getSetting("agent_origins", "");
   return parseAgentOrigins(regle || DEFAULT_AGENT_ORIGINS);
+}
+
+/** Une réponse JSON de l'agent, avec les en-têtes de son origine. */
+function agentJson(response, origine, status, payload) {
+  response.writeHead(status, agentHeaders(origine, "application/json; charset=utf-8"));
+  return response.end(JSON.stringify(payload));
+}
+
+/**
+ * Écrire sur le tag posé : encoder, ou désencoder.
+ *
+ * <p>C'est la procédure sûre de `PROTOCOL.md`, et elle n'est pas raccourcie :
+ * un seul tag, un TID, écriture, <b>relecture en filtrant ce TID</b>, et
+ * validation sur égalité exacte. Une écriture non relue associerait un jour un
+ * TID au mauvais livre, et c'est un bogue qui ne se voit que des mois plus
+ * tard, quand un lecteur rend un livre qui en était un autre.
+ *
+ * <p>Ce que cette route ne fait pas, et ne doit pas faire : toucher au
+ * catalogue local. Le poste n'est plus la référence du fonds. Il dit ce que
+ * l'antenne a accepté ; c'est la passerelle qui enregistre, après quoi les
+ * deux disent la même chose parce qu'une seule a écrit.
+ */
+async function agentWrite(request, response, url, origine) {
+  if (!agentKeyAccepted(request.headers[AGENT_KEY_HEADER], db.getSetting("agent_key", ""))) {
+    // Fermé par défaut : sans clé réglée sur le poste, aucune écriture ne
+    // passe. Un poste mis à jour ne doit pas s'ouvrir tout seul.
+    return agentJson(response, origine, 403, {
+      ok: false,
+      error:
+        "Écriture refusée : clé d'appairage absente ou incorrecte. "
+        + "Réglez la clé du poste et donnez-la à l'ILMS.",
+    });
+  }
+
+  const desencodage = url.pathname === AGENT_ERASE_PATH;
+  let corps;
+  try {
+    corps = await readAgentBody(request);
+  } catch (error) {
+    return agentJson(response, origine, 400, { ok: false, error: error.message });
+  }
+
+  const epc = desencodage ? AGENT_EMPTY_EPC : normalizeEpcToWrite(corps.epc);
+  if (!epc) {
+    return agentJson(response, origine, 400, {
+      ok: false,
+      error: "EPC invalide : 24 caractères hexadécimaux sont attendus.",
+    });
+  }
+
+  try {
+    // La connexion vient des réglages du poste, jamais de la demande : prise
+    // de l'URL ou du corps, le port série et l'adresse du lecteur
+    // deviendraient réglables à distance.
+    await ensureReaderConnection(
+      normalizeConnection({
+        type: db.getSetting("connection_type", "usb"),
+        endpoint: db.getSetting("connection_endpoint", ""),
+      }),
+    );
+
+    const cible = writeTarget(currentSnapshot({ raw: true }));
+    if (cible.error) {
+      return agentJson(response, origine, 409, { ok: false, error: cible.error });
+    }
+
+    // Au désencodage, l'appelant peut dire quel tag il croit effacer. On le
+    // vérifie plutôt que de l'ignorer : effacer le tag voisin de celui qu'on
+    // visait rendrait un livre introuvable sans que personne le sache.
+    const attendu = String(corps.tid ?? "").trim().toUpperCase();
+    if (attendu && attendu !== cible.tag.tid) {
+      return agentJson(response, origine, 409, {
+        ok: false,
+        error: "Le tag posé n'est pas celui attendu.",
+      });
+    }
+
+    let resultat;
+    if (reader.connection?.type === "simulation" || db.getSetting("connection_type", "usb") === "simulation") {
+      simulatedTag = { ...simulatedTag, epc, tid: cible.tag.tid };
+      resultat = { ok: true, verified: true, tag: { ...simulatedTag } };
+    } else {
+      resultat = normalizeBridgePayload(await reader.write(epc, cible.tag.tid));
+    }
+
+    if (!resultat.verified || resultat.tag?.epc !== epc || resultat.tag?.tid !== cible.tag.tid) {
+      throw new Error("L'écriture n'a pas pu être vérifiée par relecture.");
+    }
+
+    // La présence suit le tag réécrit : son EPC vient de changer, et le laisser
+    // sous son ancienne clé ferait apparaître deux tags là où il n'y en a qu'un.
+    const ancienne = presenceKey(cible.tag);
+    presentTags.delete(ancienne);
+    stableTags.delete(ancienne);
+    const presence = { tag: resultat.tag, lastSeen: Date.now() };
+    presentTags.set(presenceKey(resultat.tag), presence);
+    stableTags.set(presenceKey(resultat.tag), presence);
+    broadcastSnapshot(true);
+
+    db.addActivity(
+      desencodage ? "desencodage" : "ecriture",
+      "succes",
+      null,
+      "Demandé par l'ILMS",
+      epc,
+      resultat.tag.tid,
+    );
+    return agentJson(response, origine, 200, {
+      ok: true,
+      verified: true,
+      tag: { epc: resultat.tag.epc, tid: resultat.tag.tid },
+    });
+  } catch (error) {
+    db.addActivity(
+      desencodage ? "desencodage" : "ecriture",
+      "echec",
+      null,
+      error.message,
+      epc,
+      null,
+    );
+    // 503 et non 500 : le matériel n'a pas répondu comme attendu, et la
+    // demande est rejouable une fois le tag reposé.
+    return agentJson(response, origine, 503, { ok: false, error: error.message });
+  }
 }
 
 /**
@@ -776,9 +915,11 @@ function agentOrigins() {
  * donc le contrôle d'origine qui tient lieu de porte, et il doit rester la
  * première chose que fait cette fonction.
  *
- * <p>Lecture seule. Toute écriture — encodage, désencodage, réglage — reste
- * derrière la session du poste : une page distante ne doit pas pouvoir
- * réécrire un tag.
+ * <p>Lecture libre, écriture appairée. Le flux de présence ne demande que
+ * l'origine ; encoder ou désencoder demande en plus la clé du poste, parce
+ * qu'une écriture abîme un tag et qu'une lecture n'abîme rien. Les réglages du
+ * lecteur, eux, restent derrière la session du poste : la connexion de
+ * l'antenne n'a pas à être réglable à distance.
  */
 function agent(request, response, url) {
   const origine = allowOrigin(request.headers.origin, agentOrigins());
@@ -792,10 +933,18 @@ function agent(request, response, url) {
   if (request.method === "OPTIONS") {
     response.writeHead(204, {
       ...agentHeaders(origine, "text/plain"),
-      "Access-Control-Allow-Methods": "GET, OPTIONS",
+      "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+      "Access-Control-Allow-Headers": `Content-Type, ${AGENT_KEY_HEADER}`,
       "Access-Control-Max-Age": "600",
     });
     return response.end();
+  }
+
+  if (
+    request.method === "POST" &&
+    (url.pathname === AGENT_WRITE_PATH || url.pathname === AGENT_ERASE_PATH)
+  ) {
+    return agentWrite(request, response, url, origine);
   }
 
   if (request.method !== "GET" || url.pathname !== AGENT_EVENTS_PATH) {
@@ -1129,11 +1278,46 @@ async function api(request, response, url) {
   if (request.method === "PUT" && pathname === "/api/settings") {
     const input = await readBody(request);
     const connection = normalizeConnection(input);
-    db.setSettings({
+    const reglages = {
       connection_type: connection.type,
       connection_endpoint: connection.endpoint,
-    });
+    };
+    // Les origines de l'agent se règlent ici, et elles se valident à
+    // l'écriture : un réglage abîmé découvert au moment où l'ILMS appelle
+    // coûterait une intervention sur place.
+    if (typeof input.agent_origins === "string") {
+      const origines = parseAgentOrigins(input.agent_origins);
+      if (input.agent_origins.trim() && origines.length === 0) {
+        return json(response, 400, {
+          error:
+            "Aucune origine valide : HTTPS exacte, ou HTTP en local seulement.",
+        });
+      }
+      reglages.agent_origins = origines.join(" ");
+    }
+    db.setSettings(reglages);
     return json(response, 200, db.settings());
+  }
+
+  // La clé d'appairage de l'agent : remise UNE SEULE FOIS, comme la clé de
+  // secours de la 3.0. Elle se note, se colle dans l'ILMS, et ne se relit
+  // plus — une clé relisible finit dans une capture d'écran de dépannage.
+  if (request.method === "POST" && pathname === "/api/agent/key") {
+    const cle = generateAgentKey();
+    db.setSettings({ agent_key: cle });
+    db.addActivity("agent", "succes", null, "Clé d'appairage de l'agent renouvelée");
+    return json(response, 200, {
+      key: cle,
+      note: "Notez cette clé : elle ne sera plus affichée.",
+    });
+  }
+
+  if (request.method === "DELETE" && pathname === "/api/agent/key") {
+    // Retirer la clé referme l'écriture : c'est le geste à faire quand un
+    // poste quitte le service, et il ne doit pas demander de réfléchir.
+    db.setSettings({ agent_key: "" });
+    db.addActivity("agent", "succes", null, "Clé d'appairage retirée : écriture fermée");
+    return json(response, 200, { ok: true });
   }
   if (request.method === "GET" && pathname === "/api/sync/status")
     return json(response, 200, syncService.status());
